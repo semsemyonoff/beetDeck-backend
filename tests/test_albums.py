@@ -1,0 +1,325 @@
+"""Tests for albums blueprint routes: /api/album/<id>, /api/album/<id>/track/<id>/tags."""
+
+import sqlite3
+
+from tests.conftest import insert_album, insert_item
+
+# ---------------------------------------------------------------------------
+# GET /api/album/<id>
+# ---------------------------------------------------------------------------
+
+
+class TestAlbumDetail:
+    def test_returns_404_for_missing_album(self, client):
+        resp = client.get("/api/album/9999")
+        assert resp.status_code == 404
+        assert resp.get_json()["error"] == "Album not found"
+
+    def test_returns_album_fields(self, client, db_path):
+        album_id = insert_album(
+            db_path,
+            album="OK Computer",
+            albumartist="Radiohead",
+            year=1997,
+            original_year=1997,
+            label="Parlophone",
+            mb_albumid="abc-123",
+            genre="Alternative Rock",
+        )
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["id"] == album_id
+        assert data["album"] == "OK Computer"
+        assert data["albumartist"] == "Radiohead"
+        assert data["year"] == 1997
+        assert data["label"] == "Parlophone"
+        assert data["mb_albumid"] == "abc-123"
+        assert data["genre"] == "Alternative Rock"
+
+    def test_tracks_list_present(self, client, db_path):
+        album_id = insert_album(db_path, album="The Wall", albumartist="Pink Floyd")
+        insert_item(db_path, album_id, title="Another Brick", track=1, disc=1)
+        insert_item(db_path, album_id, title="Comfortably Numb", track=2, disc=2)
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data["tracks"]) == 2
+
+    def test_tracks_sorted_by_disc_then_track(self, client, db_path):
+        album_id = insert_album(db_path, album="Multi Disc", albumartist="Artist A")
+        insert_item(db_path, album_id, title="D2T1", track=1, disc=2)
+        insert_item(db_path, album_id, title="D1T1", track=1, disc=1)
+        insert_item(db_path, album_id, title="D1T2", track=2, disc=1)
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        titles = [t["title"] for t in resp.get_json()["tracks"]]
+        assert titles == ["D1T1", "D1T2", "D2T1"]
+
+    def test_track_fields_present(self, client, db_path):
+        album_id = insert_album(db_path, album="Abbey Road", albumartist="The Beatles")
+        insert_item(
+            db_path,
+            album_id,
+            title="Come Together",
+            artist="The Beatles",
+            track=1,
+            disc=1,
+            length=259.0,
+            format="FLAC",
+            bitrate=1000,
+            samplerate=44100,
+        )
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        track = resp.get_json()["tracks"][0]
+        assert track["title"] == "Come Together"
+        assert track["artist"] == "The Beatles"
+        assert track["track"] == 1
+        assert track["disc"] == 1
+        assert track["length"] == "4:19"
+        assert track["format"] == "FLAC"
+        assert track["bitrate"] == 1000
+        assert track["samplerate"] == 44100
+        assert "has_lrc" in track
+
+    def test_has_lrc_false_for_nonexistent_file(self, client, db_path):
+        album_id = insert_album(db_path, album="Album", albumartist="Artist")
+        insert_item(
+            db_path,
+            album_id,
+            title="Track",
+            path=b"/nonexistent/path/track.mp3",
+        )
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        track = resp.get_json()["tracks"][0]
+        assert track["has_lrc"] is False
+
+    def test_tagged_false_by_default(self, client, db_path):
+        album_id = insert_album(db_path, album="Untagged", albumartist="Artist B")
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        assert resp.get_json()["tagged"] is False
+
+    def test_tagged_true_when_attribute_set(self, client, db_path):
+        album_id = insert_album(db_path, album="Tagged", albumartist="Artist C")
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "INSERT INTO album_attributes (entity_id, key, value) VALUES (?, 'beetdeck_tagged', '1')",
+            (album_id,),
+        )
+        conn.commit()
+        conn.close()
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        assert resp.get_json()["tagged"] is True
+
+    def test_has_cover_false_when_no_artpath(self, client, db_path):
+        album_id = insert_album(db_path, album="No Cover", albumartist="Artist D", artpath=None)
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        assert resp.get_json()["has_cover"] is False
+
+    def test_genre_formatted(self, client, db_path):
+        album_id = insert_album(db_path, album="Genred", albumartist="Artist E", genre="Rock")
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        assert resp.get_json()["genre"] == "Rock"
+
+    def test_genres_field_takes_precedence_over_genre(self, client, db_path):
+        """beets 2.10.0 stores genres in a list field; genres column takes precedence."""
+        album_id = insert_album(
+            db_path,
+            album="Multi Genre",
+            albumartist="Artist X",
+            genre="Old Genre",
+            genres="Electronic, Ambient",
+        )
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        assert resp.get_json()["genre"] == "Electronic, Ambient"
+
+    def test_empty_album_has_no_tracks(self, client, db_path):
+        album_id = insert_album(db_path, album="Empty", albumartist="Artist F")
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        assert resp.get_json()["tracks"] == []
+
+    def test_length_formatted_as_mm_ss(self, client, db_path):
+        album_id = insert_album(db_path, album="Timed", albumartist="Artist G")
+        insert_item(db_path, album_id, title="Short", length=65.0)
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        assert resp.get_json()["tracks"][0]["length"] == "1:05"
+
+    def test_length_zero_returns_empty_string(self, client, db_path):
+        album_id = insert_album(db_path, album="Quiet", albumartist="Artist H")
+        insert_item(db_path, album_id, title="Silence", length=None)
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        assert resp.get_json()["tracks"][0]["length"] == ""
+
+    def test_path_field_present(self, client, db_path):
+        album_id = insert_album(db_path, album="Pathed", albumartist="Artist I")
+        insert_item(db_path, album_id, title="Track", path=b"/music/artist/album/track.mp3")
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        assert resp.get_json()["path"] == "/music/artist/album"
+
+    def test_single_disc_multi_disc_false(self, client, db_path):
+        album_id = insert_album(db_path, album="Solo", albumartist="Artist S")
+        insert_item(
+            db_path,
+            album_id,
+            title="T1",
+            track=1,
+            disc=1,
+            length=120.0,
+            path=b"/music/artist/solo/01.mp3",
+        )
+        insert_item(
+            db_path,
+            album_id,
+            title="T2",
+            track=2,
+            disc=1,
+            length=180.0,
+            path=b"/music/artist/solo/02.mp3",
+        )
+        data = client.get(f"/api/album/{album_id}").get_json()
+        assert data["multi_disc"] is False
+        assert len(data["discs"]) == 1
+        assert data["discs"][0]["disc"] == 1
+        assert data["discs"][0]["dir"] == "/music/artist/solo"
+        assert data["discs"][0]["track_count"] == 2
+        assert data["discs"][0]["duration_sec"] == 300
+        assert data["path"] == "/music/artist/solo"
+
+    def test_multi_disc_true_with_two_discs(self, client, db_path):
+        album_id = insert_album(db_path, album="The Wall", albumartist="Pink Floyd")
+        insert_item(
+            db_path,
+            album_id,
+            title="D1T1",
+            track=1,
+            disc=1,
+            length=200.0,
+            path=b"/music/pink floyd/the wall/CD1/01.mp3",
+        )
+        insert_item(
+            db_path,
+            album_id,
+            title="D1T2",
+            track=2,
+            disc=1,
+            length=220.0,
+            path=b"/music/pink floyd/the wall/CD1/02.mp3",
+        )
+        insert_item(
+            db_path,
+            album_id,
+            title="D2T1",
+            track=1,
+            disc=2,
+            length=300.0,
+            path=b"/music/pink floyd/the wall/CD2/01.mp3",
+        )
+        data = client.get(f"/api/album/{album_id}").get_json()
+        assert data["multi_disc"] is True
+        assert data["path"] == "/music/pink floyd/the wall"
+        assert len(data["discs"]) == 2
+        d1, d2 = data["discs"]
+        assert d1["disc"] == 1
+        assert d1["dir"] == "/music/pink floyd/the wall/CD1"
+        assert d1["track_count"] == 2
+        assert d1["duration_sec"] == 420
+        assert d2["disc"] == 2
+        assert d2["dir"] == "/music/pink floyd/the wall/CD2"
+        assert d2["track_count"] == 1
+        assert d2["duration_sec"] == 300
+
+    def test_track_disc_coerced_to_int_when_null(self, client, db_path):
+        album_id = insert_album(db_path, album="NullDisc", albumartist="Artist Z")
+        insert_item(db_path, album_id, title="T1", track=1, disc=None)
+        data = client.get(f"/api/album/{album_id}").get_json()
+        assert data["tracks"][0]["disc"] == 1
+
+    def test_original_year_preferred_over_year(self, client, db_path):
+        album_id = insert_album(
+            db_path, album="Reissue", albumartist="Artist J", year=2005, original_year=1975
+        )
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        assert resp.get_json()["year"] == 1975
+
+
+# ---------------------------------------------------------------------------
+# GET /api/album/<id>/track/<id>/tags
+# ---------------------------------------------------------------------------
+
+
+class TestTrackTags:
+    def test_returns_404_for_missing_track(self, client, db_path):
+        album_id = insert_album(db_path, album="Album", albumartist="Artist")
+        resp = client.get(f"/api/album/{album_id}/track/9999/tags")
+        assert resp.status_code == 404
+        assert resp.get_json()["error"] == "Track not found"
+
+    def test_returns_404_when_track_belongs_to_different_album(self, client, db_path):
+        album_id_a = insert_album(db_path, album="Album A", albumartist="Artist A")
+        album_id_b = insert_album(db_path, album="Album B", albumartist="Artist B")
+        item_id = insert_item(db_path, album_id_b, title="Track B")
+        resp = client.get(f"/api/album/{album_id_a}/track/{item_id}/tags")
+        assert resp.status_code == 404
+
+    def test_returns_track_tags(self, client, db_path):
+        album_id = insert_album(db_path, album="Tagging Album", albumartist="Artist K")
+        item_id = insert_item(
+            db_path,
+            album_id,
+            title="Tagged Track",
+            artist="Artist K",
+            format="FLAC",
+            year=2000,
+        )
+        resp = client.get(f"/api/album/{album_id}/track/{item_id}/tags")
+        assert resp.status_code == 200
+        tags = resp.get_json()
+        assert tags["title"] == "Tagged Track"
+        assert tags["artist"] == "Artist K"
+        assert tags["format"] == "FLAC"
+
+    def test_excludes_id_album_id_path_keys(self, client, db_path):
+        album_id = insert_album(db_path, album="Private Album", albumartist="Artist L")
+        item_id = insert_item(db_path, album_id, title="Track L")
+        resp = client.get(f"/api/album/{album_id}/track/{item_id}/tags")
+        assert resp.status_code == 200
+        tags = resp.get_json()
+        assert "id" not in tags
+        assert "album_id" not in tags
+        assert "path" not in tags
+
+    def test_includes_item_attributes(self, client, db_path):
+        album_id = insert_album(db_path, album="Attr Album", albumartist="Artist M")
+        item_id = insert_item(db_path, album_id, title="Attr Track")
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "INSERT INTO item_attributes (entity_id, key, value) VALUES (?, 'custom_key', 'custom_value')",
+            (item_id,),
+        )
+        conn.commit()
+        conn.close()
+        resp = client.get(f"/api/album/{album_id}/track/{item_id}/tags")
+        assert resp.status_code == 200
+        tags = resp.get_json()
+        assert tags.get("custom_key") == "custom_value"
+
+    def test_skips_empty_and_zero_values(self, client, db_path):
+        album_id = insert_album(db_path, album="Sparse Album", albumartist="Artist N")
+        item_id = insert_item(db_path, album_id, title="Sparse Track", bitrate=0, samplerate=0)
+        resp = client.get(f"/api/album/{album_id}/track/{item_id}/tags")
+        assert resp.status_code == 200
+        tags = resp.get_json()
+        assert "bitrate" not in tags
+        assert "samplerate" not in tags

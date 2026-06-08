@@ -1,0 +1,681 @@
+"""Items routes for beetDeek — management of untagged/loose items.
+
+Design decisions:
+- Album creation from loose items: lib.add_album(items) creates a new album
+  record and updates each item's album_id in the DB. This is NOT atomic with
+  file tag writes. Strategy: (1) create album + apply DB metadata first,
+  (2) then write tags to files. On DB failure: rollback via album.remove()
+  and restore original album_id on each item. On partial file-write failure:
+  DB state is committed; already-written files retain new tags (best-effort).
+  Warnings are returned in the response — the caller can re-run or fix manually.
+- Item reassignment: items may already belong to another album (e.g. a
+  catch-all "Unknown" album). After confirm, the old album may become empty;
+  we do NOT auto-delete it — that is the user's responsibility.
+- Autotag input: autotag.tag_album() receives Item objects loaded via
+  lib.get_item(id). The resulting AlbumMatch.mapping keys are those same items.
+  No temporary album is created for the autotag step; it operates on items
+  directly.
+
+Endpoints:
+    GET    /api/items/untagged                          — list items with NULL/empty albumartist
+    POST   /api/items/<item_id>/metadata                — update artist/album on single item
+    POST   /api/items/identify                          — start background identification
+    GET    /api/items/identify/<task_id>/status         — poll identification status
+    POST   /api/items/identify/<task_id>/apply          — preview diff for a candidate
+    POST   /api/items/identify/<task_id>/confirm        — create album and write tags
+"""
+
+import threading
+
+from flask import Blueprint, current_app, jsonify, request
+
+from src import state
+from src.utils import (
+    _get_ro_conn,
+    _get_task_json,
+    _init_beets,
+    _resolve_path,
+    _serialize_candidate,
+    _try_write_item,
+    log,
+)
+
+bp = Blueprint("items", __name__)
+
+# Fields that apply_metadata() may write to item rows.  Captured before any
+# store() call so the rollback path can fully restore the original DB state.
+# Covers all fields that beets writes via item.update(data) in AlbumMatch.apply_metadata():
+# - TrackInfo.item_data fields (after MEDIA_FIELD_MAP renaming: track_id→mb_trackid,
+#   release_track_id→mb_releasetrackid, medium→disc, medium_index→track,
+#   artist_id→mb_artistid, artists_ids→mb_artistids)
+# - AlbumInfo.item_data fields merged in via merge_with_album() (after renaming:
+#   album_id→mb_albumid, artist→albumartist, artists→albumartists,
+#   artist_id→mb_albumartistid, artists_ids→mb_albumartistids,
+#   artist_credit→albumartist_credit, artists_credit→albumartists_credit,
+#   artist_sort→albumartist_sort, artists_sort→albumartists_sort,
+#   mediums→disctotal, releasegroup_id→mb_releasegroupid, va→comp)
+# Also covers fields cleared by item.clear() when import.from_scratch is enabled:
+# item.clear() sets all Item._media_tag_fields to None before item.update(data) is
+# called, so a mid-flight failure can permanently zero out any _media_tag_field not
+# in this snapshot.  All writable media tag fields are included below to handle
+# both the normal update path and the from_scratch clear+update path.
+_ROLLBACK_FIELDS = (
+    # Core title/artist fields
+    "title",
+    "artist",
+    "artist_credit",
+    "artists",
+    "artists_credit",
+    "artist_sort",
+    "artists_sort",
+    # Album-level artist fields
+    "album",
+    "albumartist",
+    "albumartist_credit",
+    "albumartists",
+    "albumartists_credit",
+    "albumartist_sort",
+    "albumartists_sort",
+    # Date fields
+    "year",
+    "month",
+    "day",
+    "original_year",
+    "original_month",
+    "original_day",
+    # Track/disc numbering
+    "track",
+    "tracktotal",
+    "disc",
+    "disctotal",
+    "track_alt",
+    "disctitle",
+    # Release metadata
+    "comp",
+    "genres",
+    "albumtype",
+    "albumtypes",
+    "albumstatus",
+    "albumdisambig",
+    "label",
+    "catalognum",
+    "barcode",
+    "country",
+    "media",
+    "language",
+    "asin",
+    "isrc",
+    "script",
+    "style",
+    "release_group_title",
+    "releasegroupdisambig",
+    # Discogs fields
+    "discogs_albumid",
+    "discogs_artistid",
+    "discogs_labelid",
+    # Classical/extended track fields
+    "arranger",
+    "bpm",
+    "composer",
+    "composer_sort",
+    "initial_key",
+    "length",
+    "lyricist",
+    "remixer",
+    "trackdisambig",
+    "work",
+    "work_disambig",
+    # Provenance
+    "data_source",
+    "data_url",
+    # MusicBrainz IDs
+    "mb_trackid",
+    "mb_albumid",
+    "mb_albumartistid",
+    "mb_albumartistids",
+    "mb_artistid",
+    "mb_artistids",
+    "mb_releasetrackid",
+    "mb_releasegroupid",
+    "mb_workid",
+    # Fields cleared by item.clear() in from_scratch mode that are NOT written
+    # back by item.update(match_data) — must be snapped so rollback restores them.
+    "comments",
+    "encoder",
+    "grouping",
+    "lyrics",
+    # ReplayGain / R128 loudness fields
+    "rg_track_gain",
+    "rg_track_peak",
+    "rg_album_gain",
+    "rg_album_peak",
+    "r128_track_gain",
+    "r128_album_gain",
+    # AcoustID fingerprint fields
+    "acoustid_fingerprint",
+    "acoustid_id",
+)
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+
+def _run_items_identify(task_key, item_ids, search_artist, search_album, library_db, library_dir):
+    """Background thread: run beets autotag on a list of item IDs."""
+    task = state.identify_tasks[task_key]
+    lib = None
+    try:
+        from beets import autotag
+
+        log.info(
+            "Items identify task=%s item_ids=%r artist=%r album=%r",
+            task_key,
+            item_ids,
+            search_artist,
+            search_album,
+        )
+
+        lib = _init_beets(library_db, library_dir)
+
+        items = []
+        for item_id in item_ids:
+            item = lib.get_item(item_id)
+            if item is None:
+                with state.identify_lock:
+                    task["status"] = "error"
+                    task["error"] = f"Item {item_id} not found"
+                return
+            items.append(item)
+
+        if not items:
+            with state.identify_lock:
+                task["status"] = "error"
+                task["error"] = "No items to identify"
+            return
+
+        try:
+            _artist, _album_name, proposal = autotag.tag_album(
+                items,
+                search_artist=search_artist or None,
+                search_name=search_album or None,
+                search_ids=[],
+            )
+        except Exception as e:
+            log.exception("Autotag failed for items task %s", task_key)
+            with state.identify_lock:
+                task["status"] = "error"
+                task["error"] = f"Autotag failed: {e}"
+            return
+
+        matches = list(proposal.candidates[:5])
+        matches.sort(key=lambda m: float(m.distance))
+        candidates = [_serialize_candidate(i, m) for i, m in enumerate(matches)]
+
+        log.info("Items identify done task=%s: %d candidates", task_key, len(candidates))
+
+        with state.identify_lock:
+            task["_matches"] = matches
+            task["_lib"] = lib
+            lib = None
+            task["candidates"] = candidates
+            task["status"] = "done"
+
+    except Exception as e:
+        log.exception("Items identify error task=%s", task_key)
+        with state.identify_lock:
+            task["status"] = "error"
+            task["error"] = str(e)
+    finally:
+        if lib is not None:
+            lib._close()
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+
+@bp.route("/api/items/untagged")
+def untagged_items():
+    """Return items belonging to albums with NULL or empty albumartist."""
+    try:
+        conn = _get_ro_conn()
+        try:
+            rows = conn.execute(
+                """
+                SELECT i.id, i.title, i.artist, i.album, i.path, i.track,
+                       i.album_id, a.albumartist
+                FROM items i
+                JOIN albums a ON a.id = i.album_id
+                WHERE (a.albumartist IS NULL OR a.albumartist = '')
+                ORDER BY i.album, i.track, i.title
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    result = []
+    for r in rows:
+        result.append(
+            {
+                "id": r["id"],
+                "title": r["title"] or "",
+                "artist": r["artist"] or "",
+                "album": r["album"] or "",
+                "path": _resolve_path(r["path"]) if r["path"] else "",
+                "track": r["track"] or 0,
+                "album_id": r["album_id"],
+            }
+        )
+    return jsonify(result)
+
+
+@bp.route("/api/items/<int:item_id>/metadata", methods=["POST"])
+def update_metadata(item_id):
+    """Update artist and album fields on a single item via beets Library."""
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    artist = (data.get("artist") or "").strip()
+    album = (data.get("album") or "").strip()
+
+    if not title and not artist and not album:
+        return jsonify({"error": "At least one of title, artist, or album must be provided"}), 400
+
+    library_db = current_app.config["LIBRARY_DB"]
+    library_dir = current_app.config.get("LIBRARY_ROOT") or None
+    lib = None
+    try:
+        lib = _init_beets(library_db, library_dir)
+        item = lib.get_item(item_id)
+        if item is None:
+            return jsonify({"error": "Item not found"}), 404
+
+        if title:
+            item.title = title
+        if artist:
+            item.artist = artist
+        if album:
+            item.album = album
+        item.store()
+
+        if not _try_write_item(item):
+            log.warning("Failed to write tags for item %d after metadata update", item_id)
+            return jsonify(
+                {"status": "ok", "item_id": item_id, "warnings": ["file tag write failed"]}
+            ), 200
+
+        return jsonify({"status": "ok", "item_id": item_id})
+    except Exception as e:
+        log.exception("Failed to update metadata for item %d", item_id)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if lib is not None:
+            lib._close()
+
+
+@bp.route("/api/items/identify", methods=["POST"])
+def items_identify():
+    """Start background identification for a list of item IDs."""
+    data = request.get_json(silent=True) or {}
+    item_ids = data.get("item_ids", [])
+    search_artist = data.get("search_artist", "")
+    search_album = data.get("search_album", "")
+
+    if not item_ids:
+        return jsonify({"error": "item_ids must be a non-empty list"}), 400
+
+    if not isinstance(item_ids, list) or not all(isinstance(i, int) for i in item_ids):
+        return jsonify({"error": "item_ids must be a list of integers"}), 400
+
+    import uuid
+
+    library_db = current_app.config["LIBRARY_DB"]
+    library_dir = current_app.config.get("LIBRARY_ROOT") or None
+
+    task_id = str(uuid.uuid4())
+    task_key = f"items_{task_id}"
+
+    task = {
+        "task_id": task_id,
+        "item_ids": item_ids,
+        "status": "running",
+        "candidates": [],
+        "error": None,
+    }
+    with state.identify_lock:
+        # Remove any previously completed items tasks; close open _lib handles to
+        # avoid leaking SQLite connections. Items tasks are UUID-keyed so they
+        # accumulate without cleanup.
+        stale_keys = [
+            k
+            for k, v in state.identify_tasks.items()
+            if k.startswith("items_") and v.get("status") in ("done", "error")
+        ]
+        for k in stale_keys:
+            old_lib = state.identify_tasks.pop(k).get("_lib")
+            if old_lib is not None:
+                try:
+                    old_lib._close()
+                except Exception:
+                    pass
+        state.identify_tasks[task_key] = task
+
+    t = threading.Thread(
+        target=_run_items_identify,
+        args=(task_key, item_ids, search_artist, search_album, library_db, library_dir),
+        daemon=True,
+    )
+    t.start()
+
+    return jsonify({"status": "started", "task_id": task_id})
+
+
+@bp.route("/api/items/identify/<task_id>/status")
+def items_identify_status(task_id):
+    task_key = f"items_{task_id}"
+    with state.identify_lock:
+        task = state.identify_tasks.get(task_key)
+        task_json = _get_task_json(task) if task else None
+    if task_json is None:
+        return jsonify({"status": "idle"})
+    return jsonify(task_json)
+
+
+@bp.route("/api/items/identify/<task_id>/apply", methods=["POST"])
+def items_apply(task_id):
+    """Preview what would change if the selected candidate is applied."""
+    data = request.get_json(silent=True) or {}
+    candidate_index = data.get("candidate_index", 0)
+    if not isinstance(candidate_index, int):
+        return jsonify({"error": "candidate_index must be an integer"}), 400
+
+    task_key = f"items_{task_id}"
+    with state.identify_lock:
+        task = state.identify_tasks.get(task_key)
+        if not task or task.get("status") != "done":
+            return jsonify({"error": "No identification results"}), 400
+        matches = task.get("_matches", [])
+
+    if candidate_index < 0 or candidate_index >= len(matches):
+        return jsonify({"error": "Invalid candidate index"}), 400
+
+    album_match = matches[candidate_index]
+    info = album_match.info
+
+    track_diffs = []
+    for item, track_info in album_match.mapping.items():
+        diff_entry = {"track": item.track}
+        for field in ["title", "artist"]:
+            old_val = getattr(item, field, "") or ""
+            new_val = getattr(track_info, field, old_val) or ""
+            diff_entry[field] = {"old": str(old_val), "new": str(new_val)}
+        track_diffs.append(diff_entry)
+    track_diffs.sort(key=lambda t: t["track"] or 0)
+
+    # Album-level diff: items are loose (no existing album), old values are empty
+    album_data = info.item_data if hasattr(info, "item_data") else {}
+    album_diff = {}
+    for field in ["album", "albumartist", "year", "label", "mb_albumid"]:
+        old_val = ""
+        if field == "mb_albumid":
+            new_val = info.album_id or ""
+        elif field == "albumartist":
+            new_val = album_data.get("albumartist", info.artist) or ""
+        elif field == "album":
+            new_val = album_data.get("album", info.album) or ""
+        elif field == "year":
+            new_val = album_data.get("year", info.year) or ""
+        else:
+            new_val = album_data.get(field, "") or ""
+        album_diff[field] = {"old": str(old_val), "new": str(new_val)}
+
+    return jsonify(
+        {
+            "candidate_index": candidate_index,
+            "album": album_diff,
+            "tracks": track_diffs,
+        }
+    )
+
+
+@bp.route("/api/items/identify/<task_id>/confirm", methods=["POST"])
+def items_confirm(task_id):
+    """Create a new album from items and write matched tags to files."""
+    data = request.get_json(silent=True) or {}
+    candidate_index = data.get("candidate_index", 0)
+    if not isinstance(candidate_index, int):
+        return jsonify({"error": "candidate_index must be an integer"}), 400
+
+    task_key = f"items_{task_id}"
+    lib = None
+    with state.identify_lock:
+        task = state.identify_tasks.get(task_key)
+        if not task or task.get("status") != "done":
+            return jsonify({"error": "No identification results"}), 400
+        matches = task.get("_matches", [])
+        if candidate_index < 0 or candidate_index >= len(matches):
+            return jsonify({"error": "Invalid candidate index"}), 400
+        task["status"] = "confirming"
+        lib = task.pop("_lib", None)
+
+    album_match = matches[candidate_index]
+    item_ids = task.get("item_ids", [])
+
+    try:
+        if lib is None:
+            lib = _init_beets(
+                current_app.config["LIBRARY_DB"],
+                current_app.config.get("LIBRARY_ROOT") or None,
+            )
+        # Load item objects and record original state for rollback.
+        # Snapshot all _ROLLBACK_FIELDS now (items are freshly loaded from DB,
+        # so this captures pre-modification values).  If apply_metadata() stores
+        # some items before failing, the rollback can restore the full original
+        # metadata — not just album_id.
+        items = []
+        original_album_ids = {}
+        original_metadata = {}
+        for item_id in item_ids:
+            item = lib.get_item(item_id)
+            if item is None:
+                with state.identify_lock:
+                    task["status"] = "done"
+                return jsonify({"error": f"Item {item_id} not found"}), 404
+            items.append(item)
+            original_album_ids[item_id] = item.album_id
+            snap = {f: getattr(item, f, None) for f in _ROLLBACK_FIELDS}
+            snap["album_id"] = item.album_id
+            original_metadata[item_id] = snap
+
+        log.info(
+            "Confirming items identify task=%s candidate=%d: %r - %r",
+            task_id,
+            candidate_index,
+            album_match.info.artist,
+            album_match.info.album,
+        )
+
+        # Create new album record first; on failure attempt cleanup below.
+        # NOTE: beets' transaction __exit__ always calls commit() even when
+        # unwinding due to an exception, so add_album() may commit a partial
+        # state (album row created, only some items updated) before raising.
+        #
+        # Snapshot the max album ID before calling add_album so we can detect
+        # the edge case where album.add() commits a new album row but then
+        # raises before the item loop (leaving no in-memory album_id changes on
+        # items to detect from). An album created by add_album that has no items
+        # linked to it is guaranteed to be an orphan.
+        album = None
+        try:
+            conn = _get_ro_conn()
+            try:
+                rows = conn.execute("SELECT COALESCE(MAX(id), 0) FROM albums").fetchall()
+                max_album_id_before = rows[0][0]
+            finally:
+                conn.close()
+        except Exception:
+            max_album_id_before = 0
+            log.warning("Failed to record max album ID before add_album in task %s", task_id)
+        try:
+            album = lib.add_album(items)
+        except Exception as e:
+            log.exception("Failed to create album for items task %s", task_id)
+            # add_album() sets item.album_id = album.id in-memory before each
+            # item.store(); detect the orphan album id from items whose in-memory
+            # album_id changed, then remove the orphan row.
+            orphan_album_ids = {
+                item.album_id
+                for item in items
+                if item.album_id != original_album_ids.get(item.id) and item.album_id is not None
+            }
+            # Also query for albums created during add_album that are not linked
+            # to any items — covers the case where album.add() committed a row
+            # but the exception fired before the item loop assigned album_id to
+            # any item, so no in-memory change is visible.
+            try:
+                conn = _get_ro_conn()
+                try:
+                    rows = conn.execute(
+                        "SELECT a.id FROM albums a "
+                        "WHERE a.id > ? "
+                        "AND NOT EXISTS "
+                        "(SELECT 1 FROM items i WHERE i.album_id = a.id)",
+                        (max_album_id_before,),
+                    ).fetchall()
+                    for row in rows:
+                        orphan_album_ids.add(row[0])
+                finally:
+                    conn.close()
+            except Exception:
+                log.exception(
+                    "Failed to scan for orphan albums after add_album failure "
+                    "in task %s — some album rows may be orphaned",
+                    task_id,
+                )
+            for orphan_id in orphan_album_ids:
+                try:
+                    orphan = lib.get_album(orphan_id)
+                    if orphan is not None:
+                        orphan.remove(with_items=False)
+                except Exception:
+                    log.exception(
+                        "Failed to remove orphan album %s after add_album failure "
+                        "in task %s — album row may be orphaned",
+                        orphan_id,
+                        task_id,
+                    )
+            for item in items:
+                item.album_id = original_album_ids.get(item.id, item.album_id)
+                item.store()
+            with state.identify_lock:
+                task["status"] = "done"
+            return jsonify({"error": f"Failed to create album: {e}"}), 500
+
+        # Sync the new album_id onto mapping items (they are different Python objects
+        # from the fresh items passed to add_album, which already had album_id set).
+        for item in album_match.mapping.keys():
+            item.album_id = album.id
+
+        # Apply track-level and album-level metadata; roll back album on failure
+        try:
+            album_match.apply_metadata()
+            for item in album_match.mapping.keys():
+                item.store()
+
+            # Apply album-level metadata and persist
+            album_match.apply_album_metadata(album)
+            album.store()
+        except Exception as e:
+            log.exception("Failed to apply metadata for items task %s", task_id)
+            try:
+                # with_items=False: only remove the album record; keep the item
+                # rows in the DB so the subsequent item.store() calls can restore
+                # their original album_id values (store() issues UPDATE, not INSERT).
+                album.remove(with_items=False)
+            except Exception:
+                log.exception(
+                    "Rollback album.remove() failed for items task %s album_id=%s — "
+                    "album row may be orphaned",
+                    task_id,
+                    album.id,
+                )
+            # Restore full original metadata so items don't reference the
+            # deleted album and any already-stored field changes are reverted.
+            # apply_metadata() writes to album_match.mapping.keys() objects
+            # (separate Python objects), so some of those items may have been
+            # flushed to DB before the failure.  We reload each item fresh from
+            # the DB (picking up any partially-written values) so that assigning
+            # the original snapshot values is seen as a real change by beets'
+            # dirty-tracking (which skips unchanged assignments).  This ensures
+            # item.store() writes all original values back, not just album_id.
+            rollback_failures = []
+            for iid, snap in original_metadata.items():
+                fresh = lib.get_item(iid)
+                if fresh is None:
+                    continue
+                for field, value in snap.items():
+                    setattr(fresh, field, value)
+                try:
+                    fresh.store()
+                except Exception:
+                    log.exception(
+                        "Rollback item.store() failed for item %s in task %s — "
+                        "item metadata may be partially modified",
+                        iid,
+                        task_id,
+                    )
+                    rollback_failures.append(iid)
+            # Clear _matches so a retry cannot reuse the now-stale in-memory
+            # mapping items (their dirty-tracking _original reflects the
+            # candidate values after apply_metadata was called, so a second
+            # apply_metadata + store() on the same objects would silently skip
+            # writing fields that were already flushed before the failure).
+            with state.identify_lock:
+                task.pop("_matches", None)
+                task["status"] = "done"
+            err_resp = {"error": f"Failed to apply metadata: {e}"}
+            if rollback_failures:
+                err_resp["rollback_failures"] = rollback_failures
+            return jsonify(err_resp), 500
+
+        # Write tags to files (best-effort; partial failures return warnings)
+        warnings = []
+        for item in album_match.mapping.keys():
+            if not _try_write_item(item):
+                path = getattr(item, "path", "") or ""
+                if isinstance(path, bytes):
+                    path = path.decode("utf-8", errors="replace")
+                resolved = _resolve_path(path) if path else path
+                log.warning("Failed to write tags for item %d: %s", item.id, resolved)
+                warnings.append(f"file write failed: {resolved}")
+            else:
+                log.info("Wrote tags for item %d: %s", item.id, item.title)
+
+        with state.identify_lock:
+            task.pop("_matches", None)
+            task["status"] = "done"
+        log.info(
+            "Items identify confirm done task=%s album_id=%d warnings=%d",
+            task_id,
+            album.id,
+            len(warnings),
+        )
+
+        resp = {"status": "ok", "album_id": album.id}
+        if warnings:
+            resp["warnings"] = warnings
+        return jsonify(resp)
+
+    except Exception as e:
+        with state.identify_lock:
+            task.pop("_matches", None)
+            task["status"] = "done"
+        log.exception("Confirm failed for items task %s", task_id)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if lib is not None:
+            lib._close()

@@ -1,0 +1,8 @@
+flask
+gunicorn
+pyacoustid
+requests
+pylast
+beautifulsoup4
+Pillow
+beets

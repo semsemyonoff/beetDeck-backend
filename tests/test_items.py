@@ -1,0 +1,577 @@
+"""Tests for items blueprint routes."""
+
+import src.state as state
+from tests.conftest import insert_album, insert_item
+
+
+def _reset_state():
+    state.identify_tasks.clear()
+
+
+# ---------------------------------------------------------------------------
+# GET /api/items/untagged
+# ---------------------------------------------------------------------------
+
+
+class TestUntaggedItems:
+    def test_returns_empty_when_no_items(self, client):
+        resp = client.get("/api/items/untagged")
+        assert resp.status_code == 200
+        assert resp.get_json() == []
+
+    def test_returns_items_for_null_albumartist(self, client, db_path):
+        album_id = insert_album(db_path, albumartist=None, album="Mystery Album")
+        item_id = insert_item(db_path, album_id, title="Track 1", artist="", path=b"/music/t1.mp3")
+
+        resp = client.get("/api/items/untagged")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert len(data) == 1
+        assert data[0]["id"] == item_id
+        assert data[0]["title"] == "Track 1"
+        assert data[0]["album_id"] == album_id
+
+    def test_returns_items_for_empty_albumartist(self, client, db_path):
+        album_id = insert_album(db_path, albumartist="", album="Empty Artist Album")
+        insert_item(db_path, album_id, title="Track A", path=b"/music/ta.mp3")
+
+        resp = client.get("/api/items/untagged")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert any(d["title"] == "Track A" for d in data)
+
+    def test_excludes_items_with_known_albumartist(self, client, db_path):
+        known_album_id = insert_album(db_path, albumartist="Known Artist", album="Known Album")
+        insert_item(db_path, known_album_id, title="Known Track", path=b"/music/k.mp3")
+        unknown_album_id = insert_album(db_path, albumartist=None, album="Unknown Album")
+        insert_item(db_path, unknown_album_id, title="Unknown Track", path=b"/music/u.mp3")
+
+        resp = client.get("/api/items/untagged")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        titles = [d["title"] for d in data]
+        assert "Unknown Track" in titles
+        assert "Known Track" not in titles
+
+    def test_path_decoded_from_bytes(self, client, db_path):
+        album_id = insert_album(db_path, albumartist=None)
+        insert_item(db_path, album_id, title="T", path=b"/music/track.mp3")
+
+        resp = client.get("/api/items/untagged")
+        data = resp.get_json()
+        assert isinstance(data[0]["path"], str)
+        assert data[0]["path"] == "/music/track.mp3"
+
+    def test_path_resolved_against_library_root(self, db_path):
+        from src import create_app
+        from tests.conftest import insert_album, insert_item
+
+        app = create_app(
+            test_config={
+                "LIBRARY_DB": db_path,
+                "IMPORT_DIR": "/tmp/music_import",
+                "LIBRARY_ROOT": "/data/music",
+                "TESTING": True,
+            }
+        )
+        album_id = insert_album(db_path, albumartist=None)
+        insert_item(db_path, album_id, title="Rel", path="Artist/Album/track.mp3")
+
+        with app.test_client() as c:
+            resp = c.get("/api/items/untagged")
+        data = resp.get_json()
+        assert data[0]["path"] == "/data/music/Artist/Album/track.mp3"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/items/<item_id>/metadata
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateMetadata:
+    def test_returns_404_for_missing_item(self, client, mocker):
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = None
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/items/99/metadata", json={"artist": "A", "album": "B"})
+        assert resp.status_code == 404
+        assert "not found" in resp.get_json()["error"].lower()
+
+    def test_returns_400_when_no_fields(self, client, mocker):
+        mock_lib = mocker.MagicMock()
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/items/1/metadata", json={})
+        assert resp.status_code == 400
+        assert "error" in resp.get_json()
+
+    def test_updates_artist_and_album(self, client, mocker):
+        mock_item = mocker.MagicMock()
+        mock_item.try_write.return_value = True
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.post(
+            "/api/items/1/metadata", json={"artist": "New Artist", "album": "New Album"}
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "ok"
+        assert mock_item.artist == "New Artist"
+        assert mock_item.album == "New Album"
+        mock_item.store.assert_called()
+
+    def test_updates_only_artist(self, client, mocker):
+        mock_item = mocker.MagicMock()
+        mock_item.try_write.return_value = True
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/items/1/metadata", json={"artist": "Only Artist"})
+        assert resp.status_code == 200
+        assert mock_item.artist == "Only Artist"
+
+    def test_returns_warning_when_tag_write_fails(self, client, mocker):
+        mock_item = mocker.MagicMock()
+        mock_item.try_write.return_value = False
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/items/1/metadata", json={"artist": "X"})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "ok"
+        assert "warnings" in data
+
+    def test_returns_ok_with_item_id(self, client, mocker):
+        mock_item = mocker.MagicMock()
+        mock_item.try_write.return_value = True
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/items/42/metadata", json={"album": "My Album"})
+        assert resp.status_code == 200
+        assert resp.get_json()["item_id"] == 42
+
+    def test_updates_title(self, client, mocker):
+        mock_item = mocker.MagicMock()
+        mock_item.try_write.return_value = True
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/items/1/metadata", json={"title": "New Title"})
+        assert resp.status_code == 200
+        assert mock_item.title == "New Title"
+
+    def test_returns_400_when_all_fields_empty(self, client, mocker):
+        mock_lib = mocker.MagicMock()
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/items/1/metadata", json={"title": "", "artist": "", "album": ""})
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# POST /api/items/identify
+# ---------------------------------------------------------------------------
+
+
+class TestItemsIdentify:
+    def setup_method(self):
+        _reset_state()
+
+    def test_returns_400_for_empty_list(self, client):
+        resp = client.post("/api/items/identify", json={"item_ids": []})
+        assert resp.status_code == 400
+        assert "error" in resp.get_json()
+
+    def test_returns_400_for_missing_item_ids(self, client):
+        resp = client.post("/api/items/identify", json={})
+        assert resp.status_code == 400
+
+    def test_returns_400_for_non_integer_ids(self, client):
+        resp = client.post("/api/items/identify", json={"item_ids": ["a", "b"]})
+        assert resp.status_code == 400
+
+    def test_returns_started_and_task_id(self, client, mocker):
+        mock_lib = mocker.MagicMock()
+        mock_item = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+
+        mock_proposal = mocker.MagicMock()
+        mock_proposal.candidates = []
+
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch(
+            "beets.autotag.tag_album",
+            return_value=("Artist", "Album", mock_proposal),
+        )
+
+        resp = client.post("/api/items/identify", json={"item_ids": [1, 2]})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "started"
+        assert "task_id" in data
+
+    def test_invalid_item_id_in_background_sets_error(self, client, mocker):
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = None
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/items/identify", json={"item_ids": [999]})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        task_id = data["task_id"]
+
+        # Wait for background thread to complete
+        import time
+
+        time.sleep(0.5)
+
+        status_resp = client.get(f"/api/items/identify/{task_id}/status")
+        status_data = status_resp.get_json()
+        assert status_data["status"] == "error"
+        assert "999" in status_data["error"]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/items/identify/<task_id>/status
+# ---------------------------------------------------------------------------
+
+
+class TestItemsIdentifyStatus:
+    def setup_method(self):
+        _reset_state()
+
+    def test_returns_idle_when_no_task(self, client):
+        resp = client.get("/api/items/identify/doesnotexist/status")
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "idle"
+
+    def test_returns_task_without_private_keys(self, client):
+        state.identify_tasks["items_abc"] = {
+            "task_id": "abc",
+            "status": "done",
+            "candidates": [],
+            "_matches": ["private"],
+            "_lib": object(),
+        }
+        resp = client.get("/api/items/identify/abc/status")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "done"
+        assert "_matches" not in data
+        assert "_lib" not in data
+
+    def test_returns_running_status(self, client):
+        state.identify_tasks["items_xyz"] = {
+            "task_id": "xyz",
+            "status": "running",
+            "candidates": [],
+        }
+        resp = client.get("/api/items/identify/xyz/status")
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "running"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/items/identify/<task_id>/apply
+# ---------------------------------------------------------------------------
+
+
+class TestItemsApply:
+    def setup_method(self):
+        _reset_state()
+
+    def test_returns_400_when_no_task(self, client):
+        resp = client.post("/api/items/identify/notexist/apply", json={"candidate_index": 0})
+        assert resp.status_code == 400
+
+    def test_returns_400_when_task_not_done(self, client):
+        state.identify_tasks["items_t1"] = {"status": "running", "_matches": []}
+        resp = client.post("/api/items/identify/t1/apply", json={"candidate_index": 0})
+        assert resp.status_code == 400
+
+    def test_returns_400_for_invalid_candidate_index(self, client, mocker):
+        mock_match = mocker.MagicMock()
+        state.identify_tasks["items_t2"] = {
+            "status": "done",
+            "_matches": [mock_match],
+        }
+        resp = client.post("/api/items/identify/t2/apply", json={"candidate_index": 5})
+        assert resp.status_code == 400
+
+    def test_returns_diff_with_album_and_tracks(self, client, mocker):
+        mock_item = mocker.MagicMock()
+        mock_item.track = 1
+        mock_item.title = "Old Title"
+        mock_item.artist = "Old Artist"
+
+        mock_track_info = mocker.MagicMock()
+        mock_track_info.title = "New Title"
+        mock_track_info.artist = "New Artist"
+
+        mock_info = mocker.MagicMock()
+        mock_info.artist = "Match Artist"
+        mock_info.album = "Match Album"
+        mock_info.year = 2023
+        mock_info.album_id = "mb-123"
+        mock_info.item_data = {}
+
+        mock_match = mocker.MagicMock()
+        mock_match.info = mock_info
+        mock_match.mapping = {mock_item: mock_track_info}
+
+        state.identify_tasks["items_t3"] = {
+            "status": "done",
+            "_matches": [mock_match],
+        }
+
+        resp = client.post("/api/items/identify/t3/apply", json={"candidate_index": 0})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert "album" in data
+        assert "tracks" in data
+        assert data["album"]["albumartist"]["new"] == "Match Artist"
+        assert data["tracks"][0]["title"]["old"] == "Old Title"
+        assert data["tracks"][0]["title"]["new"] == "New Title"
+        assert data["candidate_index"] == 0
+
+
+# ---------------------------------------------------------------------------
+# POST /api/items/identify/<task_id>/confirm
+# ---------------------------------------------------------------------------
+
+
+class TestItemsConfirm:
+    def setup_method(self):
+        _reset_state()
+
+    def test_returns_400_when_no_task(self, client):
+        resp = client.post("/api/items/identify/notexist/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 400
+
+    def test_returns_400_when_task_not_done(self, client):
+        state.identify_tasks["items_c1"] = {"status": "running", "_matches": [], "item_ids": [1]}
+        resp = client.post("/api/items/identify/c1/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 400
+
+    def test_returns_ok_with_album_id_on_success(self, client, mocker):
+        mock_item = mocker.MagicMock()
+        mock_item.id = 1
+        mock_item.album_id = 10
+        mock_item.track = 1
+        mock_item.try_write.return_value = True
+
+        mock_album = mocker.MagicMock()
+        mock_album.id = 99
+
+        mock_match = mocker.MagicMock()
+        mock_match.mapping = {mock_item: mocker.MagicMock()}
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mock_lib.add_album.return_value = mock_album
+
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        state.identify_tasks["items_c2"] = {
+            "task_id": "c2",
+            "status": "done",
+            "_matches": [mock_match],
+            "item_ids": [1],
+        }
+
+        resp = client.post("/api/items/identify/c2/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "ok"
+        assert data["album_id"] == 99
+        assert "warnings" not in data
+        mock_album.store.assert_called()
+        mock_match.apply_metadata.assert_called()
+        mock_match.apply_album_metadata.assert_called_with(mock_album)
+
+    def test_returns_ok_with_warnings_on_partial_file_write_failure(self, client, mocker):
+        mock_item = mocker.MagicMock()
+        mock_item.id = 1
+        mock_item.album_id = 10
+        mock_item.track = 1
+        mock_item.title = "Track"
+        mock_item.path = b"/music/track.mp3"
+        mock_item.try_write.return_value = False  # simulate write failure
+
+        mock_album = mocker.MagicMock()
+        mock_album.id = 55
+
+        mock_match = mocker.MagicMock()
+        mock_match.mapping = {mock_item: mocker.MagicMock()}
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mock_lib.add_album.return_value = mock_album
+
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        state.identify_tasks["items_c3"] = {
+            "task_id": "c3",
+            "status": "done",
+            "_matches": [mock_match],
+            "item_ids": [1],
+        }
+
+        resp = client.post("/api/items/identify/c3/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        # DB album was still created
+        assert data["status"] == "ok"
+        assert data["album_id"] == 55
+        # warnings list includes the failed file path
+        assert "warnings" in data
+        assert len(data["warnings"]) == 1
+        assert "/music/track.mp3" in data["warnings"][0]
+
+    def test_rolls_back_on_add_album_failure(self, client, mocker):
+        mock_item = mocker.MagicMock()
+        mock_item.id = 1
+        mock_item.album_id = 10
+
+        mock_match = mocker.MagicMock()
+        mock_match.mapping = {mock_item: mocker.MagicMock()}
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mock_lib.add_album.side_effect = RuntimeError("DB error")
+
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        state.identify_tasks["items_c4"] = {
+            "task_id": "c4",
+            "status": "done",
+            "_matches": [mock_match],
+            "item_ids": [1],
+        }
+
+        resp = client.post("/api/items/identify/c4/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 500
+        assert "error" in resp.get_json()
+        # album_id restored to original value and store() called
+        assert mock_item.album_id == 10
+        assert mock_item.store.called
+        # apply_metadata not called since add_album failed first
+        mock_match.apply_metadata.assert_not_called()
+
+    def test_rolls_back_metadata_on_apply_metadata_failure(self, client, mocker):
+        """Rollback reloads fresh items from DB so partially-written metadata is reverted."""
+        mock_item = mocker.MagicMock()
+        mock_item.id = 1
+        mock_item.album_id = 10
+        mock_item.title = "Original Title"
+
+        # fresh_item simulates what lib.get_item returns during rollback —
+        # it would have the partially-written new value from apply_metadata.
+        fresh_item = mocker.MagicMock()
+        fresh_item.id = 1
+
+        mock_album = mocker.MagicMock()
+        mock_album.id = 42
+
+        mock_match = mocker.MagicMock()
+        mock_match.mapping = {mock_item: mocker.MagicMock()}
+        mock_match.apply_metadata.side_effect = RuntimeError("metadata error")
+
+        # get_item is called twice: once for initial load, once for rollback reload
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.side_effect = [mock_item, fresh_item]
+        mock_lib.add_album.return_value = mock_album
+
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        state.identify_tasks["items_c8"] = {
+            "task_id": "c8",
+            "status": "done",
+            "_matches": [mock_match],
+            "item_ids": [1],
+        }
+
+        resp = client.post("/api/items/identify/c8/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 500
+        assert "error" in resp.get_json()
+        # album record removed on failure
+        mock_album.remove.assert_called_once_with(with_items=False)
+        # rollback reloaded a fresh item and called store() on it
+        assert fresh_item.store.called
+        # original title was assigned to the fresh item
+        assert fresh_item.title == "Original Title"
+        # _matches cleared on rollback to prevent retry with stale mapping items
+        assert "_matches" not in state.identify_tasks["items_c8"]
+
+    def test_task_status_set_to_done_after_success(self, client, mocker):
+        mock_item = mocker.MagicMock()
+        mock_item.id = 1
+        mock_item.album_id = 10
+        mock_item.track = 1
+        mock_item.try_write.return_value = True
+
+        mock_album = mocker.MagicMock()
+        mock_album.id = 77
+
+        mock_match = mocker.MagicMock()
+        mock_match.mapping = {mock_item: mocker.MagicMock()}
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mock_lib.add_album.return_value = mock_album
+
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        state.identify_tasks["items_c7"] = {
+            "task_id": "c7",
+            "status": "done",
+            "_matches": [mock_match],
+            "item_ids": [1],
+        }
+
+        resp = client.post("/api/items/identify/c7/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 200
+        assert state.identify_tasks["items_c7"]["status"] == "done"
+        assert "_matches" not in state.identify_tasks["items_c7"]
+
+    def test_returns_404_when_item_not_found(self, client, mocker):
+        mock_match = mocker.MagicMock()
+        mock_match.mapping = {}
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = None
+
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        state.identify_tasks["items_c5"] = {
+            "task_id": "c5",
+            "status": "done",
+            "_matches": [mock_match],
+            "item_ids": [999],
+        }
+
+        resp = client.post("/api/items/identify/c5/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 404
+
+    def test_returns_400_for_invalid_candidate_index(self, client, mocker):
+        mock_match = mocker.MagicMock()
+        mock_lib = mocker.MagicMock()
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        state.identify_tasks["items_c6"] = {
+            "task_id": "c6",
+            "status": "done",
+            "_matches": [mock_match],
+            "item_ids": [1],
+        }
+
+        resp = client.post("/api/items/identify/c6/confirm", json={"candidate_index": 10})
+        assert resp.status_code == 400

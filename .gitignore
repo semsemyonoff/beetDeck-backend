@@ -1,0 +1,10 @@
+.ralphex/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+.DS_Store
+frontend/node_modules/
+src/static/dist/

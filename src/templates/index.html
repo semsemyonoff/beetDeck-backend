@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>beetDeck</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo.svg') }}" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+    {% for css_file in vite_css or [] %}
+    <link rel="stylesheet" href="{{ url_for('static', filename='dist/' ~ css_file) }}" />
+    {% endfor %}
+  </head>
+  <body>
+    <div id="root"></div>
+    {% if vite_entry %}
+    <script type="module" src="{{ url_for('static', filename='dist/' ~ vite_entry) }}"></script>
+    {% else %}
+    <p style="font-family: system-ui, sans-serif; padding: 2rem;">
+      Frontend assets not built. Run <code>make build-frontend</code>.
+    </p>
+    {% endif %}
+  </body>
+</html>

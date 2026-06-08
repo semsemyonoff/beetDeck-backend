@@ -1,0 +1,44 @@
+directory: /music
+library: /data/beets/library.db
+
+import:
+  copy: no
+  move: no
+  write: yes
+  incremental: yes
+  duplicate_action: skip
+
+plugins:
+  - musicbrainz
+  - fetchart
+  - embedart
+  - lastgenre
+  - lyrics
+  - info
+
+fetchart:
+  auto: no
+  high_resolution: yes
+  sources:
+    - filesystem
+    - coverart
+    - itunes
+    - amazon
+    - albumart
+  minwidth: 500
+  maxwidth: 1200
+  store_source: yes
+
+embedart:
+  auto: no
+  ifempty: yes
+
+lastgenre:
+  auto: no
+  count: 3
+  source: album
+
+lyrics:
+  auto: no
+  sources: [lrclib]
+  synced: yes

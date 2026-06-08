@@ -1,0 +1,384 @@
+"""Identification routes for beetDeek.
+
+Endpoints:
+    POST   /api/album/<id>/ignore           — toggle beetdeck_ignored flag
+    POST   /api/album/<id>/identify         — start background autotag
+    GET    /api/album/<id>/identify/status  — poll task status
+    POST   /api/album/<id>/apply            — preview diff for a candidate
+    POST   /api/album/<id>/confirm          — write chosen candidate to files/DB
+"""
+
+import sqlite3
+import threading
+import uuid
+
+from flask import Blueprint, current_app, jsonify, request
+
+from src import state
+from src.utils import (
+    _get_ro_conn,
+    _get_task_json,
+    _init_beets,
+    _serialize_candidate,
+    _try_write_item,
+    log,
+)
+
+bp = Blueprint("identify", __name__)
+
+
+# ---------------------------------------------------------------------------
+# Private helpers (identify-specific)
+# ---------------------------------------------------------------------------
+
+
+def _run_identify(
+    task_id, album_id, search_artist, search_album, search_id, library_db, library_dir
+):
+    """Background thread: run beets autotag and store candidates.
+
+    Receives library_db/library_dir as explicit arguments because background
+    threads have no Flask app context (current_app would raise RuntimeError).
+    """
+    task = state.identify_tasks[task_id]
+    lib = None
+    try:
+        from beets import autotag
+
+        log.info(
+            "Identify album_id=%d artist=%r album=%r id=%r",
+            album_id,
+            search_artist,
+            search_album,
+            search_id,
+        )
+
+        lib = _init_beets(library_db, library_dir)
+        album = lib.get_album(album_id)
+        if not album:
+            with state.identify_lock:
+                task["status"] = "error"
+                task["error"] = "Album not found"
+            return
+
+        items = list(album.items())
+        if not items:
+            with state.identify_lock:
+                task["status"] = "error"
+                task["error"] = "No tracks in album"
+            return
+
+        with state.identify_lock:
+            task["current_artist"] = album.albumartist
+            task["current_album"] = album.album
+
+        search_ids = [search_id] if search_id else []
+
+        log.info(
+            "Running tag_album for %r - %r (%d items)",
+            album.albumartist,
+            album.album,
+            len(items),
+        )
+
+        try:
+            artist, album_name, proposal = autotag.tag_album(
+                items,
+                search_artist=search_artist or None,
+                search_name=search_album or None,
+                search_ids=search_ids or [],
+            )
+        except Exception as e:
+            log.exception("Autotag failed for album_id=%d", album_id)
+            with state.identify_lock:
+                task["status"] = "error"
+                task["error"] = f"Autotag failed: {e}"
+            return
+
+        matches = list(proposal.candidates[:5])
+        matches.sort(key=lambda m: float(m.distance))
+
+        candidates = [_serialize_candidate(i, m) for i, m in enumerate(matches)]
+
+        for c in candidates:
+            log.info(
+                "Candidate: %r - %r (dist=%.4f, source=%s)",
+                c["artist"],
+                c["album"],
+                c["distance"],
+                c["data_source"],
+            )
+
+        log.info("Identify done for album_id=%d: %d candidates", album_id, len(candidates))
+
+        # Transfer ownership of lib to task so confirm_match can reuse it.
+        # Set lib=None to prevent the finally block from closing it.
+        with state.identify_lock:
+            task["_matches"] = matches
+            task["_lib"] = lib
+            lib = None
+            task["candidates"] = candidates
+            task["status"] = "done"
+
+    except Exception as e:
+        log.exception("Identify error for album_id=%d", album_id)
+        with state.identify_lock:
+            task["status"] = "error"
+            task["error"] = str(e)
+    finally:
+        if lib is not None:
+            lib._close()
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+
+@bp.route("/api/album/<int:album_id>/ignore", methods=["POST"])
+def toggle_ignore(album_id):
+    lib = None
+    try:
+        lib = _init_beets(
+            current_app.config["LIBRARY_DB"],
+            current_app.config.get("LIBRARY_ROOT") or None,
+        )
+        album = lib.get_album(album_id)
+        if not album:
+            return jsonify({"error": "Album not found"}), 404
+        current = getattr(album, "beetdeck_ignored", None)
+        if current == "1":
+            album.beetdeck_ignored = "0"
+            ignored = False
+        else:
+            album.beetdeck_ignored = "1"
+            ignored = True
+        album.store()
+        return jsonify({"ignored": ignored})
+    except Exception as e:
+        log.exception("Toggle ignore failed for album_id=%d", album_id)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if lib is not None:
+            lib._close()
+
+
+@bp.route("/api/album/<int:album_id>/identify", methods=["POST"])
+def identify(album_id):
+    data = request.get_json(silent=True) or {}
+
+    library_db = current_app.config["LIBRARY_DB"]
+    library_dir = current_app.config.get("LIBRARY_ROOT") or None
+
+    old_lib = None
+    with state.identify_lock:
+        existing = state.identify_tasks.get(f"album_{album_id}")
+        if existing and existing.get("status") in ("running", "confirming"):
+            return jsonify({"status": "running", "task_id": existing["task_id"]}), 409
+
+        # Close any open Library from a previous done task before overwriting.
+        if existing:
+            old_lib = existing.pop("_lib", None)
+
+        task_id = str(uuid.uuid4())[:8]
+        task = {
+            "task_id": task_id,
+            "album_id": album_id,
+            "status": "running",
+            "candidates": [],
+            "current_artist": "",
+            "current_album": "",
+            "error": None,
+        }
+        state.identify_tasks[f"album_{album_id}"] = task
+
+    if old_lib is not None:
+        try:
+            old_lib._close()
+        except Exception:
+            pass
+
+    t = threading.Thread(
+        target=_run_identify,
+        args=(
+            f"album_{album_id}",
+            album_id,
+            data.get("artist", ""),
+            data.get("album", ""),
+            data.get("search_id", ""),
+            library_db,
+            library_dir,
+        ),
+        daemon=True,
+    )
+    t.start()
+
+    return jsonify({"status": "started", "task_id": task_id})
+
+
+@bp.route("/api/album/<int:album_id>/identify/status")
+def identify_status(album_id):
+    with state.identify_lock:
+        task = state.identify_tasks.get(f"album_{album_id}")
+        task_json = _get_task_json(task) if task else None
+    if task_json is None:
+        return jsonify({"status": "idle"})
+    return jsonify(task_json)
+
+
+@bp.route("/api/album/<int:album_id>/apply", methods=["POST"])
+def apply_match(album_id):
+    """Preview what would change if this candidate is applied."""
+    data = request.get_json(silent=True) or {}
+    candidate_index = data.get("candidate_index", 0)
+    if not isinstance(candidate_index, int):
+        return jsonify({"error": "candidate_index must be an integer"}), 400
+
+    with state.identify_lock:
+        task = state.identify_tasks.get(f"album_{album_id}")
+        if not task or task.get("status") != "done":
+            return jsonify({"error": "No identification results"}), 400
+        matches = task.get("_matches", [])
+
+    if candidate_index < 0 or candidate_index >= len(matches):
+        return jsonify({"error": "Invalid candidate index"}), 400
+
+    album_match = matches[candidate_index]
+    info = album_match.info
+
+    track_diffs = []
+    for item, track_info in album_match.mapping.items():
+        diff_entry = {"track": item.track}
+        for field in ["title", "artist"]:
+            old_val = getattr(item, field, "") or ""
+            new_val = getattr(track_info, field, old_val) or ""
+            diff_entry[field] = {"old": str(old_val), "new": str(new_val)}
+        track_diffs.append(diff_entry)
+    track_diffs.sort(key=lambda t: t["track"] or 0)
+
+    try:
+        conn = _get_ro_conn()
+        try:
+            a = conn.execute("SELECT * FROM albums WHERE id = ?", (album_id,)).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.OperationalError as e:
+        return jsonify({"error": str(e)}), 500
+
+    if not a:
+        return jsonify({"error": "Album not found"}), 404
+
+    album_data = info.item_data if hasattr(info, "item_data") else {}
+    album_diff = {}
+    for field in ["album", "albumartist", "year", "label", "mb_albumid"]:
+        old_val = a[field] if a[field] is not None else ""
+        if field == "mb_albumid":
+            new_val = info.album_id or ""
+        elif field == "albumartist":
+            new_val = album_data.get("albumartist", info.artist) or ""
+        elif field == "album":
+            new_val = album_data.get("album", info.album) or ""
+        elif field == "year":
+            new_val = album_data.get("year", info.year) or ""
+        else:
+            new_val = album_data.get(field, "") or ""
+        album_diff[field] = {"old": str(old_val), "new": str(new_val)}
+
+    return jsonify(
+        {
+            "candidate_index": candidate_index,
+            "album": album_diff,
+            "tracks": track_diffs,
+        }
+    )
+
+
+@bp.route("/api/album/<int:album_id>/confirm", methods=["POST"])
+def confirm_match(album_id):
+    """Apply the selected match using beets API and write tags to files."""
+    data = request.get_json(silent=True) or {}
+    candidate_index = data.get("candidate_index", 0)
+    if not isinstance(candidate_index, int):
+        return jsonify({"error": "candidate_index must be an integer"}), 400
+
+    lib = None
+    with state.identify_lock:
+        task = state.identify_tasks.get(f"album_{album_id}")
+        if not task or task.get("status") not in ("done",):
+            return jsonify({"error": "No identification results"}), 400
+        matches = task.get("_matches", [])
+        if candidate_index < 0 or candidate_index >= len(matches):
+            return jsonify({"error": "Invalid candidate index"}), 400
+        # Mark as confirming inside the lock so concurrent requests see a
+        # non-"done" status and are rejected instead of applying tags twice.
+        task["status"] = "confirming"
+        lib = task.pop("_lib", None)
+
+    album_match = matches[candidate_index]
+    try:
+        if lib is None:
+            lib = _init_beets(
+                current_app.config["LIBRARY_DB"],
+                current_app.config.get("LIBRARY_ROOT") or None,
+            )
+        album = lib.get_album(album_id)
+        if not album:
+            with state.identify_lock:
+                task.pop("_matches", None)
+                task["status"] = "done"
+            return jsonify({"error": "Album not found"}), 404
+
+        log.info(
+            "Confirming match for album_id=%d: %r - %r (source=%s, dist=%.4f)",
+            album_id,
+            album_match.info.artist,
+            album_match.info.album,
+            album_match.info.data_source,
+            float(album_match.distance),
+        )
+
+        album_match.apply_metadata()
+        write_failures = []
+        for item in album_match.mapping.keys():
+            item.store()
+            if not _try_write_item(item):
+                log.warning("Failed to write tags for track %d: %s", item.track, item.title)
+                write_failures.append(item.id)
+            else:
+                log.info("Wrote tags for track %d: %s", item.track, item.title)
+
+        album_match.apply_album_metadata(album)
+        album.store()
+
+        if not write_failures:
+            album.beetdeck_tagged = "1"
+            album.store()
+            log.info("Album %d tagged successfully", album_id)
+            with state.identify_lock:
+                task.pop("_matches", None)
+                task["status"] = "done"
+        else:
+            log.warning(
+                "Album %d: tag write failed for %d track(s), not marking as tagged",
+                album_id,
+                len(write_failures),
+            )
+            with state.identify_lock:
+                task.pop("_matches", None)
+                task["status"] = "done"
+            return (
+                jsonify({"error": f"Failed to write tags for {len(write_failures)} track(s)"}),
+                500,
+            )
+
+        return jsonify({"status": "ok"})
+
+    except Exception as e:
+        with state.identify_lock:
+            task.pop("_matches", None)
+            task["status"] = "done"
+        log.exception("Confirm failed for album_id=%d", album_id)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if lib is not None:
+            lib._close()
