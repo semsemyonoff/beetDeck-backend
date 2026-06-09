@@ -18,7 +18,10 @@
     <script type="module" src="{{ url_for('static', filename='dist/' ~ vite_entry) }}"></script>
     {% else %}
     <p style="font-family: system-ui, sans-serif; padding: 2rem;">
-      Frontend assets not built. Run <code>make build-frontend</code>.
+      Frontend assets not built. In the frontend repo run <code>npm run build</code>,
+      then copy <code>dist/</code> into <code>src/static/dist/</code> here.
+      From the backend repo you can run <code>make sync-frontend-dist</code> to do
+      both steps in one command (requires the DWE stack to be running).
     </p>
     {% endif %}
   </body>
