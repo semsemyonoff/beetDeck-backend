@@ -6,5 +6,7 @@ __pycache__/
 .coverage
 htmlcov/
 .DS_Store
-frontend/node_modules/
+# SPA build output (built in the separate frontend repo, served by Flask)
 src/static/dist/
+*.egg-info/
+build/

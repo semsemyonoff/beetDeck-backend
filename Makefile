@@ -7,14 +7,15 @@ BEETDECK_PLATFORMS ?= linux/amd64,linux/arm64
 export BEETDECK_IMAGE BEETDECK_TAG BEETDECK_PLATFORMS
 
 PYTHON ?= .venv/bin/python
+PIP    ?= .venv/bin/pip
 PYTEST ?= .venv/bin/pytest
 RUFF   ?= .venv/bin/ruff
 
-.PHONY: build test lint fmt coverage build-frontend dev-frontend dev
+.PHONY: install test lint fmt coverage run build
 
-# Build multi-arch image and push to registry
-build:
-	./build.sh
+# Install runtime + dev dependencies (declared in pyproject.toml) into the venv
+install:
+	$(PIP) install -e ".[dev]"
 
 # Run test suite
 test:
@@ -32,14 +33,11 @@ fmt:
 coverage:
 	$(PYTEST) --cov=src --cov-report=term-missing
 
-# Build the Vite frontend into src/static/dist/
-build-frontend:
-	cd frontend && npm ci && npm run build
+# Run the Flask dev server on :5000
+run:
+	$(PYTHON) app.py
 
-# Run the Vite dev server (proxies /api and /static to Flask on :5000)
-dev-frontend:
-	cd frontend && npm run dev
-
-# Run Flask and Vite concurrently for local development
-dev:
-	$(PYTHON) app.py & FLASK_PID=$$!; trap "kill $$FLASK_PID 2>/dev/null" EXIT; cd frontend && npm run dev
+# Build multi-arch production image and push to registry.
+# The SPA must already be built into src/static/dist/ (see Dockerfile / README).
+build:
+	./build.sh

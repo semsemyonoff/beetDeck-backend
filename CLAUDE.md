@@ -1,21 +1,26 @@
-# beetDeek — Claude Code Project Documentation
+# beetDeck backend — project documentation
 
 ## Project Overview
 
-beetDeek is a web UI for browsing and managing a [beets](https://beets.io) music library. It provides album browsing, cover art management, genre editing, lyrics fetching, MusicBrainz identification, and library rescanning — all via a Flask-based REST API consumed by a React SPA.
+beetDeck is a web UI for browsing and managing a [beets](https://beets.io) music
+library. This repository is the **backend**: a Flask REST API that serves the
+data and a single-page app. It provides album browsing, cover art management,
+genre editing, lyrics fetching, MusicBrainz identification, and library
+rescanning. The React SPA that consumes this API lives in a **separate
+repository**; its production build is served by Flask from `src/static/dist/`.
 
 ## Tech Stack
 
-- **Backend**: Python 3.14, Flask, gunicorn (1 worker, 4 threads)
-- **Database**: SQLite (beets library.db), accessed read-only via direct SQL for most queries; beets Library object used for write operations
-- **Key dependencies**: beets==2.10.0, Pillow, pylast (Last.fm), requests, beautifulsoup4, pyacoustid
-- **Frontend**: React 18 + Vite SPA (hash routing) in `frontend/`, built into `src/static/dist/` and served by Flask. Visual source of truth lives in `docs/design/` (JSX prototypes + chat transcript).
-- **Container**: Docker multi-stage build (`node:20-slim` builds frontend, `python:3.14-slim` runs Flask), ffmpeg installed for audio fingerprinting
+- **Language/framework**: Python 3.10+ (runs on 3.14), Flask, gunicorn (1 worker, 4 threads)
+- **Database**: SQLite (beets `library.db`), read mostly via direct SQL; the beets `Library` object is used for write operations
+- **Key dependencies**: beets 2.10.0, Pillow, pylast (Last.fm), requests, beautifulsoup4, pyacoustid
+- **Audio tooling**: ffmpeg (used by pyacoustid for fingerprinting)
+- **Dependencies & tooling config**: all declared in `pyproject.toml` (runtime under `[project]`, dev tools under the `dev` extra; pytest and ruff configured in the same file)
 
 ## Project Structure
 
 ```
-beetDeek/
+beetDeck/
 ├── app.py                  # Thin entry point: calls create_app() from src/
 ├── src/
 │   ├── __init__.py         # Flask app factory (create_app)
@@ -33,22 +38,9 @@ beetDeek/
 │   │   └── scan.py         # Rescan + status
 │   ├── static/
 │   │   ├── logo.svg
-│   │   └── dist/           # Vite build output (generated, gitignored)
+│   │   └── dist/           # SPA build output (generated, gitignored)
 │   └── templates/
-│       └── index.html      # SPA shell; injects hashed JS/CSS from src/static/dist/ via Vite manifest
-├── frontend/               # React + Vite source
-│   ├── package.json
-│   ├── package-lock.json
-│   ├── vite.config.js
-│   ├── index.html          # Vite entry HTML (dev server)
-│   └── src/
-│       ├── main.jsx        # React entry
-│       ├── App.jsx         # Hash-routed shell
-│       ├── useHashRoute.js
-│       ├── styles.css      # Ported from docs/design/project/styles.css
-│       ├── assets/
-│       ├── ui/             # Topbar, Icon, Segmented, Cover, CoverStack, IdentifyModal
-│       └── pages/          # Library, Artist, Album, Untagged
+│       └── index.html      # SPA shell; injects hashed JS/CSS from src/static/dist/ via the Vite manifest
 ├── tests/
 │   ├── conftest.py         # Fixtures: create_app with temp SQLite DB, schema helpers
 │   ├── test_db_fixture.py
@@ -61,16 +53,8 @@ beetDeek/
 │   ├── test_identify.py
 │   ├── test_items.py
 │   └── test_scan.py
-├── constraints.txt         # beets version pin (single source of truth)
-├── requirements.txt        # Runtime dependencies
-├── requirements-dev.txt    # Test/lint tools (pytest, pytest-cov, ruff)
-├── pyproject.toml          # pytest and ruff configuration
-├── Dockerfile
-├── Makefile
-├── build.sh
-├── config.yaml             # Beets configuration example
-└── docs/
-    └── plans/              # Implementation plans
+├── pyproject.toml          # Dependencies, pytest, and ruff configuration
+└── config.yaml             # Example beets configuration
 ```
 
 ### In-Memory State (src/state.py)
@@ -129,48 +113,41 @@ The application uses module-level globals for shared state across request thread
 
 ## Architecture Constraints
 
-**CRITICAL: Single gunicorn worker required.** The application relies on module-level in-memory globals (`rescan_proc`, `identify_tasks`, etc.) in `src/state.py` for state shared across request threads. Using multiple workers would give each worker its own memory space, causing state to be siloed per-worker and breaking background task tracking (identify jobs, scan status). The gunicorn invocation must always use `-w 1` with `--threads N`.
+**CRITICAL: the app must run as a single process.** It relies on module-level
+in-memory globals (`rescan_proc`, `identify_tasks`, etc.) in `src/state.py` for
+state shared across request threads. Running multiple worker processes would give
+each its own memory space, siloing state per-worker and breaking background task
+tracking (identify jobs, scan status). The gunicorn invocation must always use
+`-w 1` with `--threads N`.
 
 ## App Factory Pattern
 
-Routes are registered via Flask Blueprints in `create_app()` (src/__init__.py). All route modules read config from `current_app.config` rather than module-level constants. Tests use `create_app(test_config={"LIBRARY_DB": "<tmp>", ...})` to inject a temporary SQLite file.
+Routes are registered via Flask Blueprints in `create_app()` (`src/__init__.py`).
+All route modules read config from `current_app.config` rather than module-level
+constants. Tests use `create_app(test_config={"LIBRARY_DB": "<tmp>", ...})` to
+inject a temporary SQLite file.
 
-The `_init_beets()` helper in `src/utils.py` accepts an explicit `library_db` parameter rather than reading from `current_app.config`, because it is called from background threads (identify tasks) that have no Flask app context.
+The `_init_beets()` helper in `src/utils.py` accepts an explicit `library_db`
+parameter rather than reading from `current_app.config`, because it is called from
+background threads (identify tasks) that have no Flask app context.
 
 ## Dev Commands
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt -c constraints.txt
-pip install -r requirements-dev.txt
+# Install runtime + dev dependencies into a virtualenv
+python -m venv .venv && . .venv/bin/activate
+pip install -e ".[dev]"
 
-# Run tests
-make test
-
-# Lint
-make lint
-
-# Format
-make fmt
-
-# Test coverage report
-make coverage
-
-# Build and push multi-arch Docker image (runs the frontend build inside the multi-stage Dockerfile)
-make build
-
-# Build the React frontend into src/static/dist/
-make build-frontend
-
-# Run Flask (:5000) and the Vite dev server (:5173, proxies /api → :5000) concurrently
-make dev
+make run       # run the Flask dev server on :5000
+make test      # run pytest
+make coverage  # run pytest with coverage report
+make lint      # ruff check
+make fmt       # ruff format
 ```
-
-See `frontend/README.md` for the day-to-day frontend workflow and `docs/design/README-USAGE.md` for the design source of truth.
 
 ## Beets Version
 
-- **Current**: `beets==2.10.0` (pinned via `constraints.txt`)
+- **Current**: beets 2.10.0 (pinned as a direct release tarball in `pyproject.toml` — the single source of truth; bump the tag to change it)
 - Key 2.10.0 behaviors this app handles:
   - Genres stored as native list field (`genres`); `_format_genre()` in `src/utils.py` handles both list and legacy string values
   - Library paths stored relative to DB root; `_resolve_path()` in `src/utils.py` joins `LIBRARY_ROOT` + relative path (absolute paths pass through unchanged)
@@ -178,15 +155,8 @@ See `frontend/README.md` for the day-to-day frontend workflow and `docs/design/R
 
 ## Testing
 
-- **Framework**: pytest + pytest-cov + ruff
+- **Framework**: pytest + pytest-cov + pytest-mock; ruff for lint/format
 - **Test structure**: `tests/` at project root, files mirror `src/routes/`
 - **Config**: `pyproject.toml`
-- **Fixtures**: `tests/conftest.py` — Flask app fixture via `create_app(test_config=...)` with temp SQLite file seeded with beets schema tables
+- **Fixtures**: `tests/conftest.py` — Flask app fixture via `create_app(test_config=...)` with a temp SQLite file seeded with beets schema tables
 - **Coverage target**: 80%+ for modular code
-
-```bash
-make test      # run pytest
-make coverage  # run pytest with coverage report
-make lint      # ruff check
-make fmt       # ruff format
-```

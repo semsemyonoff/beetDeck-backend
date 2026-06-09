@@ -113,25 +113,21 @@ All plugins have `auto: no` — beetDeck triggers them on demand through the UI.
 ## Architecture
 
 - **Backend**: Flask + gunicorn (1 worker, 4 threads). Single worker is required because in-memory state (identification tasks, cover previews) must be shared across requests. Routes are organized as Flask Blueprints under `src/routes/`.
-- **Frontend**: React 18 + Vite SPA with hash-based routing (`#/` = library, `#/artist/<name>` = artist page, `#/album/<id>` = album page, `#/untagged` = untagged items). Built via `npm run build` into `src/static/dist/` and served by Flask. Source lives in `frontend/src/`.
+- **Frontend**: React 18 + Vite SPA with hash-based routing (`#/` = library, `#/artist/<name>` = artist page, `#/album/<id>` = album page, `#/untagged` = untagged items). It lives in a **separate repository**; its production build is dropped into `src/static/dist/` and served by Flask (the Vite manifest is read at request time to inject the hashed JS/CSS into `src/templates/index.html`).
 - **beets integration**: uses the beets Python API directly (not the CLI) for identification, genre lookup, cover art, and lyrics. The CLI is only used for `beet import` (rescan) and `beet update` (prune stale entries).
 - **beets version**: requires beets 2.10.0. Genres are stored as native list fields; library paths are stored relative to the database root and resolved at runtime.
 
 ## Local development
 
+Dependencies are declared in `pyproject.toml` (runtime under `[project]`, tooling
+under the `dev` extra). Install them into a virtualenv with an editable install:
+
 ```bash
-# Install runtime + dev dependencies
-pip install -r requirements.txt -c constraints.txt
-pip install -r requirements-dev.txt
+python -m venv .venv && . .venv/bin/activate
+pip install -e ".[dev]"
 
-# Install frontend dependencies
-cd frontend && npm install && cd ..
-
-# Run Flask (:5000) + Vite dev server (:5173, proxies /api) concurrently
-make dev
-
-# Or build the React frontend for production preview
-make build-frontend
+# Run the Flask dev server on :5000
+make run
 
 # Run tests
 make test
@@ -143,6 +139,10 @@ make fmt
 # Coverage report
 make coverage
 ```
+
+The frontend SPA lives in its own repository. To exercise the full UI locally,
+build it there and drop its output into `src/static/dist/`, then `make run` and
+open `http://localhost:5000`.
 
 ## API reference
 
