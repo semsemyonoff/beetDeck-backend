@@ -4,6 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>beetDeck</title>
+    <script>
+      (function () {
+        var m = localStorage.getItem('theme') || 'auto';
+        var e = m !== 'auto' ? m : (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.setAttribute('data-theme', e);
+      })();
+    </script>
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='logo.svg') }}" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
