@@ -53,5 +53,5 @@ build:
 # make build / build.sh will proceed without the missing-manifest error.
 sync-frontend-dist:
 	cd "$(_WORKSPACE_DIR)" && dwe cmd frontend.npm --set args="run build"
-	rm -rf src/static/dist
-	cp -r "$(_FRONTEND_SRC)/dist" src/static/dist
+	rm -rf "$(_MKFILE_DIR)src/static/dist"
+	cp -r "$(_FRONTEND_SRC)/dist" "$(_MKFILE_DIR)src/static/dist"
