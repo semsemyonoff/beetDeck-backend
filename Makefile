@@ -11,7 +11,12 @@ PIP    ?= .venv/bin/pip
 PYTEST ?= .venv/bin/pytest
 RUFF   ?= .venv/bin/ruff
 
-.PHONY: install test lint fmt coverage run build
+# Absolute paths derived from this Makefile's location (safe when invoked from any directory)
+_MKFILE_DIR    := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+_WORKSPACE_DIR := $(abspath $(_MKFILE_DIR)../../..)
+_FRONTEND_SRC  := $(abspath $(_MKFILE_DIR)../../frontend/src)
+
+.PHONY: install test lint fmt coverage run build sync-frontend-dist
 
 # Install runtime + dev dependencies (declared in pyproject.toml) into the venv
 install:
@@ -41,3 +46,12 @@ run:
 # The SPA must already be built into src/static/dist/ (see Dockerfile / README).
 build:
 	./build.sh
+
+# Build the frontend SPA (inside the DWE container) and copy its output here.
+# Requires the DWE stack to be running: dwe status / dwe deploy run.
+# After this succeeds, src/static/dist/.vite/manifest.json will exist and
+# make build / build.sh will proceed without the missing-manifest error.
+sync-frontend-dist:
+	cd "$(_WORKSPACE_DIR)" && dwe cmd frontend.npm --set args="run build"
+	rm -rf "$(_MKFILE_DIR)src/static/dist"
+	cp -r "$(_FRONTEND_SRC)/dist" "$(_MKFILE_DIR)src/static/dist"

@@ -141,8 +141,27 @@ make coverage
 ```
 
 The frontend SPA lives in its own repository. To exercise the full UI locally,
-build it there and drop its output into `src/static/dist/`, then `make run` and
+build it there and copy `dist/` into `src/static/dist/`, then `make run` and
 open `http://localhost:5000`.
+
+### Syncing the frontend build (production hand-off)
+
+The production Docker image bundles the pre-built SPA. Flask reads
+`src/static/dist/.vite/manifest.json` at request time to inject the hashed
+JS/CSS into `src/templates/index.html`; `build.sh` aborts with an error if
+that file is missing.
+
+One-command sync (requires the DWE stack running):
+
+```bash
+make sync-frontend-dist   # builds SPA in-container, then copies dist/ here
+make build                # build and push the multi-arch Docker image
+```
+
+What it does:
+1. Runs `npm run build` inside the `frontend` DWE container (outputs to
+   `services/frontend/src/dist/` on the host via the bind mount).
+2. Copies that `dist/` tree into `src/static/dist/` so `build.sh` can find it.
 
 ## API reference
 
