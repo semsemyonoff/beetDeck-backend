@@ -220,6 +220,15 @@ class TestNormalizeAbsolutePaths:
         insert_item(db_path, album_id, path=b"/music/track.mp3")
         assert _normalize_absolute_paths(db_path, "") == 0
 
+    def test_missing_schema_is_noop(self, tmp_path):
+        """Fresh library: DB file has no items/albums tables yet (beets creates
+        them only on the first import). Preflight must skip, not crash."""
+        fresh_db = str(tmp_path / "library.db")
+        # sqlite3.connect creates an empty schema-less DB file, like the 0-byte
+        # library.db a fresh deployment leaves before the first beet import.
+        sqlite3.connect(fresh_db).close()
+        assert _normalize_absolute_paths(fresh_db, "/music") == 0
+
 
 # ---------------------------------------------------------------------------
 # POST /api/rescan

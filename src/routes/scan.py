@@ -47,6 +47,11 @@ def _normalize_absolute_paths(library_db, library_root):
     to treat existing files as new and create duplicate albums. This runs as a
     preflight before every rescan so the invariant is guaranteed.
 
+    On a fresh library the DB file may not exist yet (or be an empty file with no
+    schema) because beets only creates the items/albums tables on the first
+    ``beet import``. In that case there is nothing to normalize, so the missing
+    tables are treated as a no-op rather than an error.
+
     Returns the total number of rows updated.
     """
     if not library_root:
@@ -56,17 +61,30 @@ def _normalize_absolute_paths(library_db, library_root):
     conn = sqlite3.connect(library_db, timeout=10)
     try:
         cur = conn.cursor()
-        cur.execute(
-            "UPDATE items SET path = substr(path, ?) WHERE substr(path, 1, ?) = ?",
-            (prefix_len + 1, prefix_len, prefix_bytes),
-        )
-        items_updated = cur.rowcount
-        cur.execute(
-            "UPDATE albums SET artpath = substr(artpath, ?) "
-            "WHERE artpath IS NOT NULL AND substr(artpath, 1, ?) = ?",
-            (prefix_len + 1, prefix_len, prefix_bytes),
-        )
-        art_updated = cur.rowcount
+        existing = {
+            r[0]
+            for r in cur.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name IN ('items', 'albums')"
+            ).fetchall()
+        }
+        if "items" not in existing and "albums" not in existing:
+            return 0
+        items_updated = 0
+        if "items" in existing:
+            cur.execute(
+                "UPDATE items SET path = substr(path, ?) WHERE substr(path, 1, ?) = ?",
+                (prefix_len + 1, prefix_len, prefix_bytes),
+            )
+            items_updated = cur.rowcount
+        art_updated = 0
+        if "albums" in existing:
+            cur.execute(
+                "UPDATE albums SET artpath = substr(artpath, ?) "
+                "WHERE artpath IS NOT NULL AND substr(artpath, 1, ?) = ?",
+                (prefix_len + 1, prefix_len, prefix_bytes),
+            )
+            art_updated = cur.rowcount
         conn.commit()
     finally:
         conn.close()
