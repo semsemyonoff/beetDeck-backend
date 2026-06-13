@@ -337,6 +337,7 @@ def metadata_batch():
     al_albumartist = (album_data.get("albumartist") or "").strip()
     al_year_raw = album_data.get("year")
     al_genre = (album_data.get("genre") or "").strip()
+    al_genres = [g.strip() for g in al_genre.split(",") if g.strip()] if al_genre else []
 
     _ALBUM_KEYS = ("album", "albumartist", "year", "genre")
     has_album_fields = any(
@@ -367,6 +368,26 @@ def metadata_batch():
             warnings = []
             albums_updated = []
 
+            # Parse the album-level year once; an invalid value is reported a
+            # single time rather than once per album.
+            al_year = None
+            if al_year_raw is not None:
+                try:
+                    al_year = int(al_year_raw)
+                except (TypeError, ValueError):
+                    warnings.append(f"invalid year value: {al_year_raw!r}")
+
+            def _apply_album_fields(obj):
+                """Set the supplied album-level fields on an Album or Item."""
+                if al_album:
+                    obj.album = al_album
+                if al_albumartist:
+                    obj.albumartist = al_albumartist
+                if al_year is not None:
+                    obj.year = al_year
+                if al_genres:
+                    obj.genres = al_genres
+
             # Load all item objects; warn on unknown ids
             item_objects = {}
             for entry in items_data:
@@ -378,6 +399,7 @@ def metadata_batch():
                     item_objects[item_id] = item
 
             # Album pass — write album-level fields via the beets Album object
+            updated_album_ids = set()
             if has_album_fields:
                 album_ids = {
                     item.album_id
@@ -389,28 +411,28 @@ def metadata_batch():
                     if al is None:
                         warnings.append(f"album {album_id} not found")
                         continue
-                    if al_album:
-                        al.album = al_album
-                    if al_albumartist:
-                        al.albumartist = al_albumartist
-                    if al_year_raw is not None:
-                        try:
-                            al.year = int(al_year_raw)
-                        except (TypeError, ValueError):
-                            warnings.append(f"invalid year value: {al_year_raw!r}")
-                    if al_genre:
-                        al.genres = [g.strip() for g in al_genre.split(",") if g.strip()]
+                    _apply_album_fields(al)
                     al.store()
+                    updated_album_ids.add(album_id)
                     albums_updated.append(album_id)
 
-            # Item pass — write per-track fields and flush to files
+            # Item pass — write per-track overrides AND flush propagated
+            # album-level fields to every member file.  Album.store() only
+            # touches the DB, so the file write below is what keeps on-disk
+            # tags from going stale (mirrors genres.py save_genre).
             for entry in items_data:
                 item_id = entry["id"]
                 item = item_objects.get(item_id)
                 if item is None:
                     continue
 
-                changed = False
+                # An item belongs to an updated album → its file must be
+                # rewritten with the propagated album-level fields.
+                album_changed = item.album_id in updated_album_ids
+                if album_changed:
+                    _apply_album_fields(item)
+
+                changed = album_changed
                 title = (entry.get("title") or "").strip()
                 artist = (entry.get("artist") or "").strip()
                 track_raw = entry.get("track")

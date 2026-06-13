@@ -56,6 +56,7 @@ class TestMetadataBatch:
         mock_lib.get_item.return_value = mock_item
         mock_lib.get_album.return_value = mock_al
         mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        write = mocker.patch("src.routes.items._try_write_item", return_value=True)
 
         resp = client.post(
             "/api/items/metadata-batch",
@@ -72,6 +73,13 @@ class TestMetadataBatch:
         assert mock_al.albumartist == "Great Artist"
         assert mock_al.year == 2023
         mock_al.store.assert_called_once()
+        # Album-level fields must also be flushed to the member item's file,
+        # otherwise on-disk tags go stale (Album.store() only touches the DB).
+        write.assert_called_once_with(mock_item)
+        assert mock_item.album == "Tagged Album"
+        assert mock_item.albumartist == "Great Artist"
+        assert mock_item.year == 2023
+        mock_item.store.assert_called_once()
 
     def test_genres_stored_as_list_not_scalar(self, client, mocker):
         mock_item = self._make_mock_item(mocker, 1, 10)
@@ -80,6 +88,7 @@ class TestMetadataBatch:
         mock_lib.get_item.return_value = mock_item
         mock_lib.get_album.return_value = mock_al
         mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("src.routes.items._try_write_item", return_value=True)
 
         resp = client.post(
             "/api/items/metadata-batch",
@@ -89,8 +98,10 @@ class TestMetadataBatch:
             },
         )
         assert resp.status_code == 200
-        # genres must be a list, not a string
+        # genres must be a list, not a string — on both the album and the file-
+        # flushed item.
         assert mock_al.genres == ["Rock", "Electronic"]
+        assert mock_item.genres == ["Rock", "Electronic"]
 
     def test_per_track_title_and_artist_override_persists(self, client, mocker):
         mock_item = self._make_mock_item(mocker, 2, 20)
@@ -156,6 +167,42 @@ class TestMetadataBatch:
         assert data["status"] == "ok"
         assert any("file write failed" in w for w in data["warnings"])
 
+    def test_invalid_year_produces_warning_not_500(self, client, mocker):
+        mock_item = self._make_mock_item(mocker, 1, 10)
+        mock_al = self._make_mock_album(mocker, 10)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mock_lib.get_album.return_value = mock_al
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("src.routes.items._try_write_item", return_value=True)
+
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={
+                "album": {"albumartist": "A", "year": "not-a-year"},
+                "items": [{"id": 1}],
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert any("invalid year" in w for w in data["warnings"])
+
+    def test_invalid_track_and_disc_produce_warnings_not_500(self, client, mocker):
+        mock_item = self._make_mock_item(mocker, 3, 30)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("src.routes.items._try_write_item", return_value=True)
+
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"items": [{"id": 3, "track": "x", "disc": "y"}]},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert any("invalid track" in w for w in data["warnings"])
+        assert any("invalid disc" in w for w in data["warnings"])
+
     def test_album_only_save_sends_all_item_ids(self, client, mocker):
         """Album-only save (no per-track edits) still collects album_id from items."""
         items = [self._make_mock_item(mocker, i, 50) for i in range(1, 4)]
@@ -168,6 +215,7 @@ class TestMetadataBatch:
         mock_lib.get_album.return_value = mock_al
 
         mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        write = mocker.patch("src.routes.items._try_write_item", return_value=True)
 
         resp = client.post(
             "/api/items/metadata-batch",
@@ -181,6 +229,10 @@ class TestMetadataBatch:
         assert mock_lib.get_item.call_count == 3
         # Album store called once (single album_id=50)
         mock_al.store.assert_called_once()
+        # Every member file is rewritten with the propagated album field.
+        assert write.call_count == 3
+        for it in items:
+            assert it.albumartist == "Bulk Artist"
 
     def test_multiple_album_ids_in_items_all_updated(self, client, mocker):
         item1 = self._make_mock_item(mocker, 1, 10)
@@ -192,6 +244,7 @@ class TestMetadataBatch:
         mock_lib.get_item.side_effect = lambda iid: {1: item1, 2: item2}.get(iid)
         mock_lib.get_album.side_effect = lambda aid: {10: al10, 20: al20}.get(aid)
         mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        write = mocker.patch("src.routes.items._try_write_item", return_value=True)
 
         resp = client.post(
             "/api/items/metadata-batch",
@@ -205,6 +258,10 @@ class TestMetadataBatch:
         assert set(data["albums_updated"]) == {10, 20}
         al10.store.assert_called_once()
         al20.store.assert_called_once()
+        # Both members' files get the album field flushed.
+        assert write.call_count == 2
+        assert item1.albumartist == "Shared Artist"
+        assert item2.albumartist == "Shared Artist"
 
 
 def _reset_state():
