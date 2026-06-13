@@ -31,11 +31,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      # Mirror the production image (Dockerfile): beets shells out to ffmpeg.
-      - name: Install system deps (ffmpeg)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
+      # The suite mocks every subprocess (beets/ffmpeg) call, so no system
+      # packages are needed — just the Python deps.
       - name: Install project (dev extras)
         run: pip install -e ".[dev]"
       - name: Run tests
