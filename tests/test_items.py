@@ -16,9 +16,12 @@ class TestMetadataBatch:
         item.path = f"/music/track{item_id}.mp3".encode()
         return item
 
-    def _make_mock_album(self, mocker, album_id):
+    def _make_mock_album(self, mocker, album_id, members=None):
         al = mocker.MagicMock()
         al.id = album_id
+        # Album.items() returns the album's member items; default to none so
+        # existing tests only flush the request items.
+        al.items.return_value = list(members) if members else []
         return al
 
     def test_returns_400_for_empty_body(self, client):
@@ -262,6 +265,138 @@ class TestMetadataBatch:
         assert write.call_count == 2
         assert item1.albumartist == "Shared Artist"
         assert item2.albumartist == "Shared Artist"
+
+    def test_album_members_not_in_request_get_files_flushed(self, client, mocker):
+        """A member of an updated album that is absent from the request still
+        gets its file rewritten, so multi-disc / shared-album on-disk tags do
+        not go stale (mirrors genres.py save_genre)."""
+        req_item = self._make_mock_item(mocker, 1, 70)
+        # A second track shares album_id 70 but is not listed in items_data.
+        other_member = self._make_mock_item(mocker, 2, 70)
+        mock_al = self._make_mock_album(mocker, 70, members=[req_item, other_member])
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.side_effect = lambda iid: {1: req_item}.get(iid)
+        mock_lib.get_album.return_value = mock_al
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        write = mocker.patch("src.routes.items._try_write_item", return_value=True)
+
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"album": {"albumartist": "Bulk Artist"}, "items": [{"id": 1}]},
+        )
+        assert resp.status_code == 200
+        # Both the request item and the absent member files are written once each.
+        written = {c.args[0].id for c in write.call_args_list}
+        assert written == {1, 2}
+        assert write.call_count == 2
+
+    def test_absent_album_member_file_write_failure_surfaces_warning(self, client, mocker):
+        req_item = self._make_mock_item(mocker, 1, 71)
+        other_member = self._make_mock_item(mocker, 2, 71)
+        mock_al = self._make_mock_album(mocker, 71, members=[req_item, other_member])
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.side_effect = lambda iid: {1: req_item}.get(iid)
+        mock_lib.get_album.return_value = mock_al
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        # Only the absent member (id 2) fails to write.
+        mocker.patch(
+            "src.routes.items._try_write_item",
+            side_effect=lambda it: it.id != 2,
+        )
+
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"album": {"albumartist": "Bulk Artist"}, "items": [{"id": 1}]},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert any("file write failed" in w for w in data["warnings"])
+
+    def test_returns_400_for_non_object_body(self, client):
+        resp = client.post("/api/items/metadata-batch", json=[1, 2, 3])
+        assert resp.status_code == 400
+
+    def test_returns_400_when_album_is_not_object(self, client):
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"album": "x", "items": [{"id": 1}]},
+        )
+        assert resp.status_code == 400
+
+    def test_returns_400_when_items_is_not_list(self, client):
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"album": {"albumartist": "A"}, "items": {"id": 1}},
+        )
+        assert resp.status_code == 400
+
+    def test_returns_400_when_item_entry_not_object(self, client):
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"album": {"albumartist": "A"}, "items": [1]},
+        )
+        assert resp.status_code == 400
+
+    def test_returns_400_when_album_is_falsy_non_object(self, client):
+        # A falsy malformed value (e.g. []) must not be normalized to {} and
+        # silently accepted as an item-only write.
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"album": [], "items": [{"id": 1, "title": "X"}]},
+        )
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "'album' must be an object"
+
+    def test_returns_400_when_items_is_falsy_non_list(self, client):
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"album": {"albumartist": "A"}, "items": 0},
+        )
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "'items' must be a list"
+
+    def test_returns_400_when_album_scalar_is_wrong_type(self, client):
+        # A truthy non-string album scalar must be a 400, not a 500 from
+        # `(value or "").strip()` raising AttributeError.
+        for bad in ([1], 123, True, {"a": 1}):
+            resp = client.post(
+                "/api/items/metadata-batch",
+                json={"album": {"album": bad}, "items": [{"id": 1}]},
+            )
+            assert resp.status_code == 400, bad
+            assert resp.get_json()["error"] == "'album.album' must be a string"
+
+    def test_returns_400_when_album_falsy_scalar_is_wrong_type(self, client):
+        # The falsy `[]` case Codex flagged: also a clean 400 rather than being
+        # silently normalized to "".
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"album": {"album": []}, "items": [{"id": 1}]},
+        )
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "'album.album' must be a string"
+
+    def test_returns_400_when_item_scalar_is_wrong_type(self, client):
+        # A truthy non-string per-item title/artist must be a 400, not a 500.
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"items": [{"id": 1, "title": ["x"]}]},
+        )
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "each item 'title' must be a string"
+
+    def test_returns_400_when_item_id_is_bool(self, client):
+        # `bool` is an `int` subclass, so a JSON boolean must not pass the id
+        # check and silently alias to item 0/1.
+        for bad in (True, False):
+            resp = client.post(
+                "/api/items/metadata-batch",
+                json={"items": [{"id": bad, "title": "X"}]},
+            )
+            assert resp.status_code == 400, bad
+            assert resp.get_json()["error"] == "Each item entry must have an integer id"
 
 
 def _reset_state():

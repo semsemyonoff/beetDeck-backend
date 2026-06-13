@@ -328,9 +328,36 @@ def metadata_batch():
     album row + clears untagged filter); per-track fields are written to item
     rows.  Unknown item ids produce warnings, not 500 errors.
     """
-    data = request.get_json(silent=True) or {}
-    album_data = data.get("album") or {}
-    items_data = data.get("items") or []
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "Request body must be a JSON object"}), 400
+    album_data = data.get("album")
+    if album_data is None:
+        album_data = {}
+    elif not isinstance(album_data, dict):
+        return jsonify({"error": "'album' must be an object"}), 400
+    items_data = data.get("items")
+    if items_data is None:
+        items_data = []
+    elif not isinstance(items_data, list):
+        return jsonify({"error": "'items' must be a list"}), 400
+    if any(not isinstance(entry, dict) for entry in items_data):
+        return jsonify({"error": "each item entry must be an object"}), 400
+
+    # Reject wrong-typed string scalars up front. A truthy non-string (e.g. a
+    # list or number) would otherwise reach `(value or "").strip()` and raise
+    # AttributeError, surfacing as a 500 instead of a 400. Numeric fields
+    # (year/track/disc) are coerced with int() further down and warn on bad
+    # values, so they are intentionally not checked here.
+    for k in ("album", "albumartist", "genre"):
+        v = album_data.get(k)
+        if v is not None and not isinstance(v, str):
+            return jsonify({"error": f"'album.{k}' must be a string"}), 400
+    for entry in items_data:
+        for k in ("title", "artist"):
+            v = entry.get(k)
+            if v is not None and not isinstance(v, str):
+                return jsonify({"error": f"each item '{k}' must be a string"}), 400
 
     # Extract album-level fields
     al_album = (album_data.get("album") or "").strip()
@@ -356,7 +383,10 @@ def metadata_batch():
         return jsonify({"error": "items must contain at least one id when album fields are present"}), 400
 
     for entry in items_data:
-        if not isinstance(entry.get("id"), int):
+        # `bool` is an `int` subclass, so isinstance(True, int) is True — reject
+        # JSON booleans explicitly to avoid `{"id": true}` aliasing to item 1.
+        item_id = entry.get("id")
+        if not isinstance(item_id, int) or isinstance(item_id, bool):
             return jsonify({"error": "Each item entry must have an integer id"}), 400
 
     library_db = current_app.config["LIBRARY_DB"]
@@ -376,6 +406,13 @@ def metadata_batch():
                     al_year = int(al_year_raw)
                 except (TypeError, ValueError):
                     warnings.append(f"invalid year value: {al_year_raw!r}")
+
+            def _item_disk_path(it):
+                """Resolved on-disk path for an Item, for warning messages."""
+                path = getattr(it, "path", "") or ""
+                if isinstance(path, bytes):
+                    path = path.decode("utf-8", errors="replace")
+                return _resolve_path(path) if path else path
 
             def _apply_album_fields(obj):
                 """Set the supplied album-level fields on an Album or Item."""
@@ -415,6 +452,23 @@ def metadata_batch():
                     al.store()
                     updated_album_ids.add(album_id)
                     albums_updated.append(album_id)
+
+                    # Album.store() updates the album + member rows in the DB
+                    # but never touches files.  Flush the propagated album-level
+                    # fields to the files of members NOT named in this request
+                    # (multi-disc dirs, shared untagged album rows) — otherwise
+                    # their on-disk tags go stale.  Request members are rewritten
+                    # in the item pass below with their per-track overrides.
+                    # Mirrors genres.py save_genre's album.items() loop.
+                    for member in al.items():
+                        if member.id in item_objects:
+                            continue
+                        if not _try_write_item(member):
+                            resolved = _item_disk_path(member)
+                            log.warning(
+                                "File write failed for item %d: %s", member.id, resolved
+                            )
+                            warnings.append(f"file write failed: {resolved}")
 
             # Item pass — write per-track overrides AND flush propagated
             # album-level fields to every member file.  Album.store() only
@@ -460,10 +514,7 @@ def metadata_batch():
                 if changed:
                     item.store()
                     if not _try_write_item(item):
-                        path = getattr(item, "path", "") or ""
-                        if isinstance(path, bytes):
-                            path = path.decode("utf-8", errors="replace")
-                        resolved = _resolve_path(path) if path else path
+                        resolved = _item_disk_path(item)
                         log.warning("File write failed for item %d: %s", item_id, resolved)
                         warnings.append(f"file write failed: {resolved}")
 
