@@ -153,9 +153,7 @@ def confirm_genre(album_id):
         write_failures = []
         for item in fresh.items():
             if not _try_write_item(item):
-                log.warning(
-                    "Failed to write genre tag for track %d: %s", item.track, item.title
-                )
+                log.warning("Failed to write genre tag for track %d: %s", item.track, item.title)
                 write_failures.append(item.id)
 
         if write_failures:
