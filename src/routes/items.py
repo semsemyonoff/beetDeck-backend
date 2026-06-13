@@ -380,7 +380,9 @@ def metadata_batch():
     if not has_album_fields and not has_item_overrides:
         return jsonify({"error": "At least one album field or item override is required"}), 400
     if has_album_fields and not items_data:
-        return jsonify({"error": "items must contain at least one id when album fields are present"}), 400
+        return jsonify(
+            {"error": "items must contain at least one id when album fields are present"}
+        ), 400
 
     for entry in items_data:
         # `bool` is an `int` subclass, so isinstance(True, int) is True — reject
@@ -439,9 +441,7 @@ def metadata_batch():
             updated_album_ids = set()
             if has_album_fields:
                 album_ids = {
-                    item.album_id
-                    for item in item_objects.values()
-                    if item.album_id is not None
+                    item.album_id for item in item_objects.values() if item.album_id is not None
                 }
                 for album_id in album_ids:
                     al = lib.get_album(album_id)
@@ -465,9 +465,7 @@ def metadata_batch():
                             continue
                         if not _try_write_item(member):
                             resolved = _item_disk_path(member)
-                            log.warning(
-                                "File write failed for item %d: %s", member.id, resolved
-                            )
+                            log.warning("File write failed for item %d: %s", member.id, resolved)
                             warnings.append(f"file write failed: {resolved}")
 
             # Item pass — write per-track overrides AND flush propagated

@@ -212,9 +212,7 @@ class TestMetadataBatch:
         mock_al = self._make_mock_album(mocker, 50)
 
         mock_lib = mocker.MagicMock()
-        mock_lib.get_item.side_effect = lambda iid: next(
-            (x for x in items if x.id == iid), None
-        )
+        mock_lib.get_item.side_effect = lambda iid: next((x for x in items if x.id == iid), None)
         mock_lib.get_album.return_value = mock_al
 
         mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
