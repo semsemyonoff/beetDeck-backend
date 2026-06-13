@@ -317,6 +317,144 @@ def update_metadata(item_id):
             lib._close()
 
 
+@bp.route("/api/items/metadata-batch", methods=["POST"])
+def metadata_batch():
+    """Write album-level and per-track metadata in one request under a write lock.
+
+    Body: { album: {album?, albumartist?, year?, genre?},
+            items: [{id, title?, artist?, track?, disc?}, ...] }
+
+    album-level fields are written via the beets Album object (propagates to
+    album row + clears untagged filter); per-track fields are written to item
+    rows.  Unknown item ids produce warnings, not 500 errors.
+    """
+    data = request.get_json(silent=True) or {}
+    album_data = data.get("album") or {}
+    items_data = data.get("items") or []
+
+    # Extract album-level fields
+    al_album = (album_data.get("album") or "").strip()
+    al_albumartist = (album_data.get("albumartist") or "").strip()
+    al_year_raw = album_data.get("year")
+    al_genre = (album_data.get("genre") or "").strip()
+
+    _ALBUM_KEYS = ("album", "albumartist", "year", "genre")
+    has_album_fields = any(
+        album_data.get(k) is not None and album_data.get(k) != "" for k in _ALBUM_KEYS
+    )
+
+    _ITEM_OVERRIDE_KEYS = ("title", "artist", "track", "disc")
+    has_item_overrides = any(
+        any(entry.get(k) is not None and entry.get(k) != "" for k in _ITEM_OVERRIDE_KEYS)
+        for entry in items_data
+    )
+
+    if not has_album_fields and not has_item_overrides:
+        return jsonify({"error": "At least one album field or item override is required"}), 400
+    if has_album_fields and not items_data:
+        return jsonify({"error": "items must contain at least one id when album fields are present"}), 400
+
+    for entry in items_data:
+        if not isinstance(entry.get("id"), int):
+            return jsonify({"error": "Each item entry must have an integer id"}), 400
+
+    library_db = current_app.config["LIBRARY_DB"]
+    library_dir = current_app.config.get("LIBRARY_ROOT") or None
+    lib = None
+    try:
+        with state.metadata_write_lock:
+            lib = _init_beets(library_db, library_dir)
+            warnings = []
+            albums_updated = []
+
+            # Load all item objects; warn on unknown ids
+            item_objects = {}
+            for entry in items_data:
+                item_id = entry["id"]
+                item = lib.get_item(item_id)
+                if item is None:
+                    warnings.append(f"item {item_id} not found")
+                else:
+                    item_objects[item_id] = item
+
+            # Album pass — write album-level fields via the beets Album object
+            if has_album_fields:
+                album_ids = {
+                    item.album_id
+                    for item in item_objects.values()
+                    if item.album_id is not None
+                }
+                for album_id in album_ids:
+                    al = lib.get_album(album_id)
+                    if al is None:
+                        warnings.append(f"album {album_id} not found")
+                        continue
+                    if al_album:
+                        al.album = al_album
+                    if al_albumartist:
+                        al.albumartist = al_albumartist
+                    if al_year_raw is not None:
+                        try:
+                            al.year = int(al_year_raw)
+                        except (TypeError, ValueError):
+                            warnings.append(f"invalid year value: {al_year_raw!r}")
+                    if al_genre:
+                        al.genres = [g.strip() for g in al_genre.split(",") if g.strip()]
+                    al.store()
+                    albums_updated.append(album_id)
+
+            # Item pass — write per-track fields and flush to files
+            for entry in items_data:
+                item_id = entry["id"]
+                item = item_objects.get(item_id)
+                if item is None:
+                    continue
+
+                changed = False
+                title = (entry.get("title") or "").strip()
+                artist = (entry.get("artist") or "").strip()
+                track_raw = entry.get("track")
+                disc_raw = entry.get("disc")
+
+                if title:
+                    item.title = title
+                    changed = True
+                if artist:
+                    item.artist = artist
+                    changed = True
+                if track_raw is not None:
+                    try:
+                        item.track = int(track_raw)
+                        changed = True
+                    except (TypeError, ValueError):
+                        warnings.append(f"invalid track value for item {item_id}: {track_raw!r}")
+                if disc_raw is not None:
+                    try:
+                        item.disc = int(disc_raw)
+                        changed = True
+                    except (TypeError, ValueError):
+                        warnings.append(f"invalid disc value for item {item_id}: {disc_raw!r}")
+
+                if changed:
+                    item.store()
+                    if not _try_write_item(item):
+                        path = getattr(item, "path", "") or ""
+                        if isinstance(path, bytes):
+                            path = path.decode("utf-8", errors="replace")
+                        resolved = _resolve_path(path) if path else path
+                        log.warning("File write failed for item %d: %s", item_id, resolved)
+                        warnings.append(f"file write failed: {resolved}")
+
+        return jsonify({"status": "ok", "warnings": warnings, "albums_updated": albums_updated})
+
+    except Exception as e:
+        log.exception("metadata-batch failed")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if lib is not None:
+            lib._close()
+
+
 @bp.route("/api/items/identify", methods=["POST"])
 def items_identify():
     """Start background identification for a list of item IDs."""

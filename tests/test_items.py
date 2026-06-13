@@ -3,6 +3,209 @@
 import src.state as state
 from tests.conftest import insert_album, insert_item
 
+# ---------------------------------------------------------------------------
+# POST /api/items/metadata-batch
+# ---------------------------------------------------------------------------
+
+
+class TestMetadataBatch:
+    def _make_mock_item(self, mocker, item_id, album_id):
+        item = mocker.MagicMock()
+        item.id = item_id
+        item.album_id = album_id
+        item.path = f"/music/track{item_id}.mp3".encode()
+        return item
+
+    def _make_mock_album(self, mocker, album_id):
+        al = mocker.MagicMock()
+        al.id = album_id
+        return al
+
+    def test_returns_400_for_empty_body(self, client):
+        resp = client.post("/api/items/metadata-batch", json={})
+        assert resp.status_code == 400
+        assert "error" in resp.get_json()
+
+    def test_returns_400_when_only_bare_ids_and_no_album_fields(self, client):
+        # items with only ids, no album fields, no per-track overrides
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"items": [{"id": 1}, {"id": 2}]},
+        )
+        assert resp.status_code == 400
+
+    def test_returns_400_when_album_fields_present_but_no_items(self, client):
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"album": {"albumartist": "Artist"}, "items": []},
+        )
+        assert resp.status_code == 400
+
+    def test_returns_400_when_album_fields_present_and_items_absent(self, client):
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"album": {"album": "My Album"}},
+        )
+        assert resp.status_code == 400
+
+    def test_album_only_save_sets_album_fields_and_calls_store(self, client, mocker):
+        """Album-level fields are written via the beets Album object; al.store() called."""
+        mock_item = self._make_mock_item(mocker, 1, 10)
+        mock_al = self._make_mock_album(mocker, 10)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mock_lib.get_album.return_value = mock_al
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={
+                "album": {"album": "Tagged Album", "albumartist": "Great Artist", "year": 2023},
+                "items": [{"id": 1}],
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "ok"
+        assert 10 in data["albums_updated"]
+        assert mock_al.album == "Tagged Album"
+        assert mock_al.albumartist == "Great Artist"
+        assert mock_al.year == 2023
+        mock_al.store.assert_called_once()
+
+    def test_genres_stored_as_list_not_scalar(self, client, mocker):
+        mock_item = self._make_mock_item(mocker, 1, 10)
+        mock_al = self._make_mock_album(mocker, 10)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mock_lib.get_album.return_value = mock_al
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={
+                "album": {"albumartist": "A", "genre": "Rock, Electronic"},
+                "items": [{"id": 1}],
+            },
+        )
+        assert resp.status_code == 200
+        # genres must be a list, not a string
+        assert mock_al.genres == ["Rock", "Electronic"]
+
+    def test_per_track_title_and_artist_override_persists(self, client, mocker):
+        mock_item = self._make_mock_item(mocker, 2, 20)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("src.routes.items._try_write_item", return_value=True)
+
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"items": [{"id": 2, "title": "New Title", "artist": "New Artist"}]},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "ok"
+        assert mock_item.title == "New Title"
+        assert mock_item.artist == "New Artist"
+        mock_item.store.assert_called()
+
+    def test_per_track_track_and_disc_coerced_to_int(self, client, mocker):
+        mock_item = self._make_mock_item(mocker, 3, 30)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("src.routes.items._try_write_item", return_value=True)
+
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"items": [{"id": 3, "track": "5", "disc": "2"}]},
+        )
+        assert resp.status_code == 200
+        assert mock_item.track == 5
+        assert mock_item.disc == 2
+
+    def test_unknown_item_id_produces_warning_not_500(self, client, mocker):
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = None
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        # Need at least one item override since no album fields
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"items": [{"id": 999, "title": "Ghost"}]},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "ok"
+        assert any("999" in w for w in data["warnings"])
+
+    def test_file_write_failure_produces_warning_not_500(self, client, mocker):
+        mock_item = self._make_mock_item(mocker, 4, 40)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("src.routes.items._try_write_item", return_value=False)
+
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"items": [{"id": 4, "title": "Titled Track"}]},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "ok"
+        assert any("file write failed" in w for w in data["warnings"])
+
+    def test_album_only_save_sends_all_item_ids(self, client, mocker):
+        """Album-only save (no per-track edits) still collects album_id from items."""
+        items = [self._make_mock_item(mocker, i, 50) for i in range(1, 4)]
+        mock_al = self._make_mock_album(mocker, 50)
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.side_effect = lambda iid: next(
+            (x for x in items if x.id == iid), None
+        )
+        mock_lib.get_album.return_value = mock_al
+
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={
+                "album": {"albumartist": "Bulk Artist"},
+                "items": [{"id": 1}, {"id": 2}, {"id": 3}],
+            },
+        )
+        assert resp.status_code == 200
+        # All three items were loaded to resolve album_id
+        assert mock_lib.get_item.call_count == 3
+        # Album store called once (single album_id=50)
+        mock_al.store.assert_called_once()
+
+    def test_multiple_album_ids_in_items_all_updated(self, client, mocker):
+        item1 = self._make_mock_item(mocker, 1, 10)
+        item2 = self._make_mock_item(mocker, 2, 20)
+        al10 = self._make_mock_album(mocker, 10)
+        al20 = self._make_mock_album(mocker, 20)
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.side_effect = lambda iid: {1: item1, 2: item2}.get(iid)
+        mock_lib.get_album.side_effect = lambda aid: {10: al10, 20: al20}.get(aid)
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={
+                "album": {"albumartist": "Shared Artist"},
+                "items": [{"id": 1}, {"id": 2}],
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert set(data["albums_updated"]) == {10, 20}
+        al10.store.assert_called_once()
+        al20.store.assert_called_once()
+
 
 def _reset_state():
     state.identify_tasks.clear()
