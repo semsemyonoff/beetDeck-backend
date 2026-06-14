@@ -3,7 +3,7 @@
 import os
 import sqlite3
 
-from flask import Blueprint, current_app, jsonify, send_file
+from flask import Blueprint, current_app, jsonify, request, send_file
 from spectree import Response
 
 from src import state
@@ -15,7 +15,9 @@ from src.schemas.cover import (
     CoverUploadForm,
 )
 from src.utils import (
+    COVER_THUMB_SIZES,
     _album_dir_from_items,
+    _cover_thumbnail,
     _decode_path,
     _detect_disc_subdirs,
     _find_cover,
@@ -37,6 +39,12 @@ bp = Blueprint("cover", __name__)
 # would therefore break binary delivery, so they do not appear in the OpenAPI spec.
 @bp.route("/api/album/<int:album_id>/cover")
 def album_cover(album_id):
+    # Optional ``?size=`` returns a cached WebP thumbnail fitting size×size;
+    # omitting it streams the original cover file unchanged (legacy behavior).
+    size = request.args.get("size", type=int)
+    if size is not None and size not in COVER_THUMB_SIZES:
+        return jsonify({"error": f"size must be one of {list(COVER_THUMB_SIZES)}"}), 400
+
     try:
         conn = _get_ro_conn()
         try:
@@ -52,14 +60,23 @@ def album_cover(album_id):
 
     artpath = _resolve_path(a["artpath"]) if a and a["artpath"] else None
     if artpath and os.path.isfile(artpath):
-        return send_file(artpath)
+        src = artpath
+    else:
+        disc_dirs = [d["dir"] for d in _detect_disc_subdirs(items) if d["dir"]]
+        src = _find_cover(album_dir, fallback_dirs=disc_dirs)
 
-    disc_dirs = [d["dir"] for d in _detect_disc_subdirs(items) if d["dir"]]
-    cover = _find_cover(album_dir, fallback_dirs=disc_dirs)
-    if cover:
-        return send_file(cover)
+    if not src:
+        return "", 404
 
-    return "", 404
+    if size is not None:
+        thumb = _cover_thumbnail(src, size, current_app.config["COVER_CACHE_DIR"])
+        if thumb:
+            resp = send_file(thumb, mimetype="image/webp")
+            resp.headers["Cache-Control"] = "public, max-age=86400"
+            return resp
+        # On any thumbnailing failure, fall back to streaming the original.
+
+    return send_file(src)
 
 
 @bp.route("/api/album/<int:album_id>/cover/fetch", methods=["POST"])

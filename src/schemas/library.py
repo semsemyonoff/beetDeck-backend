@@ -68,6 +68,7 @@ class SearchTrack(BaseModel):
     album_id: int = Field(description="Id of the album the track belongs to.")
     album: str | None = Field(default=None, description="Album title.")
     albumartist: str | None = Field(default=None, description="Album artist.")
+    has_cover: bool = Field(description="Whether the track's album has cover art.")
 
 
 class SearchResponse(BaseModel):

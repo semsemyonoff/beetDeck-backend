@@ -20,6 +20,19 @@ from src.utils import _album_dirs_for_ids, _find_cover, _get_ro_conn, _resolve_p
 bp = Blueprint("library", __name__)
 
 
+def _has_cover(artpath_raw, dirs):
+    """Whether an album has cover art: a valid ``artpath`` or a probed cover file.
+
+    ``dirs`` is the ``(parent, disc_subdirs)`` tuple from ``_album_dirs_for_ids``
+    (or ``None`` when the album has no on-disk items).
+    """
+    artpath = _resolve_path(artpath_raw) if artpath_raw else None
+    if artpath and os.path.isfile(artpath):
+        return True
+    parent, disc_dirs = dirs or (None, [])
+    return bool(_find_cover(parent, fallback_dirs=disc_dirs))
+
+
 @bp.route("/")
 def index():
     return render_template("index.html")
@@ -139,27 +152,21 @@ def search():
             search_album_ids = [r["id"] for r in album_rows]
             search_item_dirs = _album_dirs_for_ids(conn, search_album_ids)
 
-            albums = []
-            for r in album_rows:
-                artpath = _resolve_path(r["artpath"]) if r["artpath"] else None
-                has_cover = bool(artpath and os.path.isfile(artpath))
-                if not has_cover:
-                    parent, disc_dirs = search_item_dirs.get(r["id"]) or (None, [])
-                    has_cover = bool(_find_cover(parent, fallback_dirs=disc_dirs))
-                albums.append(
-                    {
-                        "id": r["id"],
-                        "album": r["album"],
-                        "albumartist": r["albumartist"],
-                        "year": r["original_year"] or r["year"] or None,
-                        "has_cover": has_cover,
-                    }
-                )
+            albums = [
+                {
+                    "id": r["id"],
+                    "album": r["album"],
+                    "albumartist": r["albumartist"],
+                    "year": r["original_year"] or r["year"] or None,
+                    "has_cover": _has_cover(r["artpath"], search_item_dirs.get(r["id"])),
+                }
+                for r in album_rows
+            ]
 
             track_rows = conn.execute(
                 """
             SELECT i.id, i.title, i.artist, i.album_id,
-                   a.album, a.albumartist
+                   a.album, a.albumartist, a.artpath
             FROM items i
             JOIN albums a ON a.id = i.album_id
             WHERE ULOWER(i.title) LIKE ? ESCAPE '\\'
@@ -168,6 +175,17 @@ def search():
             """,
                 (like,),
             ).fetchall()
+
+            track_artpath = {
+                r["album_id"]: r["artpath"]
+                for r in track_rows
+                if r["album_id"] is not None
+            }
+            track_dirs = _album_dirs_for_ids(conn, track_artpath.keys())
+            track_cover = {
+                aid: _has_cover(artpath, track_dirs.get(aid))
+                for aid, artpath in track_artpath.items()
+            }
             tracks = [
                 {
                     "id": r["id"],
@@ -176,6 +194,7 @@ def search():
                     "album_id": r["album_id"],
                     "album": r["album"],
                     "albumartist": r["albumartist"],
+                    "has_cover": track_cover.get(r["album_id"], False),
                 }
                 for r in track_rows
             ]

@@ -2,6 +2,7 @@
 
 import json
 import os
+import tempfile
 
 from flask import Flask
 
@@ -23,6 +24,12 @@ def create_app(test_config=None):
     # the import directory. Override with BEETS_LIBRARY_ROOT env for exotic setups.
     app.config["LIBRARY_ROOT"] = (
         os.environ.get("BEETS_LIBRARY_ROOT", "") or app.config["IMPORT_DIR"]
+    )
+    # COVER_CACHE_DIR: where generated WebP cover thumbnails are cached. Defaults
+    # to a subdir of the system temp dir (always writable); override with
+    # BEETS_COVER_CACHE_DIR to point at a persistent volume.
+    app.config["COVER_CACHE_DIR"] = os.environ.get("BEETS_COVER_CACHE_DIR", "") or os.path.join(
+        tempfile.gettempdir(), "beetdeck-cover-cache"
     )
 
     if test_config:

@@ -182,7 +182,7 @@ def db_path(tmp_path):
 
 
 @pytest.fixture()
-def app(db_path):
+def app(db_path, tmp_path):
     """Flask test app with a temporary library DB."""
     application = create_app(
         test_config={
@@ -190,6 +190,7 @@ def app(db_path):
             "IMPORT_DIR": "/tmp/music_import",
             # Empty string: test paths are absolute; no library root resolution needed
             "LIBRARY_ROOT": "",
+            "COVER_CACHE_DIR": str(tmp_path / "cover-cache"),
             "TESTING": True,
         }
     )
