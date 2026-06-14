@@ -37,6 +37,7 @@ beetDeck/
 │   │   ├── lyrics.py
 │   │   ├── identify.py
 │   │   ├── items.py
+│   │   ├── meta.py
 │   │   └── scan.py
 │   ├── routes/
 │   │   ├── __init__.py
@@ -47,6 +48,7 @@ beetDeck/
 │   │   ├── lyrics.py       # Lyrics CRUD (single + bulk)
 │   │   ├── identify.py     # Identify/status/apply/confirm
 │   │   ├── items.py        # Untagged item management: metadata edit, group identify
+│   │   ├── meta.py         # GET /api/version (beetDeck + beets versions)
 │   │   └── scan.py         # Rescan + status
 │   ├── static/
 │   │   ├── logo.svg
@@ -64,6 +66,7 @@ beetDeck/
 │   ├── test_lyrics.py
 │   ├── test_identify.py
 │   ├── test_items.py
+│   ├── test_meta.py
 │   ├── test_scan.py
 │   ├── test_openapi.py     # spec/Scalar routes + decorated-view-in-spec coverage
 │   ├── test_schemas.py     # shared schema serialization
@@ -96,6 +99,7 @@ The application uses module-level globals for shared state across request thread
 - `GET /apidoc/openapi.json` — generated OpenAPI 3.x spec (single source of truth)
 - `GET /apidoc/scalar/` — interactive Scalar API documentation viewer (bare `/apidoc/scalar` 308-redirects to it)
 - `GET /` — serves SPA
+- `GET /api/version` — running beetDeck + beets versions (`meta` blueprint; flat `{beetdeck, beets}`)
 - `GET /api/library` — album list
 - `GET /api/search` — search albums/artists
 - `GET /api/artist` — artist albums

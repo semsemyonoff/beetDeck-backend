@@ -35,6 +35,7 @@ def create_app(test_config=None):
     from .routes.items import bp as items_bp
     from .routes.library import bp as library_bp
     from .routes.lyrics import bp as lyrics_bp
+    from .routes.meta import bp as meta_bp
     from .routes.scan import bp as scan_bp
 
     app.register_blueprint(library_bp)
@@ -44,6 +45,7 @@ def create_app(test_config=None):
     app.register_blueprint(identify_bp)
     app.register_blueprint(items_bp)
     app.register_blueprint(lyrics_bp)
+    app.register_blueprint(meta_bp)
     app.register_blueprint(scan_bp)
 
     # Mount the OpenAPI spec (/apidoc/openapi.json) and Scalar viewer
