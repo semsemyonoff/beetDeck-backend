@@ -653,3 +653,127 @@ class TestConfirmAlbumLyrics:
         assert data["failed"] == [1]
         # task preserved for retry
         assert "lyrics_1" in state.identify_tasks
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI spec coverage
+# ---------------------------------------------------------------------------
+
+
+class TestLyricsOpenAPISpec:
+    """All eight lyrics routes are decorated with ``@api.validate`` (tagged
+    ``lyrics``). The body-less routes are documented response-only; ``save`` and
+    bulk ``confirm`` document a JSON body. Assert they appear in the spec."""
+
+    def _spec(self, client):
+        return client.get("/apidoc/openapi.json").get_json()
+
+    def test_track_read_in_spec(self, client):
+        op = self._spec(client)["paths"][
+            "/api/album/{album_id}/track/{item_id}/lyrics"
+        ]["get"]
+        assert "lyrics" in op["tags"]
+        assert "200" in op["responses"]
+        assert "404" in op["responses"]
+        assert "requestBody" not in op
+
+    def test_track_fetch_in_spec(self, client):
+        op = self._spec(client)["paths"][
+            "/api/album/{album_id}/track/{item_id}/lyrics/fetch"
+        ]["post"]
+        assert "lyrics" in op["tags"]
+        assert "200" in op["responses"]
+        # Body-less POST — no requestBody documented.
+        assert "requestBody" not in op
+
+    def test_track_confirm_in_spec(self, client):
+        op = self._spec(client)["paths"][
+            "/api/album/{album_id}/track/{item_id}/lyrics/confirm"
+        ]["post"]
+        assert "lyrics" in op["tags"]
+        assert "requestBody" not in op
+
+    def test_track_embed_in_spec(self, client):
+        op = self._spec(client)["paths"][
+            "/api/album/{album_id}/track/{item_id}/lyrics/embed"
+        ]["post"]
+        assert "lyrics" in op["tags"]
+        assert "requestBody" not in op
+
+    def test_album_embed_in_spec(self, client):
+        op = self._spec(client)["paths"]["/api/album/{album_id}/lyrics/embed"]["post"]
+        assert "lyrics" in op["tags"]
+        assert "requestBody" not in op
+
+    def test_album_fetch_in_spec(self, client):
+        op = self._spec(client)["paths"]["/api/album/{album_id}/lyrics/fetch"]["post"]
+        assert "lyrics" in op["tags"]
+        assert "requestBody" not in op
+
+    def test_track_save_documents_json_body(self, client):
+        op = self._spec(client)["paths"][
+            "/api/album/{album_id}/track/{item_id}/lyrics/save"
+        ]["post"]
+        assert "lyrics" in op["tags"]
+        assert "200" in op["responses"]
+        assert "application/json" in op["requestBody"]["content"]
+
+    def test_album_confirm_documents_json_body(self, client):
+        op = self._spec(client)["paths"]["/api/album/{album_id}/lyrics/confirm"]["post"]
+        assert "lyrics" in op["tags"]
+        assert "200" in op["responses"]
+        assert "application/json" in op["requestBody"]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Behavior unchanged after decoration
+# ---------------------------------------------------------------------------
+
+
+class TestLyricsBehaviorUnchanged:
+    """Decoration must not change behavior for the existing contracts: only a
+    malformed JSON body (unknown field / wrong type) on the two body-validated
+    routes now yields 422; everything else reaches the handler as before."""
+
+    def test_save_unknown_field_returns_422(self, client):
+        resp = client.post(
+            "/api/album/1/track/1/lyrics/save", json={"bogus": "x"}
+        )
+        assert resp.status_code == 422
+
+    def test_save_wrong_type_returns_422(self, client):
+        resp = client.post(
+            "/api/album/1/track/1/lyrics/save", json={"lyrics": 123}
+        )
+        assert resp.status_code == 422
+
+    def test_save_empty_body_reaches_handler(self, client, mocker):
+        # Empty body is valid against the optional model → handler runs; missing
+        # track → 404 (not 422).
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = None
+        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        resp = client.post("/api/album/1/track/9999/lyrics/save", json={})
+        assert resp.status_code == 404
+
+    def test_album_confirm_unknown_field_returns_422(self, client):
+        resp = client.post("/api/album/1/lyrics/confirm", json={"bogus": [1]})
+        assert resp.status_code == 422
+
+    def test_album_confirm_non_list_returns_422(self, client):
+        resp = client.post(
+            "/api/album/1/lyrics/confirm", json={"item_ids": "nope"}
+        )
+        assert resp.status_code == 422
+
+    def test_album_confirm_non_int_element_returns_422(self, client):
+        resp = client.post(
+            "/api/album/1/lyrics/confirm", json={"item_ids": [1, "x"]}
+        )
+        assert resp.status_code == 422
+
+    def test_album_confirm_empty_body_still_400(self, client):
+        # Empty selection is valid against the model → handler's own 400 fires.
+        resp = client.post("/api/album/1/lyrics/confirm", json={})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "No tracks selected"
