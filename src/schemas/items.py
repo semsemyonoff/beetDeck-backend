@@ -32,8 +32,9 @@ decision — documented here, applied all-or-nothing):
 
 This keeps a single, predictable contract per endpoint: a wrong *type* on a
 strict field → ``422``; a bad *value*/missing-requirement → ``400`` (or a
-``warning`` for the lenient numeric fields). Response validation stays
-documentation-only (``resp=`` only feeds the spec).
+``warning`` for the lenient numeric fields). Response validation is active
+(spectree's default), but with ``force_resp_serialize`` left ``False`` the raw
+``jsonify(...)`` bytes pass through unchanged; ``resp=`` also feeds the spec.
 
 ``Candidate`` (autotag candidates) and ``ApplyResponse`` (diff preview) are
 imported from ``schemas.identify``: items identification uses the exact same

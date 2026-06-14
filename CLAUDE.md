@@ -94,7 +94,7 @@ The application uses module-level globals for shared state across request thread
 ### API Routes
 
 - `GET /apidoc/openapi.json` — generated OpenAPI 3.x spec (single source of truth)
-- `GET /apidoc/scalar` — interactive Scalar API documentation viewer
+- `GET /apidoc/scalar/` — interactive Scalar API documentation viewer (bare `/apidoc/scalar` 308-redirects to it)
 - `GET /` — serves SPA
 - `GET /api/library` — album list
 - `GET /api/search` — search albums/artists
@@ -137,7 +137,7 @@ The application uses module-level globals for shared state across request thread
 Request validation is driven by **spectree** (pydantic v2). The single `SpecTree`
 singleton lives in `src/api.py`; route handlers are decorated with
 `@api.validate(...)` and the generated spec / Scalar UI are served under `/apidoc`
-(`GET /apidoc/openapi.json`, `GET /apidoc/scalar`). Request models live in
+(`GET /apidoc/openapi.json`, `GET /apidoc/scalar/`). Request models live in
 `src/schemas/` (one module per blueprint plus shared `common.py`).
 
 **Any invalid request — bad query param or bad JSON body, on any endpoint —

@@ -22,8 +22,10 @@ Request shapes (verified against the handlers):
 - The two ``GET`` routes stream binary image data, so they only document their
   ``404`` error response (no success body model).
 
-Response validation stays OFF (``resp=`` only feeds the spec), so handlers keep
-returning their raw ``jsonify(...)`` output unchanged.
+Response validation is active (spectree's default), but with ``force_resp_serialize``
+left ``False`` the handlers' raw ``jsonify(...)`` bytes pass through unchanged; the
+models' all-optional fields keep real payloads conformant. ``resp=`` also feeds the
+spec.
 """
 
 from typing import Any

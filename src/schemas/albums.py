@@ -6,8 +6,9 @@ Covers ``GET /api/album/<id>`` (album detail with tracks) and
 Both endpoints are GETs whose only inputs are integer path params
 (``<int:album_id>`` / ``<int:item_id>``) — spectree documents those from the
 Flask URL rule, so there is no query/body model here, only response models for
-the spec. Response validation stays OFF (``resp=`` only feeds the spec), so the
-handlers keep returning their raw ``jsonify(...)`` output unchanged.
+the spec. Response validation is active (spectree's default), but with
+``force_resp_serialize`` left ``False`` the handlers' raw ``jsonify(...)`` bytes
+pass through unchanged; all-optional fields keep real payloads conformant.
 
 ``GET .../tags`` returns a **bare object of arbitrary tag keys** (the column /
 attribute names vary per track), modeled with a ``RootModel`` over a free-form

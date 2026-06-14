@@ -18,8 +18,10 @@ Request shapes (verified against the handlers):
   missing values, while an unknown field or a wrong-typed ``genre`` raises
   pydantic → ``422``.
 
-Response validation stays OFF (``resp=`` only feeds the spec), so handlers keep
-returning their raw ``jsonify(...)`` output unchanged.
+Response validation is active (spectree's default), but with ``force_resp_serialize``
+left ``False`` the handlers' raw ``jsonify(...)`` bytes pass through unchanged; the
+models' all-optional fields keep real payloads conformant. ``resp=`` also feeds the
+spec.
 """
 
 from pydantic import BaseModel, ConfigDict, Field

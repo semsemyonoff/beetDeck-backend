@@ -8,10 +8,11 @@ incremental import) while an **invalid** value is now rejected by spectree with 
 **422** — replacing the handler's old ad-hoc ``400 Invalid mode`` check.
 ``extra="forbid"`` makes an unknown query param a 422 too.
 
-Response models document the success bodies only — response validation feeds the
-spec but handlers keep returning their raw ``jsonify(...)`` output. The status
-endpoint returns a union of shapes (idle / running / done [+ diff]); all fields
-beyond ``status`` are optional so every variant validates.
+Response models are validated against the handler output (spectree's default), but
+with ``force_resp_serialize`` left ``False`` the raw ``jsonify(...)`` bytes pass
+through unchanged; ``resp=`` also feeds the spec. The status endpoint returns a
+union of shapes (idle / running / done [+ diff]); all fields beyond ``status`` are
+optional so every variant validates.
 """
 
 from typing import Literal

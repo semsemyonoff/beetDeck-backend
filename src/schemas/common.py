@@ -57,7 +57,8 @@ class AlbumSummary(BaseModel):
     """An album entry as returned in artist/library listings.
 
     Matches the per-album dict emitted by ``GET /api/library`` and
-    ``GET /api/artist`` (response validation is off; this only feeds the spec).
+    ``GET /api/artist`` (validated against that output, then passed through
+    unchanged since ``force_resp_serialize`` is ``False``; also feeds the spec).
     """
 
     id: int = Field(description="Album id.")

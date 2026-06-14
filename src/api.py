@@ -8,15 +8,20 @@ registered.
 
 Served routes (mounted by ``api.register``):
 - ``GET /apidoc/openapi.json`` — the OpenAPI spec (JSON)
-- ``GET /apidoc/scalar`` — the Scalar documentation viewer
+- ``GET /apidoc/scalar/`` — the Scalar documentation viewer (trailing slash; the
+  bare ``/apidoc/scalar`` 308-redirects to it)
 
 Notes:
 - ``validation_error_status=422``: invalid request bodies/queries raise pydantic
   errors that spectree converts into an HTTP 422 response. This is set explicitly
   so the 422 contract holds regardless of backend defaults.
-- Response validation stays disabled (``mode="normal"``). ``resp=`` on handlers
-  only feeds the spec; handlers keep returning their existing raw ``jsonify(...)``
-  bodies untouched.
+- Response validation is **active** (spectree's default — handlers are decorated
+  without ``skip_validation``), but ``force_resp_serialize`` is left ``False``, so
+  a handler's already-serialized ``jsonify(...)`` body is validated against its
+  ``resp=`` model and then passed through **byte-for-byte** (never re-serialized).
+  Response models therefore carry all-optional/lenient fields so real — sometimes
+  partial — payloads validate unchanged; a non-conforming body would surface as a
+  500. ``resp=`` also feeds the spec.
 
 Validation-error contract (Task 11):
 - Every invalid request — across every blueprint — returns **HTTP 422** with the

@@ -7,10 +7,11 @@ missing/empty queries preserve the existing behavior (``search`` → empty resul
 set; ``artist`` → in-handler ``400 Missing name``) rather than turning into a
 spectree 422. Marking them required would break empty-search calls from the SPA.
 
-Response models document the success bodies only — response validation stays OFF
-(``resp=`` feeds the spec), so handlers keep returning their raw ``jsonify(...)``
-output. ``GET /api/library`` returns a **bare top-level array**, modeled with a
-``RootModel`` rather than an object wrapper.
+Response models are validated against the handler output (spectree's default), but
+``force_resp_serialize`` is left ``False`` so the raw ``jsonify(...)`` bytes pass
+through unchanged; all-optional fields keep real payloads conformant. ``resp=``
+also feeds the spec. ``GET /api/library`` returns a **bare top-level array**,
+modeled with a ``RootModel`` rather than an object wrapper.
 """
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel

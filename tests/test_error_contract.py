@@ -42,6 +42,29 @@ INVALID_REQUESTS = [
 ]
 
 
+# (method, url, json_body, offending_field) — the field whose name must appear in
+# some detail entry's `loc`. Pins that the hook maps pydantic's `loc` faithfully
+# (a regression hardcoding `loc=[]` or dropping it would pass the shape-only checks
+# above but fail here).
+INVALID_REQUESTS_WITH_FIELD = [
+    pytest.param(
+        "post", "/api/items/metadata-batch", {"items": "notalist"}, "items",
+        id="items-batch-bad-type",
+    ),
+    pytest.param(
+        "post", "/api/album/1/apply", {"candidate_index": "nope"}, "candidate_index",
+        id="identify-bad-type",
+    ),
+    pytest.param(
+        "post", "/api/album/1/genre/save", {"bogus": 1}, "bogus", id="genres-save-extra",
+    ),
+    pytest.param(
+        "post", "/api/album/1/lyrics/confirm", {"item_ids": ["x"]}, "item_ids",
+        id="lyrics-bulk-non-int",
+    ),
+]
+
+
 class TestUniformErrorBody:
     @pytest.mark.parametrize("method, url, body", INVALID_REQUESTS)
     def test_invalid_request_returns_uniform_422(self, client, method, url, body):
@@ -67,6 +90,20 @@ class TestUniformErrorBody:
             assert isinstance(entry["loc"], list)
             assert isinstance(entry["msg"], str)
             assert isinstance(entry["type"], str)
+
+    @pytest.mark.parametrize("method, url, body, field", INVALID_REQUESTS_WITH_FIELD)
+    def test_detail_loc_points_at_offending_field(self, client, method, url, body, field):
+        """The hook maps pydantic's `loc`/`type` faithfully: some detail entry
+        locates the offending field, and every entry carries a non-empty type
+        (a hardcoded/empty `loc` or placeholder `type` would fail here)."""
+        resp = getattr(client, method)(url, json=body)
+
+        detail = resp.get_json()["detail"]
+        locs = [entry["loc"] for entry in detail]
+        assert any(field in loc for loc in locs), (
+            f"no detail entry locates the offending field {field!r}; got {locs}"
+        )
+        assert all(entry["type"] for entry in detail)
 
 
 class TestErrorContractInSpec:

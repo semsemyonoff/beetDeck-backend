@@ -27,8 +27,10 @@ Request shapes (verified against the handlers):
   "candidate_index must be an integer" ``400`` check); an out-of-range index still
   reaches the handler and yields its own ``400``.
 
-Response validation stays OFF (``resp=`` only feeds the spec), so handlers keep
-returning their raw ``jsonify(...)`` output unchanged.
+Response validation is active (spectree's default), but with ``force_resp_serialize``
+left ``False`` the handlers' raw ``jsonify(...)`` bytes pass through unchanged; the
+models' all-optional fields keep real payloads conformant. ``resp=`` also feeds the
+spec.
 """
 
 from typing import Any

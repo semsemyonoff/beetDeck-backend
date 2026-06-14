@@ -74,8 +74,14 @@ def test_every_decorated_view_appears_in_spec(db_path, _build):
     `@api.validate`-decorated view is present in the generated spec.
 
     Parametrized to build `create_app()` twice — catches spec leakage or lazy
-    blueprint-import ordering issues across fresh app instances.
+    blueprint-import ordering issues across fresh app instances. `api.spec`
+    memoizes its result on first access, so we drop the cache here to force a
+    genuine re-generation against this build (otherwise the second run would
+    silently re-read the first run's cached spec and assert nothing new).
     """
+    if hasattr(api, "_spec"):
+        del api._spec
+
     app = create_app(
         test_config={"LIBRARY_DB": db_path, "LIBRARY_ROOT": "", "TESTING": True}
     )
