@@ -4,7 +4,17 @@ import os
 import sqlite3
 
 from flask import Blueprint, jsonify, render_template, request
+from spectree import Response
 
+from src.api import api
+from src.schemas.common import ErrorResponse
+from src.schemas.library import (
+    ArtistQuery,
+    ArtistResponse,
+    LibraryResponse,
+    SearchQuery,
+    SearchResponse,
+)
 from src.utils import _album_dirs_for_ids, _find_cover, _get_ro_conn, _resolve_path
 
 bp = Blueprint("library", __name__)
@@ -16,6 +26,14 @@ def index():
 
 
 @bp.route("/api/library")
+@api.validate(
+    resp=Response(
+        HTTP_200=LibraryResponse,
+        HTTP_500=ErrorResponse,
+        HTTP_503=ErrorResponse,
+    ),
+    tags=["library"],
+)
 def library():
     from flask import current_app
 
@@ -80,8 +98,13 @@ def library():
 
 
 @bp.route("/api/search")
+@api.validate(
+    query=SearchQuery,
+    resp=Response(HTTP_200=SearchResponse, HTTP_500=ErrorResponse),
+    tags=["library"],
+)
 def search():
-    q = request.args.get("q", "").strip()
+    q = request.context.query.q.strip()
     if not q:
         return jsonify({"artists": [], "albums": [], "tracks": []})
 
@@ -165,8 +188,17 @@ def search():
 
 
 @bp.route("/api/artist")
+@api.validate(
+    query=ArtistQuery,
+    resp=Response(
+        HTTP_200=ArtistResponse,
+        HTTP_400=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["library"],
+)
 def artist_detail():
-    name = request.args.get("name", "").strip()
+    name = request.context.query.name.strip()
     if not name:
         return jsonify({"error": "Missing name"}), 400
 

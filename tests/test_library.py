@@ -336,3 +336,60 @@ class TestMultiDiscCoverLookup:
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["albums"][0]["has_cover"] is True
+
+
+# ---------------------------------------------------------------------------
+# spectree validation — query params stay optional (empty input preserved),
+# but a genuinely malformed query (unknown param) now returns 422.
+# ---------------------------------------------------------------------------
+
+
+class TestLibraryValidation:
+    def test_empty_search_still_returns_empty_results_not_422(self, client, db_path):
+        """Optional `q`: missing param must keep the existing 200 empty body."""
+        insert_album(db_path, albumartist="Radiohead", album="OK Computer")
+        resp = client.get("/api/search")
+        assert resp.status_code == 200
+        assert resp.get_json() == {"artists": [], "albums": [], "tracks": []}
+
+    def test_valid_search_body_unchanged(self, client, db_path):
+        """Valid query returns the same grouped body via request.context.query."""
+        insert_album(db_path, albumartist="Pink Floyd", album="The Wall")
+        resp = client.get("/api/search?q=pink")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert set(data) == {"artists", "albums", "tracks"}
+        assert "Pink Floyd" in data["artists"]
+
+    def test_missing_name_still_returns_400_not_422(self, client):
+        """Optional `name`: the in-handler 400 Missing name is preserved."""
+        resp = client.get("/api/artist")
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "Missing name"
+
+    def test_malformed_search_query_returns_422(self, client):
+        """An unknown query param is rejected with 422 (extra=forbid)."""
+        resp = client.get("/api/search?bogus=1")
+        assert resp.status_code == 422
+        body = resp.get_json()
+        # Pre-Task-11 default body: a list of pydantic error entries
+        # (loc/msg/type). The uniform ErrorResponse shape lands in Task 11.
+        assert isinstance(body, list) and body
+        assert {"loc", "msg", "type"} <= set(body[0])
+
+    def test_malformed_artist_query_returns_422(self, client):
+        resp = client.get("/api/artist?name=x&bogus=1")
+        assert resp.status_code == 422
+        body = resp.get_json()
+        assert isinstance(body, list) and body
+        assert {"loc", "msg", "type"} <= set(body[0])
+
+    def test_library_documented_in_spec(self, client):
+        """The 3 library routes appear in the generated spec under the tag."""
+        spec = client.get("/apidoc/openapi.json").get_json()
+        paths = spec["paths"]
+        assert "get" in paths["/api/library"]
+        assert "get" in paths["/api/search"]
+        assert "get" in paths["/api/artist"]
+        # 422 response is documented for the validated query endpoints.
+        assert "422" in paths["/api/search"]["get"]["responses"]
