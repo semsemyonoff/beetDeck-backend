@@ -32,7 +32,7 @@ repo is source for the backend only.
   time to inject the hashed JS/CSS into `beetdeck/templates/index.html`.
 
 The app reads `BEETS_LIBRARY_DB`, `BEETS_IMPORT_DIR`, `BEETS_LIBRARY_ROOT`, and
-`BEETSDIR` from the environment — see the table in `src/CLAUDE.md` for defaults.
+`BEETSDIR` from the environment — see the table in `CLAUDE.md` for defaults.
 
 ## Local development
 
@@ -60,8 +60,8 @@ make coverage
 The frontend SPA lives in its own repository and is served by Flask in
 production from `beetdeck/static/dist/` (the Vite manifest is read at request time to
 inject the hashed JS/CSS into `beetdeck/templates/index.html`). To exercise the full
-UI locally, use the DWE dev workspace — the `frontend` service runs the Vite dev
-server (HMR) and proxies the API to this backend.
+UI locally, run the frontend's Vite dev server from its repository (HMR) and point
+it at this backend's API.
 
 Producing the production image (which builds the SPA and bakes it in) is the job
 of the `beetDeck/deploy` repository; see its README.
@@ -78,4 +78,4 @@ single source of truth — there is no hand-maintained endpoint table here.
 Request models live in `beetdeck/schemas/` (one module per blueprint plus a shared
 `common.py`); the `SpecTree` singleton lives in `beetdeck/api.py`. For the uniform
 `422` validation-error contract returned on invalid input, see the **Validation
-Error Contract** section in `src/CLAUDE.md`.
+Error Contract** section in `CLAUDE.md`.
