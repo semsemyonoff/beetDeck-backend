@@ -1,47 +1,38 @@
-# beetDeck
+# beetDeck backend
 
-![logo](src/static/logo.svg)
+Flask + gunicorn API and [beets](https://beets.io/) integration for beetDeck — the
+**backend part** of the product. It exposes the `/api` endpoints and serves the
+pre-built SPA on `:5000`. There is no shared code or filesystem with the
+frontend; the React SPA lives in a **separate repository** and talks to this
+backend purely over HTTP.
 
-A web interface for managing a [beets](https://beets.io/) music library. beetDeck does not handle file importing — it enhances an existing library with identification (MusicBrainz autotag), genres (Last.fm), cover art, lyrics, and tag browsing.
+The full product overview, install, configuration (env vars, volumes, beets
+plugins), and release process live in the separate **`beetDeck/deploy`**
+repository — the **entry point**, which pins this backend and the frontend as
+submodules and builds the single published image (`semsemyonoff/beetdeck`). This
+repo is source for the backend only.
 
-Works well alongside tools like Lidarr that manage the file library, while beets serves as an additional tagging layer on top.
+## Requirements
 
-## Features
-
-- **Library browser** — collapsible artist list with album thumbnails, year, and tagged status (Index and Wall layout)
-- **Artist page** — dedicated page with album grid for a single artist
-- **Album detail** — cover art, metadata, file path, full track listing with per-track action buttons
-- **Multi-disc albums** — disc sections shown separately on the album page; cover art and file paths resolve to the common parent directory (e.g. `CD1/` / `CD2/` layouts)
-- **Search** — full-text search across artists, albums, and tracks (full Unicode support)
-- **Filter by status** — filter albums by tagged / untagged on library and artist pages
-- **Identification** — MusicBrainz autotag with candidate selection, diff preview, confirm & write
-- **Genre tagging** — Last.fm genre lookup with old/new preview and confirm
-- **Cover art** — fetch from multiple sources (filesystem, Cover Art Archive, iTunes, Amazon), preview, confirm; manual upload supported. High-res file + embedded thumbnail
-- **Lyrics** — per-track and bulk album lyrics via lrclib (synced and plain text). Inline viewer/editor, online search with diff preview, external `.lrc` file embed
-- **Rescan** — quick (incremental) or full library rescan to add new files and remove stale entries
-- **Untagged triage** — loose files (no albumartist) are grouped by directory and surfaced in a pinned banner atop the library; a per-folder editor offers bulk album-level fields plus a per-track grid, then a MusicBrainz identify hand-off to create a properly tagged album
-- **Tag editing** — edit album-level and per-track tags (title, artist, track #, year, genre) directly from the album page via an *Edit tags* modal; album-level changes propagate to the album row and are written to every track file
-- **Light/dark theme** — auto-detects system preference with manual toggle, persisted in localStorage
-
-## Deployment
-
-beetDeck is published as a single Docker image (`semsemyonoff/beetdeck`) that
-bundles this API and the pre-built SPA. **Building and self-hosting the release
-is handled in the separate `beetDeck/deploy` repository**, which pins this
-backend and the frontend as submodules, builds the multi-arch image, and ships
-the production `docker-compose.yml`, `.env.example`, and an example beets
-`config.yaml`. See that repo's README for install, configuration (env vars,
-volumes, beets plugins), and release instructions.
-
-The app reads `BEETS_LIBRARY_DB`, `BEETS_IMPORT_DIR`, `BEETS_LIBRARY_ROOT`, and
-`BEETSDIR` from the environment — see the table in `src/CLAUDE.md` for defaults.
+- Python 3.12+ (the production image uses 3.14)
+- beets 2.10.0
 
 ## Architecture
 
-- **Backend**: Flask + gunicorn (1 worker, 4 threads). Single worker is required because in-memory state (identification tasks, cover previews) must be shared across requests. Routes are organized as Flask Blueprints under `src/routes/`.
-- **Frontend**: React 18 + Vite SPA with hash-based routing (`#/` = library, `#/artist/<name>` = artist page, `#/album/<id>` = album page, `#/untagged` = untagged items). It lives in a **separate repository**; its production build is dropped into `src/static/dist/` and served by Flask (the Vite manifest is read at request time to inject the hashed JS/CSS into `src/templates/index.html`).
-- **beets integration**: uses the beets Python API directly (not the CLI) for identification, genre lookup, cover art, and lyrics. The CLI is only used for `beet import` (rescan) and `beet update` (prune stale entries).
-- **beets version**: requires beets 2.10.0. Genres are stored as native list fields; library paths are stored relative to the database root and resolved at runtime.
+- **Flask + gunicorn** (1 worker, 4 threads). Single worker is required because
+  in-memory state (identification tasks, cover previews) must be shared across
+  request threads. Routes are organized as Flask Blueprints under `src/routes/`.
+- **beets integration**: uses the beets Python API directly (not the CLI) for
+  identification, genre lookup, cover art, and lyrics. The CLI is only used for
+  `beet import` (rescan) and `beet update` (prune stale entries). Genres are
+  stored as native list fields; library paths are stored relative to the database
+  root and resolved at runtime.
+- **SPA serving**: in production the frontend's build is dropped into
+  `src/static/dist/` and served by Flask — the Vite manifest is read at request
+  time to inject the hashed JS/CSS into `src/templates/index.html`.
+
+The app reads `BEETS_LIBRARY_DB`, `BEETS_IMPORT_DIR`, `BEETS_LIBRARY_ROOT`, and
+`BEETSDIR` from the environment — see the table in `src/CLAUDE.md` for defaults.
 
 ## Local development
 
