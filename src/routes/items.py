@@ -28,8 +28,24 @@ Endpoints:
 import threading
 
 from flask import Blueprint, current_app, jsonify, request
+from spectree import Response
 
 from src import state
+from src.api import api
+from src.schemas.common import ErrorResponse
+from src.schemas.items import (
+    ItemsApplyResponse,
+    ItemsCandidateBody,
+    ItemsConfirmResponse,
+    ItemsIdentifyBody,
+    ItemsIdentifyResponse,
+    ItemsIdentifyStatusResponse,
+    MetadataBatchBody,
+    MetadataBatchResponse,
+    UntaggedItemsResponse,
+    UpdateMetadataBody,
+    UpdateMetadataResponse,
+)
 from src.utils import (
     _get_ro_conn,
     _get_task_json,
@@ -238,6 +254,10 @@ def _run_items_identify(task_key, item_ids, search_artist, search_album, library
 
 
 @bp.route("/api/items/untagged")
+@api.validate(
+    resp=Response(HTTP_200=UntaggedItemsResponse, HTTP_500=ErrorResponse),
+    tags=["items"],
+)
 def untagged_items():
     """Return items belonging to albums with NULL or empty albumartist."""
     try:
@@ -275,12 +295,22 @@ def untagged_items():
 
 
 @bp.route("/api/items/<int:item_id>/metadata", methods=["POST"])
+@api.validate(
+    json=UpdateMetadataBody,
+    resp=Response(
+        HTTP_200=UpdateMetadataResponse,
+        HTTP_400=ErrorResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["items"],
+)
 def update_metadata(item_id):
     """Update artist and album fields on a single item via beets Library."""
-    data = request.get_json(silent=True) or {}
-    title = (data.get("title") or "").strip()
-    artist = (data.get("artist") or "").strip()
-    album = (data.get("album") or "").strip()
+    data = request.context.json
+    title = (data.title or "").strip()
+    artist = (data.artist or "").strip()
+    album = (data.album or "").strip()
 
     if not title and not artist and not album:
         return jsonify({"error": "At least one of title, artist, or album must be provided"}), 400
@@ -318,46 +348,37 @@ def update_metadata(item_id):
 
 
 @bp.route("/api/items/metadata-batch", methods=["POST"])
+@api.validate(
+    json=MetadataBatchBody,
+    resp=Response(
+        HTTP_200=MetadataBatchResponse,
+        HTTP_400=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["items"],
+)
 def metadata_batch():
     """Write album-level and per-track metadata in one request under a write lock.
 
     Body: { album: {album?, albumartist?, year?, genre?},
             items: [{id, title?, artist?, track?, disc?}, ...] }
 
+    Structural / strict-type validation (object shapes, scalar types, integer
+    item ids) is enforced by ``MetadataBatchBody`` → 422.  The cross-field
+    semantic rules ("at least one field", "≥1 item when album fields present")
+    and the lenient numeric coerce-and-warn handling stay here → 400 / warnings
+    (see ``schemas/items.py`` for the documented split).
+
     album-level fields are written via the beets Album object (propagates to
     album row + clears untagged filter); per-track fields are written to item
     rows.  Unknown item ids produce warnings, not 500 errors.
     """
-    data = request.get_json(silent=True)
-    if not isinstance(data, dict):
-        return jsonify({"error": "Request body must be a JSON object"}), 400
-    album_data = data.get("album")
-    if album_data is None:
-        album_data = {}
-    elif not isinstance(album_data, dict):
-        return jsonify({"error": "'album' must be an object"}), 400
-    items_data = data.get("items")
-    if items_data is None:
-        items_data = []
-    elif not isinstance(items_data, list):
-        return jsonify({"error": "'items' must be a list"}), 400
-    if any(not isinstance(entry, dict) for entry in items_data):
-        return jsonify({"error": "each item entry must be an object"}), 400
-
-    # Reject wrong-typed string scalars up front. A truthy non-string (e.g. a
-    # list or number) would otherwise reach `(value or "").strip()` and raise
-    # AttributeError, surfacing as a 500 instead of a 400. Numeric fields
-    # (year/track/disc) are coerced with int() further down and warn on bad
-    # values, so they are intentionally not checked here.
-    for k in ("album", "albumartist", "genre"):
-        v = album_data.get(k)
-        if v is not None and not isinstance(v, str):
-            return jsonify({"error": f"'album.{k}' must be a string"}), 400
-    for entry in items_data:
-        for k in ("title", "artist"):
-            v = entry.get(k)
-            if v is not None and not isinstance(v, str):
-                return jsonify({"error": f"each item '{k}' must be a string"}), 400
+    # Validated model → plain dicts so the existing dict-based logic below stays
+    # unchanged.  ``exclude_none=True`` keeps absent optional keys absent, so the
+    # handler's ``.get(k) is None`` semantics are preserved.
+    body = request.context.json
+    album_data = body.album.model_dump(exclude_none=True)
+    items_data = [entry.model_dump(exclude_none=True) for entry in body.items]
 
     # Extract album-level fields
     al_album = (album_data.get("album") or "").strip()
@@ -384,12 +405,8 @@ def metadata_batch():
             {"error": "items must contain at least one id when album fields are present"}
         ), 400
 
-    for entry in items_data:
-        # `bool` is an `int` subclass, so isinstance(True, int) is True — reject
-        # JSON booleans explicitly to avoid `{"id": true}` aliasing to item 1.
-        item_id = entry.get("id")
-        if not isinstance(item_id, int) or isinstance(item_id, bool):
-            return jsonify({"error": "Each item entry must have an integer id"}), 400
+    # Item ids are guaranteed integers by ``MetadataBatchItem`` (strict=True
+    # rejects JSON booleans → 422), so no manual id-type check is needed here.
 
     library_db = current_app.config["LIBRARY_DB"]
     library_dir = current_app.config.get("LIBRARY_ROOT") or None
@@ -527,18 +544,22 @@ def metadata_batch():
 
 
 @bp.route("/api/items/identify", methods=["POST"])
+@api.validate(
+    json=ItemsIdentifyBody,
+    resp=Response(HTTP_200=ItemsIdentifyResponse, HTTP_400=ErrorResponse),
+    tags=["items"],
+)
 def items_identify():
     """Start background identification for a list of item IDs."""
-    data = request.get_json(silent=True) or {}
-    item_ids = data.get("item_ids", [])
-    search_artist = data.get("search_artist", "")
-    search_album = data.get("search_album", "")
+    data = request.context.json
+    item_ids = data.item_ids
+    search_artist = data.search_artist
+    search_album = data.search_album
 
+    # ``item_ids`` is typed ``list[int]`` (wrong element type → 422); the
+    # non-empty requirement stays here as the handler's own 400.
     if not item_ids:
         return jsonify({"error": "item_ids must be a non-empty list"}), 400
-
-    if not isinstance(item_ids, list) or not all(isinstance(i, int) for i in item_ids):
-        return jsonify({"error": "item_ids must be a list of integers"}), 400
 
     import uuid
 
@@ -584,6 +605,10 @@ def items_identify():
 
 
 @bp.route("/api/items/identify/<task_id>/status")
+@api.validate(
+    resp=Response(HTTP_200=ItemsIdentifyStatusResponse),
+    tags=["items"],
+)
 def items_identify_status(task_id):
     task_key = f"items_{task_id}"
     with state.identify_lock:
@@ -595,12 +620,16 @@ def items_identify_status(task_id):
 
 
 @bp.route("/api/items/identify/<task_id>/apply", methods=["POST"])
+@api.validate(
+    json=ItemsCandidateBody,
+    resp=Response(HTTP_200=ItemsApplyResponse, HTTP_400=ErrorResponse),
+    tags=["items"],
+)
 def items_apply(task_id):
     """Preview what would change if the selected candidate is applied."""
-    data = request.get_json(silent=True) or {}
-    candidate_index = data.get("candidate_index", 0)
-    if not isinstance(candidate_index, int):
-        return jsonify({"error": "candidate_index must be an integer"}), 400
+    # candidate_index is validated as int by ItemsCandidateBody (wrong type → 422);
+    # an out-of-range index still reaches the handler's own 400 below.
+    candidate_index = request.context.json.candidate_index
 
     task_key = f"items_{task_id}"
     with state.identify_lock:
@@ -652,12 +681,21 @@ def items_apply(task_id):
 
 
 @bp.route("/api/items/identify/<task_id>/confirm", methods=["POST"])
+@api.validate(
+    json=ItemsCandidateBody,
+    resp=Response(
+        HTTP_200=ItemsConfirmResponse,
+        HTTP_400=ErrorResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["items"],
+)
 def items_confirm(task_id):
     """Create a new album from items and write matched tags to files."""
-    data = request.get_json(silent=True) or {}
-    candidate_index = data.get("candidate_index", 0)
-    if not isinstance(candidate_index, int):
-        return jsonify({"error": "candidate_index must be an integer"}), 400
+    # candidate_index validated as int by ItemsCandidateBody (wrong type → 422);
+    # an out-of-range index still reaches the handler's own 400 below.
+    candidate_index = request.context.json.candidate_index
 
     task_key = f"items_{task_id}"
     lib = None

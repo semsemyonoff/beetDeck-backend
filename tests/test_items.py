@@ -312,89 +312,99 @@ class TestMetadataBatch:
         data = resp.get_json()
         assert any("file write failed" in w for w in data["warnings"])
 
-    def test_returns_400_for_non_object_body(self, client):
-        resp = client.post("/api/items/metadata-batch", json=[1, 2, 3])
-        assert resp.status_code == 400
+    # --- Structural / strict-type validation now enforced by pydantic → 422 ---
+    # (Task 9: these were the handler's hand-rolled 400 type checks; spectree's
+    # MetadataBatchBody now rejects them uniformly with 422 before the handler.)
 
-    def test_returns_400_when_album_is_not_object(self, client):
+    def test_non_object_body_returns_422(self, client):
+        resp = client.post("/api/items/metadata-batch", json=[1, 2, 3])
+        assert resp.status_code == 422
+
+    def test_album_is_not_object_returns_422(self, client):
         resp = client.post(
             "/api/items/metadata-batch",
             json={"album": "x", "items": [{"id": 1}]},
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 422
 
-    def test_returns_400_when_items_is_not_list(self, client):
+    def test_items_is_not_list_returns_422(self, client):
         resp = client.post(
             "/api/items/metadata-batch",
             json={"album": {"albumartist": "A"}, "items": {"id": 1}},
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 422
 
-    def test_returns_400_when_item_entry_not_object(self, client):
+    def test_item_entry_not_object_returns_422(self, client):
         resp = client.post(
             "/api/items/metadata-batch",
             json={"album": {"albumartist": "A"}, "items": [1]},
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 422
 
-    def test_returns_400_when_album_is_falsy_non_object(self, client):
+    def test_album_is_falsy_non_object_returns_422(self, client):
         # A falsy malformed value (e.g. []) must not be normalized to {} and
         # silently accepted as an item-only write.
         resp = client.post(
             "/api/items/metadata-batch",
             json={"album": [], "items": [{"id": 1, "title": "X"}]},
         )
-        assert resp.status_code == 400
-        assert resp.get_json()["error"] == "'album' must be an object"
+        assert resp.status_code == 422
 
-    def test_returns_400_when_items_is_falsy_non_list(self, client):
+    def test_items_is_falsy_non_list_returns_422(self, client):
         resp = client.post(
             "/api/items/metadata-batch",
             json={"album": {"albumartist": "A"}, "items": 0},
         )
-        assert resp.status_code == 400
-        assert resp.get_json()["error"] == "'items' must be a list"
+        assert resp.status_code == 422
 
-    def test_returns_400_when_album_scalar_is_wrong_type(self, client):
-        # A truthy non-string album scalar must be a 400, not a 500 from
-        # `(value or "").strip()` raising AttributeError.
+    def test_album_scalar_wrong_type_returns_422(self, client):
+        # A non-string album scalar is a type error → 422 (was a hand-rolled 400).
         for bad in ([1], 123, True, {"a": 1}):
             resp = client.post(
                 "/api/items/metadata-batch",
                 json={"album": {"album": bad}, "items": [{"id": 1}]},
             )
-            assert resp.status_code == 400, bad
-            assert resp.get_json()["error"] == "'album.album' must be a string"
+            assert resp.status_code == 422, bad
 
-    def test_returns_400_when_album_falsy_scalar_is_wrong_type(self, client):
-        # The falsy `[]` case Codex flagged: also a clean 400 rather than being
-        # silently normalized to "".
+    def test_album_falsy_scalar_wrong_type_returns_422(self, client):
         resp = client.post(
             "/api/items/metadata-batch",
             json={"album": {"album": []}, "items": [{"id": 1}]},
         )
-        assert resp.status_code == 400
-        assert resp.get_json()["error"] == "'album.album' must be a string"
+        assert resp.status_code == 422
 
-    def test_returns_400_when_item_scalar_is_wrong_type(self, client):
-        # A truthy non-string per-item title/artist must be a 400, not a 500.
+    def test_item_scalar_wrong_type_returns_422(self, client):
         resp = client.post(
             "/api/items/metadata-batch",
             json={"items": [{"id": 1, "title": ["x"]}]},
         )
-        assert resp.status_code == 400
-        assert resp.get_json()["error"] == "each item 'title' must be a string"
+        assert resp.status_code == 422
 
-    def test_returns_400_when_item_id_is_bool(self, client):
-        # `bool` is an `int` subclass, so a JSON boolean must not pass the id
-        # check and silently alias to item 0/1.
+    def test_item_id_is_bool_returns_422(self, client):
+        # `bool` is an `int` subclass; MetadataBatchItem.id is strict, so a JSON
+        # boolean must not alias to item 0/1 — it is now a 422.
         for bad in (True, False):
             resp = client.post(
                 "/api/items/metadata-batch",
                 json={"items": [{"id": bad, "title": "X"}]},
             )
-            assert resp.status_code == 400, bad
-            assert resp.get_json()["error"] == "Each item entry must have an integer id"
+            assert resp.status_code == 422, bad
+
+    def test_item_id_missing_returns_422(self, client):
+        # id is required on every item entry.
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"items": [{"title": "X"}]},
+        )
+        assert resp.status_code == 422
+
+    def test_unknown_field_returns_422(self, client):
+        # extra="forbid" on both the body and item entries.
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"items": [{"id": 1, "bogus": 1}]},
+        )
+        assert resp.status_code == 422
 
 
 def _reset_state():
@@ -587,9 +597,14 @@ class TestItemsIdentify:
         resp = client.post("/api/items/identify", json={})
         assert resp.status_code == 400
 
-    def test_returns_400_for_non_integer_ids(self, client):
+    def test_non_integer_ids_returns_422(self, client):
+        # item_ids is typed list[int]; non-int elements now fail pydantic → 422.
         resp = client.post("/api/items/identify", json={"item_ids": ["a", "b"]})
-        assert resp.status_code == 400
+        assert resp.status_code == 422
+
+    def test_unknown_field_returns_422(self, client):
+        resp = client.post("/api/items/identify", json={"item_ids": [1], "bogus": 1})
+        assert resp.status_code == 422
 
     def test_returns_started_and_task_id(self, client, mocker):
         mock_lib = mocker.MagicMock()
@@ -967,4 +982,169 @@ class TestItemsConfirm:
         }
 
         resp = client.post("/api/items/identify/c6/confirm", json={"candidate_index": 10})
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI spec coverage (Task 9)
+# ---------------------------------------------------------------------------
+
+
+class TestItemsOpenAPISpec:
+    """All seven items routes are decorated with ``@api.validate`` (tagged
+    ``items``). ``untagged`` and ``identify/status`` are body-less GETs
+    (response-only); the POSTs that take a JSON body document a requestBody."""
+
+    def _spec(self, client):
+        return client.get("/apidoc/openapi.json").get_json()
+
+    def test_untagged_in_spec(self, client):
+        op = self._spec(client)["paths"]["/api/items/untagged"]["get"]
+        assert "items" in op["tags"]
+        assert "200" in op["responses"]
+        assert "requestBody" not in op
+
+    def test_update_metadata_documents_json_body(self, client):
+        op = self._spec(client)["paths"]["/api/items/{item_id}/metadata"]["post"]
+        assert "items" in op["tags"]
+        assert "200" in op["responses"]
+        assert "application/json" in op["requestBody"]["content"]
+
+    def test_metadata_batch_documents_json_body(self, client):
+        op = self._spec(client)["paths"]["/api/items/metadata-batch"]["post"]
+        assert "items" in op["tags"]
+        assert "200" in op["responses"]
+        assert "application/json" in op["requestBody"]["content"]
+
+    def test_identify_documents_json_body(self, client):
+        op = self._spec(client)["paths"]["/api/items/identify"]["post"]
+        assert "items" in op["tags"]
+        assert "200" in op["responses"]
+        assert "application/json" in op["requestBody"]["content"]
+
+    def test_identify_status_in_spec(self, client):
+        op = self._spec(client)["paths"]["/api/items/identify/{task_id}/status"]["get"]
+        assert "items" in op["tags"]
+        assert "200" in op["responses"]
+        assert "requestBody" not in op
+
+    def test_apply_documents_json_body(self, client):
+        op = self._spec(client)["paths"]["/api/items/identify/{task_id}/apply"]["post"]
+        assert "items" in op["tags"]
+        assert "200" in op["responses"]
+        assert "application/json" in op["requestBody"]["content"]
+
+    def test_confirm_documents_json_body(self, client):
+        op = self._spec(client)["paths"]["/api/items/identify/{task_id}/confirm"]["post"]
+        assert "items" in op["tags"]
+        assert "200" in op["responses"]
+        assert "application/json" in op["requestBody"]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Behavior unchanged after decoration (Task 9)
+# ---------------------------------------------------------------------------
+
+
+class TestItemsBehaviorUnchanged:
+    """Decoration changes only the contract for malformed input: strict-type /
+    unknown-field errors now yield 422, while semantic rules and lenient numeric
+    handling keep their previous 400 / warning behavior."""
+
+    def setup_method(self):
+        _reset_state()
+
+    # --- single-item metadata ---
+
+    def test_metadata_unknown_field_returns_422(self, client):
+        resp = client.post("/api/items/1/metadata", json={"bogus": "x"})
+        assert resp.status_code == 422
+
+    def test_metadata_wrong_type_returns_422(self, client):
+        resp = client.post("/api/items/1/metadata", json={"title": ["x"]})
+        assert resp.status_code == 422
+
+    def test_metadata_empty_body_reaches_handler(self, client, mocker):
+        mock_lib = mocker.MagicMock()
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        # Empty body → all fields default to "" → handler's own "at least one
+        # field" 400 (NOT 422).
+        resp = client.post("/api/items/1/metadata", json={})
+        assert resp.status_code == 400
+
+    # --- metadata-batch: semantic rules stay 400, numerics still warn ---
+
+    def test_batch_empty_body_reaches_handler(self, client):
+        # {} validates structurally (album={}, items=[]) → handler's "at least
+        # one field" 400.
+        resp = client.post("/api/items/metadata-batch", json={})
+        assert resp.status_code == 400
+
+    def test_batch_album_fields_without_items_reaches_handler(self, client):
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"album": {"albumartist": "Artist"}, "items": []},
+        )
+        assert resp.status_code == 400
+
+    def test_batch_string_numeric_still_coerced(self, client, mocker):
+        mock_item = mocker.MagicMock()
+        mock_item.id = 3
+        mock_item.album_id = 30
+        mock_item.path = b"/music/t.mp3"
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("src.routes.items._try_write_item", return_value=True)
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"items": [{"id": 3, "track": "5", "disc": "2"}]},
+        )
+        assert resp.status_code == 200
+        assert mock_item.track == 5
+        assert mock_item.disc == 2
+
+    def test_batch_bad_numeric_still_warns_not_422(self, client, mocker):
+        mock_item = mocker.MagicMock()
+        mock_item.id = 3
+        mock_item.album_id = 30
+        mock_item.path = b"/music/t.mp3"
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("src.routes.items._try_write_item", return_value=True)
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"items": [{"id": 3, "track": "x"}]},
+        )
+        assert resp.status_code == 200
+        assert any("invalid track" in w for w in resp.get_json()["warnings"])
+
+    # --- items identify empty list stays 400 ---
+
+    def test_identify_empty_list_reaches_handler(self, client):
+        resp = client.post("/api/items/identify", json={"item_ids": []})
+        assert resp.status_code == 400
+
+    # --- apply / confirm: wrong-typed candidate_index now 422 ---
+
+    def test_apply_wrong_type_candidate_returns_422(self, client):
+        resp = client.post("/api/items/identify/t/apply", json={"candidate_index": "nope"})
+        assert resp.status_code == 422
+
+    def test_apply_unknown_field_returns_422(self, client):
+        resp = client.post("/api/items/identify/t/apply", json={"bogus": 1})
+        assert resp.status_code == 422
+
+    def test_apply_empty_body_reaches_handler(self, client):
+        # Empty body → candidate_index defaults to 0 → handler's own "no task" 400.
+        resp = client.post("/api/items/identify/t/apply", json={})
+        assert resp.status_code == 400
+
+    def test_confirm_wrong_type_candidate_returns_422(self, client):
+        resp = client.post("/api/items/identify/t/confirm", json={"candidate_index": 1.5})
+        assert resp.status_code == 422
+
+    def test_confirm_empty_body_reaches_handler(self, client):
+        resp = client.post("/api/items/identify/t/confirm", json={})
         assert resp.status_code == 400
