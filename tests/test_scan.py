@@ -2,8 +2,8 @@
 
 import sqlite3
 
-import src.state as state
-from src.routes.scan import _compute_scan_diff, _normalize_absolute_paths, _take_snapshot
+import beetdeck.state as state
+from beetdeck.routes.scan import _compute_scan_diff, _normalize_absolute_paths, _take_snapshot
 from tests.conftest import insert_album, insert_item
 
 
@@ -242,8 +242,8 @@ class TestRescan:
     def test_starts_rescan_quick_mode(self, client, mocker):
         mock_proc = mocker.MagicMock()
         mock_proc.poll.return_value = None  # running
-        mocker.patch("src.routes.scan.subprocess.Popen", return_value=mock_proc)
-        mocker.patch("src.routes.scan._take_snapshot", return_value={})
+        mocker.patch("beetdeck.routes.scan.subprocess.Popen", return_value=mock_proc)
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
 
         resp = client.post("/api/rescan")
         assert resp.status_code == 200
@@ -254,8 +254,8 @@ class TestRescan:
     def test_starts_rescan_full_mode(self, client, mocker):
         mock_proc = mocker.MagicMock()
         mock_proc.poll.return_value = None
-        popen_mock = mocker.patch("src.routes.scan.subprocess.Popen", return_value=mock_proc)
-        mocker.patch("src.routes.scan._take_snapshot", return_value={})
+        popen_mock = mocker.patch("beetdeck.routes.scan.subprocess.Popen", return_value=mock_proc)
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
 
         resp = client.post("/api/rescan?mode=full")
         assert resp.status_code == 200
@@ -268,8 +268,8 @@ class TestRescan:
     def test_quick_mode_uses_incremental_flag(self, client, mocker):
         mock_proc = mocker.MagicMock()
         mock_proc.poll.return_value = None
-        popen_mock = mocker.patch("src.routes.scan.subprocess.Popen", return_value=mock_proc)
-        mocker.patch("src.routes.scan._take_snapshot", return_value={})
+        popen_mock = mocker.patch("beetdeck.routes.scan.subprocess.Popen", return_value=mock_proc)
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
 
         client.post("/api/rescan?mode=quick")
         cmd_arg = popen_mock.call_args[0][0]
@@ -306,8 +306,8 @@ class TestRescan:
 
         new_proc = mocker.MagicMock()
         new_proc.poll.return_value = None
-        mocker.patch("src.routes.scan.subprocess.Popen", return_value=new_proc)
-        mocker.patch("src.routes.scan._take_snapshot", return_value={})
+        mocker.patch("beetdeck.routes.scan.subprocess.Popen", return_value=new_proc)
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
 
         resp = client.post("/api/rescan")
         assert resp.status_code == 200
@@ -316,9 +316,9 @@ class TestRescan:
     def test_takes_snapshot_before_starting(self, client, mocker):
         mock_proc = mocker.MagicMock()
         mock_proc.poll.return_value = None
-        mocker.patch("src.routes.scan.subprocess.Popen", return_value=mock_proc)
+        mocker.patch("beetdeck.routes.scan.subprocess.Popen", return_value=mock_proc)
         snap = {1: ("Song", "Artist", 10, "/music/song.mp3")}
-        mocker.patch("src.routes.scan._take_snapshot", return_value=snap)
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value=snap)
 
         client.post("/api/rescan")
         assert state.rescan_snapshot == snap
@@ -353,7 +353,7 @@ class TestRescanStatus:
         mock_proc.returncode = 0
         state.rescan_proc = mock_proc
         state.rescan_snapshot = None
-        mocker.patch("src.routes.scan._take_snapshot", return_value={})
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
 
         resp = client.get("/api/rescan/status")
         assert resp.status_code == 200
@@ -374,7 +374,7 @@ class TestRescanStatus:
             1: ("Old Song", "Artist", 10, "/music/old.mp3"),
             2: ("New Song", "Artist", 10, "/music/new.mp3"),
         }
-        mocker.patch("src.routes.scan._take_snapshot", return_value=after)
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value=after)
 
         resp = client.get("/api/rescan/status")
         data = resp.get_json()
@@ -389,7 +389,7 @@ class TestRescanStatus:
         mock_proc.returncode = 0
         state.rescan_proc = mock_proc
         state.rescan_snapshot = None
-        mocker.patch("src.routes.scan._take_snapshot", return_value={})
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
 
         resp = client.get("/api/rescan/status")
         data = resp.get_json()
@@ -402,7 +402,7 @@ class TestRescanStatus:
         mock_proc.returncode = 1
         state.rescan_proc = mock_proc
         state.rescan_snapshot = None
-        mocker.patch("src.routes.scan._take_snapshot", return_value={})
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
 
         resp = client.get("/api/rescan/status")
         data = resp.get_json()
@@ -444,8 +444,8 @@ class TestScanOpenAPISpec:
         """Missing `mode` still defaults to quick (behavior unchanged)."""
         mock_proc = mocker.MagicMock()
         mock_proc.poll.return_value = None
-        mocker.patch("src.routes.scan.subprocess.Popen", return_value=mock_proc)
-        mocker.patch("src.routes.scan._take_snapshot", return_value={})
+        mocker.patch("beetdeck.routes.scan.subprocess.Popen", return_value=mock_proc)
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
 
         resp = client.post("/api/rescan")
         assert resp.status_code == 200

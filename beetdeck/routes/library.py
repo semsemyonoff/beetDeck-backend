@@ -6,16 +6,16 @@ import sqlite3
 from flask import Blueprint, jsonify, render_template, request
 from spectree import Response
 
-from src.api import api
-from src.schemas.common import ErrorResponse
-from src.schemas.library import (
+from beetdeck.api import api
+from beetdeck.schemas.common import ErrorResponse
+from beetdeck.schemas.library import (
     ArtistQuery,
     ArtistResponse,
     LibraryResponse,
     SearchQuery,
     SearchResponse,
 )
-from src.utils import _album_dirs_for_ids, _find_cover, _get_ro_conn, _resolve_path
+from beetdeck.utils import _album_dirs_for_ids, _find_cover, _get_ro_conn, _resolve_path
 
 bp = Blueprint("library", __name__)
 

@@ -2,7 +2,7 @@
 
 import io
 
-from src import state
+from beetdeck import state
 from tests.conftest import insert_album, insert_item
 
 # ---------------------------------------------------------------------------
@@ -122,7 +122,7 @@ class TestConfirmCover:
         mock_album = mocker.MagicMock()
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.cover._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.cover._init_beets", return_value=mock_lib)
         resp = client.post(f"/api/album/{album_id}/cover/confirm")
         assert resp.status_code == 404
         assert resp.get_json()["error"] == "Cover art file not found"
@@ -136,8 +136,8 @@ class TestConfirmCover:
         mock_album = mocker.MagicMock()
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.cover._init_beets", return_value=mock_lib)
-        mock_save = mocker.patch("src.routes.cover._save_cover_to_album")
+        mocker.patch("beetdeck.routes.cover._init_beets", return_value=mock_lib)
+        mock_save = mocker.patch("beetdeck.routes.cover._save_cover_to_album")
         resp = client.post(f"/api/album/{album_id}/cover/confirm")
         assert resp.status_code == 200
         assert resp.get_json()["status"] == "ok"
@@ -168,7 +168,7 @@ class TestUploadCover:
     def test_returns_404_when_album_not_found(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = None
-        mocker.patch("src.routes.cover._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.cover._init_beets", return_value=mock_lib)
         resp = client.post(
             "/api/album/9999/cover/upload",
             data={"file": (io.BytesIO(b"\xff\xd8\xff\xe0"), "cover.jpg")},
@@ -183,8 +183,8 @@ class TestUploadCover:
         mock_album = mocker.MagicMock()
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.cover._init_beets", return_value=mock_lib)
-        mock_save = mocker.patch("src.routes.cover._save_cover_to_album")
+        mocker.patch("beetdeck.routes.cover._init_beets", return_value=mock_lib)
+        mock_save = mocker.patch("beetdeck.routes.cover._save_cover_to_album")
         resp = client.post(
             f"/api/album/{album_id}/cover/upload",
             data={"file": (io.BytesIO(b"\xff\xd8\xff\xe0" + b"\x00" * 100), "cover.jpg")},
@@ -217,7 +217,7 @@ class TestSaveCoverToAlbumMultiDisc:
         Image.new("RGB", (16, 16), color="red").save(str(path), format="JPEG")
 
     def test_cleanup_targets_parent_not_cd1(self, app, tmp_path, mocker):
-        from src.utils import _save_cover_to_album
+        from beetdeck.utils import _save_cover_to_album
 
         album_root = tmp_path / "Pink Floyd" / "The Wall"
         cd1 = album_root / "CD1"
@@ -254,7 +254,7 @@ class TestSaveCoverToAlbumMultiDisc:
         assert album.store.called
 
     def test_single_disc_cleanup_targets_album_dir(self, app, tmp_path, mocker):
-        from src.utils import _save_cover_to_album
+        from beetdeck.utils import _save_cover_to_album
 
         album_dir = tmp_path / "Artist" / "Album"
         album_dir.mkdir(parents=True)
@@ -289,7 +289,7 @@ class TestFetchCover:
     def test_returns_404_when_album_not_found(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = None
-        mocker.patch("src.routes.cover._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.cover._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/9999/cover/fetch")
         assert resp.status_code == 404
         assert resp.get_json()["error"] == "Album not found"
@@ -298,7 +298,7 @@ class TestFetchCover:
         mock_album = mocker.MagicMock()
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.cover._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.cover._init_beets", return_value=mock_lib)
         # find_plugins returns nothing
         mocker.patch("beets.plugins.find_plugins", return_value=[])
         resp = client.post("/api/album/1/cover/fetch")
@@ -311,7 +311,7 @@ class TestFetchCover:
         mock_album.album = "Album"
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.cover._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.cover._init_beets", return_value=mock_lib)
         mock_plugin = mocker.MagicMock()
         mock_plugin.name = "fetchart"
         mock_plugin.art_for_album.return_value = None
@@ -330,7 +330,7 @@ class TestFetchCover:
         mock_album.album = "Album"
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.cover._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.cover._init_beets", return_value=mock_lib)
         mock_candidate = mocker.MagicMock()
         mock_candidate.path = str(img_file).encode()
         mock_candidate.source_name = "coverart"
@@ -414,7 +414,7 @@ class TestCoverBehaviorUnchanged:
         # Body-less fetch must reach the handler (not 422); album missing → 404.
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = None
-        mocker.patch("src.routes.cover._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.cover._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/9999/cover/fetch")
         assert resp.status_code == 404
         assert resp.get_json()["error"] == "Album not found"
@@ -431,8 +431,8 @@ class TestCoverBehaviorUnchanged:
         mock_album = mocker.MagicMock()
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.cover._init_beets", return_value=mock_lib)
-        mocker.patch("src.routes.cover._save_cover_to_album")
+        mocker.patch("beetdeck.routes.cover._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.cover._save_cover_to_album")
         resp = client.post(
             f"/api/album/{album_id}/cover/upload",
             data={"file": (io.BytesIO(b"\xff\xd8\xff\xe0" + b"\x00" * 100), "cover.jpg")},

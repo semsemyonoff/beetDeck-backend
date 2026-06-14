@@ -1,6 +1,6 @@
-"""beetDeek entry point — thin wrapper around the src app factory."""
+"""beetDeek entry point — thin wrapper around the beetdeck app factory."""
 
-from src import create_app
+from beetdeck import create_app
 
 app = create_app()
 

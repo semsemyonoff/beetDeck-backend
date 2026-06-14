@@ -7,7 +7,7 @@ This module holds:
   ``library`` blueprint's ``/api/library`` and ``/api/artist`` endpoints.
 
 The error **status code** is locked to 422 on the ``SpecTree`` singleton (see
-``src/api.py``); the error **body** shape is finalized here (Task 11). Every
+``beetdeck/api.py``); the error **body** shape is finalized here (Task 11). Every
 invalid request returns this uniform ``ErrorResponse`` body::
 
     {"error": "Validation failed",
@@ -15,7 +15,7 @@ invalid request returns this uniform ``ErrorResponse`` body::
 
 ``error`` is a short machine-readable message and ``detail`` carries one
 field-level entry per offending field (mirroring pydantic's error format). The
-``_render_validation_error`` hook in ``src/api.py`` produces this body, and
+``_render_validation_error`` hook in ``beetdeck/api.py`` produces this body, and
 ``validation_error_model=ErrorResponse`` documents it as the 422 response of
 every validated endpoint in the spec.
 

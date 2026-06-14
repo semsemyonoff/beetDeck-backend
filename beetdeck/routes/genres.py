@@ -5,14 +5,14 @@ import threading
 from flask import Blueprint, current_app, jsonify, request
 from spectree import Response
 
-from src.api import api
-from src.schemas.common import ErrorResponse
-from src.schemas.genres import (
+from beetdeck.api import api
+from beetdeck.schemas.common import ErrorResponse
+from beetdeck.schemas.genres import (
     GenrePreviewResponse,
     GenreSaveBody,
     GenreWriteResponse,
 )
-from src.utils import _format_genre, _init_beets, _try_write_item, log
+from beetdeck.utils import _format_genre, _init_beets, _try_write_item, log
 
 bp = Blueprint("genres", __name__)
 

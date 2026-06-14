@@ -15,10 +15,10 @@ import uuid
 from flask import Blueprint, current_app, jsonify, request
 from spectree import Response
 
-from src import state
-from src.api import api
-from src.schemas.common import ErrorResponse
-from src.schemas.identify import (
+from beetdeck import state
+from beetdeck.api import api
+from beetdeck.schemas.common import ErrorResponse
+from beetdeck.schemas.identify import (
     ApplyResponse,
     CandidateBody,
     ConfirmResponse,
@@ -27,7 +27,7 @@ from src.schemas.identify import (
     IdentifyStatusResponse,
     IgnoreResponse,
 )
-from src.utils import (
+from beetdeck.utils import (
     _get_ro_conn,
     _get_task_json,
     _init_beets,

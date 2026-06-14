@@ -37,14 +37,14 @@ dev = [
 py-modules = ["app"]
 
 [tool.setuptools.packages.find]
-include = ["src*"]
+include = ["beetdeck*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v"
 
 [tool.coverage.run]
-source = ["src"]
+source = ["beetdeck"]
 omit = ["tests/*"]
 
 [tool.coverage.report]

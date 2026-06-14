@@ -1,11 +1,11 @@
-"""Tests for src/utils.py shared helpers."""
+"""Tests for beetdeck/utils.py shared helpers."""
 
 import sqlite3
 
 import pytest
 
-from src import create_app
-from src.utils import (
+from beetdeck import create_app
+from beetdeck.utils import (
     _album_dir_from_items,
     _decode_path,
     _detect_disc_subdirs,
@@ -499,7 +499,7 @@ def test_init_beets_overrides_beets_directory(tmp_path):
     """
     import beets
 
-    from src.utils import _init_beets
+    from beetdeck.utils import _init_beets
 
     db = tmp_path / "library.db"
     lib = _init_beets(str(db), "/music/custom")

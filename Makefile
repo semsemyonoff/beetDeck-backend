@@ -29,7 +29,7 @@ fmt:
 
 # Run tests with coverage report
 coverage:
-	$(PYTEST) --cov=src --cov-report=term-missing
+	$(PYTEST) --cov=beetdeck --cov-report=term-missing
 
 # Run the Flask dev server on :5000
 run:

@@ -2,7 +2,7 @@
 
 Every invalid request — regardless of which blueprint owns the route or whether
 the failure is a bad query param or a bad JSON body — returns **HTTP 422** with
-the single documented :class:`src.schemas.common.ErrorResponse` body::
+the single documented :class:`beetdeck.schemas.common.ErrorResponse` body::
 
     {"error": "Validation failed",
      "detail": [{"loc": [...], "msg": "...", "type": "..."}, ...]}

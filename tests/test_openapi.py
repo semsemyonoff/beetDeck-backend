@@ -1,4 +1,4 @@
-"""Tests for the spectree OpenAPI integration (src/api.py).
+"""Tests for the spectree OpenAPI integration (beetdeck/api.py).
 
 Covers:
 - the served spec route (`/apidoc/openapi.json`) and Scalar viewer
@@ -12,8 +12,8 @@ import re
 
 import pytest
 
-from src import create_app
-from src.api import api
+from beetdeck import create_app
+from beetdeck.api import api
 
 # Routes mounted by api.register(app); discovered via app.url_map in-container.
 SPEC_URL = "/apidoc/openapi.json"

@@ -30,10 +30,10 @@ import threading
 from flask import Blueprint, current_app, jsonify, request
 from spectree import Response
 
-from src import state
-from src.api import api
-from src.schemas.common import ErrorResponse
-from src.schemas.items import (
+from beetdeck import state
+from beetdeck.api import api
+from beetdeck.schemas.common import ErrorResponse
+from beetdeck.schemas.items import (
     ItemsApplyResponse,
     ItemsCandidateBody,
     ItemsConfirmResponse,
@@ -46,7 +46,7 @@ from src.schemas.items import (
     UpdateMetadataBody,
     UpdateMetadataResponse,
 )
-from src.utils import (
+from beetdeck.utils import (
     _get_ro_conn,
     _get_task_json,
     _init_beets,

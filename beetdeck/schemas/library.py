@@ -16,7 +16,7 @@ modeled with a ``RootModel`` rather than an object wrapper.
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 
-from src.schemas.common import AlbumSummary, ArtistGroup
+from beetdeck.schemas.common import AlbumSummary, ArtistGroup
 
 
 class SearchQuery(BaseModel):

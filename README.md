@@ -21,15 +21,15 @@ repo is source for the backend only.
 
 - **Flask + gunicorn** (1 worker, 4 threads). Single worker is required because
   in-memory state (identification tasks, cover previews) must be shared across
-  request threads. Routes are organized as Flask Blueprints under `src/routes/`.
+  request threads. Routes are organized as Flask Blueprints under `beetdeck/routes/`.
 - **beets integration**: uses the beets Python API directly (not the CLI) for
   identification, genre lookup, cover art, and lyrics. The CLI is only used for
   `beet import` (rescan) and `beet update` (prune stale entries). Genres are
   stored as native list fields; library paths are stored relative to the database
   root and resolved at runtime.
 - **SPA serving**: in production the frontend's build is dropped into
-  `src/static/dist/` and served by Flask — the Vite manifest is read at request
-  time to inject the hashed JS/CSS into `src/templates/index.html`.
+  `beetdeck/static/dist/` and served by Flask — the Vite manifest is read at request
+  time to inject the hashed JS/CSS into `beetdeck/templates/index.html`.
 
 The app reads `BEETS_LIBRARY_DB`, `BEETS_IMPORT_DIR`, `BEETS_LIBRARY_ROOT`, and
 `BEETSDIR` from the environment — see the table in `src/CLAUDE.md` for defaults.
@@ -58,8 +58,8 @@ make coverage
 ```
 
 The frontend SPA lives in its own repository and is served by Flask in
-production from `src/static/dist/` (the Vite manifest is read at request time to
-inject the hashed JS/CSS into `src/templates/index.html`). To exercise the full
+production from `beetdeck/static/dist/` (the Vite manifest is read at request time to
+inject the hashed JS/CSS into `beetdeck/templates/index.html`). To exercise the full
 UI locally, use the DWE dev workspace — the `frontend` service runs the Vite dev
 server (HMR) and proxies the API to this backend.
 
@@ -75,7 +75,7 @@ single source of truth — there is no hand-maintained endpoint table here.
 - **Interactive docs (Scalar):** `GET /apidoc/scalar/` (bare `/apidoc/scalar` redirects to it)
 - **OpenAPI spec (JSON):** `GET /apidoc/openapi.json`
 
-Request models live in `src/schemas/` (one module per blueprint plus a shared
-`common.py`); the `SpecTree` singleton lives in `src/api.py`. For the uniform
+Request models live in `beetdeck/schemas/` (one module per blueprint plus a shared
+`common.py`); the `SpecTree` singleton lives in `beetdeck/api.py`. For the uniform
 `422` validation-error contract returned on invalid input, see the **Validation
 Error Contract** section in `src/CLAUDE.md`.

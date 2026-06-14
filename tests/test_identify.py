@@ -1,6 +1,6 @@
 """Tests for identify blueprint routes."""
 
-import src.state as state
+import beetdeck.state as state
 
 
 def _reset_state():
@@ -28,7 +28,7 @@ class TestStartIdentify:
         mock_proposal = mocker.MagicMock()
         mock_proposal.candidates = []
 
-        mocker.patch("src.routes.identify._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.identify._init_beets", return_value=mock_lib)
         mocker.patch(
             "beets.autotag.tag_album",
             return_value=("Artist", "Album", mock_proposal),
@@ -59,7 +59,7 @@ class TestStartIdentify:
 
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = None
-        mocker.patch("src.routes.identify._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.identify._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/identify", json={})
         assert resp.status_code == 200
@@ -350,7 +350,7 @@ class TestToggleIgnore:
     def _mock_lib(self, mocker, album=None):
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = album
-        mocker.patch("src.routes.identify._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.identify._init_beets", return_value=mock_lib)
         return mock_lib
 
     def test_returns_404_when_album_not_found(self, client, mocker):
@@ -456,7 +456,7 @@ class TestIdentifyBehaviorUnchanged:
         mock_lib.get_album.return_value = mock_album
         mock_proposal = mocker.MagicMock()
         mock_proposal.candidates = []
-        mocker.patch("src.routes.identify._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.identify._init_beets", return_value=mock_lib)
         mocker.patch(
             "beets.autotag.tag_album",
             return_value=("Artist", "Album", mock_proposal),

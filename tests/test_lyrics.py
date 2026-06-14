@@ -1,6 +1,6 @@
 """Tests for lyrics blueprint routes."""
 
-from src import state
+from beetdeck import state
 from tests.conftest import insert_album, insert_item  # noqa: F401
 
 # ---------------------------------------------------------------------------
@@ -99,7 +99,7 @@ class TestFetchTrackLyrics:
     def test_returns_404_when_track_not_found(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = None
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/1/track/9999/lyrics/fetch")
         assert resp.status_code == 404
         assert resp.get_json()["error"] == "Track not found"
@@ -109,7 +109,7 @@ class TestFetchTrackLyrics:
         mock_item.album_id = 99
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/1/track/1/lyrics/fetch")
         assert resp.status_code == 404
 
@@ -118,7 +118,7 @@ class TestFetchTrackLyrics:
         mock_item.album_id = 1
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         mocker.patch("beets.plugins.find_plugins", return_value=[])
         resp = client.post("/api/album/1/track/1/lyrics/fetch")
         assert resp.status_code == 500
@@ -136,7 +136,7 @@ class TestFetchTrackLyrics:
         mock_plugin.name = "lyrics"
         mock_plugin.find_lyrics.return_value = None
 
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         mocker.patch("beets.plugins.find_plugins", return_value=[mock_plugin])
 
         resp = client.post("/api/album/1/track/1/lyrics/fetch")
@@ -161,7 +161,7 @@ class TestFetchTrackLyrics:
         mock_plugin.name = "lyrics"
         mock_plugin.find_lyrics.return_value = lyrics_obj
 
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         mocker.patch("beets.plugins.find_plugins", return_value=[mock_plugin])
 
         resp = client.post("/api/album/1/track/1/lyrics/fetch")
@@ -187,7 +187,7 @@ class TestFetchTrackLyrics:
         mock_plugin.name = "lyrics"
         mock_plugin.find_lyrics.return_value = lyrics_obj
 
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         mocker.patch("beets.plugins.find_plugins", return_value=[mock_plugin])
 
         state.identify_tasks.clear()
@@ -212,7 +212,7 @@ class TestConfirmTrackLyrics:
         state.identify_tasks["lyrics_1"] = {"_lyrics_obj": mocker.MagicMock()}
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = None
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/1/track/1/lyrics/confirm")
         assert resp.status_code == 404
 
@@ -225,7 +225,7 @@ class TestConfirmTrackLyrics:
         mock_item.path = b"/music/track.mp3"
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/track/1/lyrics/confirm")
         assert resp.status_code == 200
@@ -243,7 +243,7 @@ class TestConfirmTrackLyrics:
         mock_item.path = b"/music/track.mp3"
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         client.post("/api/album/1/track/1/lyrics/confirm")
         assert "lyrics_1" not in state.identify_tasks
@@ -261,7 +261,7 @@ class TestConfirmTrackLyrics:
         mock_item.path = audio_path.encode()
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/track/1/lyrics/confirm")
         assert resp.status_code == 200
@@ -278,7 +278,7 @@ class TestConfirmTrackLyrics:
 
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/track/1/lyrics/confirm")
         assert resp.status_code == 500
@@ -296,7 +296,7 @@ class TestEmbedLrcLyrics:
     def test_returns_404_when_track_not_found(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = None
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/1/track/9999/lyrics/embed")
         assert resp.status_code == 404
 
@@ -306,7 +306,7 @@ class TestEmbedLrcLyrics:
         mock_item.path = b"/music/track.mp3"
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/1/track/1/lyrics/embed")
         assert resp.status_code == 404
         assert resp.get_json()["error"] == "No .lrc file found"
@@ -321,7 +321,7 @@ class TestEmbedLrcLyrics:
         mock_item.path = audio_path.encode()
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/track/1/lyrics/embed")
         assert resp.status_code == 200
@@ -339,7 +339,7 @@ class TestEmbedAllLrc:
     def test_returns_404_when_album_not_found(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = None
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/9999/lyrics/embed")
         assert resp.status_code == 404
 
@@ -363,7 +363,7 @@ class TestEmbedAllLrc:
         mock_album.items.return_value = [mock_item1, mock_item2]
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/lyrics/embed")
         assert resp.status_code == 200
@@ -385,7 +385,7 @@ class TestEmbedAllLrc:
         mock_album.items.return_value = [mock_item]
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/lyrics/embed")
         assert resp.status_code == 200
@@ -402,7 +402,7 @@ class TestSaveTrackLyrics:
     def test_returns_404_when_track_not_found(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = None
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/1/track/9999/lyrics/save", json={"lyrics": "text"})
         assert resp.status_code == 404
 
@@ -412,7 +412,7 @@ class TestSaveTrackLyrics:
         mock_item.path = b"/music/track.mp3"
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/track/1/lyrics/save", json={"lyrics": "My lyrics"})
         assert resp.status_code == 200
@@ -427,7 +427,7 @@ class TestSaveTrackLyrics:
         mock_item.path = b"/music/track.mp3"
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/track/1/lyrics/save", json={})
         assert resp.status_code == 200
@@ -443,7 +443,7 @@ class TestSaveTrackLyrics:
         mock_item.path = audio_path.encode()
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/track/1/lyrics/save", json={"lyrics": "New lyrics"})
         assert resp.status_code == 200
@@ -459,7 +459,7 @@ class TestSaveTrackLyrics:
         mock_item.path = audio_path.encode()
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/track/1/lyrics/save", json={"lyrics": ""})
         assert resp.status_code == 200
@@ -472,7 +472,7 @@ class TestSaveTrackLyrics:
         mock_item.try_write.return_value = False
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/track/1/lyrics/save", json={"lyrics": "My lyrics"})
         assert resp.status_code == 500
@@ -488,7 +488,7 @@ class TestFetchAlbumLyrics:
     def test_returns_404_when_album_not_found(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = None
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/9999/lyrics/fetch")
         assert resp.status_code == 404
 
@@ -496,7 +496,7 @@ class TestFetchAlbumLyrics:
         mock_album = mocker.MagicMock()
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         mocker.patch("beets.plugins.find_plugins", return_value=[])
         resp = client.post("/api/album/1/lyrics/fetch")
         assert resp.status_code == 500
@@ -524,7 +524,7 @@ class TestFetchAlbumLyrics:
 
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         mocker.patch("beets.plugins.find_plugins", return_value=[mock_plugin])
 
         state.identify_tasks.clear()
@@ -559,7 +559,7 @@ class TestFetchAlbumLyrics:
 
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         mocker.patch("beets.plugins.find_plugins", return_value=[mock_plugin])
 
         resp = client.post("/api/album/1/lyrics/fetch")
@@ -597,7 +597,7 @@ class TestConfirmAlbumLyrics:
 
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.side_effect = get_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/lyrics/confirm", json={"item_ids": [1, 2]})
         assert resp.status_code == 200
@@ -613,7 +613,7 @@ class TestConfirmAlbumLyrics:
         state.identify_tasks.clear()
 
         mock_lib = mocker.MagicMock()
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/lyrics/confirm", json={"item_ids": [1, 2]})
         assert resp.status_code == 200
@@ -627,7 +627,7 @@ class TestConfirmAlbumLyrics:
         mock_item.album_id = 99  # different album
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/lyrics/confirm", json={"item_ids": [1]})
         assert resp.status_code == 200
@@ -644,7 +644,7 @@ class TestConfirmAlbumLyrics:
 
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/lyrics/confirm", json={"item_ids": [1]})
         assert resp.status_code == 200
@@ -746,7 +746,7 @@ class TestLyricsBehaviorUnchanged:
         # track → 404 (not 422).
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = None
-        mocker.patch("src.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/1/track/9999/lyrics/save", json={})
         assert resp.status_code == 404
 

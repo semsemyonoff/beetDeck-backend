@@ -10,7 +10,7 @@ class TestFetchGenrePreview:
     def test_returns_404_when_album_not_found(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = None
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/9999/genre")
         assert resp.status_code == 404
         assert resp.get_json()["error"] == "Album not found"
@@ -19,7 +19,7 @@ class TestFetchGenrePreview:
         mock_album = mocker.MagicMock()
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
         mocker.patch("beets.plugins.find_plugins", return_value=[])
         resp = client.post("/api/album/1/genre")
         assert resp.status_code == 500
@@ -32,7 +32,7 @@ class TestFetchGenrePreview:
         mock_album.get.side_effect = lambda key, default="": {"genres": "Rock"}.get(key, default)
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
 
         mock_plugin = mocker.MagicMock()
         mock_plugin.name = "lastgenre"
@@ -60,7 +60,7 @@ class TestFetchGenrePreview:
         mock_album.get.return_value = "Rock"
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
 
         mock_plugin = mocker.MagicMock()
         mock_plugin.name = "lastgenre"
@@ -78,7 +78,7 @@ class TestFetchGenrePreview:
         mock_album.get.return_value = "Rock"
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
 
         mock_plugin = mocker.MagicMock()
         mock_plugin.name = "lastgenre"
@@ -100,7 +100,7 @@ class TestConfirmGenre:
     def test_returns_404_when_album_not_found(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = None
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/9999/genre/confirm")
         assert resp.status_code == 404
         assert resp.get_json()["error"] == "Album not found"
@@ -109,7 +109,7 @@ class TestConfirmGenre:
         mock_album = mocker.MagicMock()
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
         mocker.patch("beets.plugins.find_plugins", return_value=[])
         resp = client.post("/api/album/1/genre/confirm")
         assert resp.status_code == 500
@@ -122,7 +122,7 @@ class TestConfirmGenre:
         mock_album.get.return_value = "Jazz"
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
 
         mock_plugin = mocker.MagicMock()
         mock_plugin.name = "lastgenre"
@@ -142,7 +142,7 @@ class TestConfirmGenre:
         mock_album.get.return_value = ["Rock", "Pop"]
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
 
         mock_plugin = mocker.MagicMock()
         mock_plugin.name = "lastgenre"
@@ -171,7 +171,7 @@ class TestConfirmGenre:
         mock_album.get.return_value = "NewGenre"
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
 
         mock_plugin = mocker.MagicMock()
         mock_plugin.name = "lastgenre"
@@ -193,11 +193,11 @@ class TestConfirmGenre:
         mock_album.items.return_value = [mock_item]
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
         mock_plugin = mocker.MagicMock()
         mock_plugin.name = "lastgenre"
         mocker.patch("beets.plugins.find_plugins", return_value=[mock_plugin])
-        mock_write = mocker.patch("src.routes.genres._try_write_item", return_value=True)
+        mock_write = mocker.patch("beetdeck.routes.genres._try_write_item", return_value=True)
 
         resp = client.post("/api/album/1/genre/confirm")
         assert resp.status_code == 200
@@ -216,11 +216,11 @@ class TestConfirmGenre:
         mock_album.items.return_value = [mock_item]
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
         mock_plugin = mocker.MagicMock()
         mock_plugin.name = "lastgenre"
         mocker.patch("beets.plugins.find_plugins", return_value=[mock_plugin])
-        mocker.patch("src.routes.genres._try_write_item", return_value=False)
+        mocker.patch("beetdeck.routes.genres._try_write_item", return_value=False)
 
         resp = client.post("/api/album/1/genre/confirm")
         assert resp.status_code == 200
@@ -252,7 +252,7 @@ class TestSaveGenre:
     def test_returns_404_when_album_not_found(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = None
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/9999/genre/save", json={"genre": "Rock"})
         assert resp.status_code == 404
         assert resp.get_json()["error"] == "Album not found"
@@ -263,7 +263,7 @@ class TestSaveGenre:
         mock_album.items.return_value = [mock_item]
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/genre/save", json={"genre": "Jazz"})
         assert resp.status_code == 200
@@ -284,7 +284,7 @@ class TestSaveGenre:
         mock_album.items.return_value = [mock_item]
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/genre/save", json={"genre": "Rock, Pop, Electronic"})
         assert resp.status_code == 200
@@ -301,8 +301,8 @@ class TestSaveGenre:
         mock_album.items.return_value = [mock_item]
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
-        mocker.patch("src.routes.genres._try_write_item", return_value=False)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._try_write_item", return_value=False)
 
         resp = client.post("/api/album/1/genre/save", json={"genre": "Rock"})
         assert resp.status_code == 200
@@ -316,7 +316,7 @@ class TestSaveGenre:
         mock_album.items.return_value = []
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = mock_album
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/album/1/genre/save", json={"genre": "  Rock  "})
         assert resp.status_code == 200
@@ -382,7 +382,7 @@ class TestGenresBehaviorUnchanged:
         # Body-less preview must reach the handler (not 422); album missing → 404.
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = None
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/9999/genre")
         assert resp.status_code == 404
         assert resp.get_json()["error"] == "Album not found"
@@ -390,7 +390,7 @@ class TestGenresBehaviorUnchanged:
     def test_confirm_without_body_reaches_handler(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_album.return_value = None
-        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
         resp = client.post("/api/album/9999/genre/confirm")
         assert resp.status_code == 404
         assert resp.get_json()["error"] == "Album not found"

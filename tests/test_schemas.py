@@ -1,4 +1,4 @@
-"""Tests for the shared schema models (src/schemas/common.py).
+"""Tests for the shared schema models (beetdeck/schemas/common.py).
 
 Assert the models serialize to the JSON shapes the spec/handlers expect:
 - ``AlbumSummary`` / ``ArtistGroup`` mirror the ``GET /api/library`` and
@@ -6,7 +6,7 @@ Assert the models serialize to the JSON shapes the spec/handlers expect:
 - ``ErrorResponse`` carries a short ``error`` plus optional field-level ``detail``.
 """
 
-from src.schemas import (
+from beetdeck.schemas import (
     AlbumSummary,
     ArtistGroup,
     ErrorResponse,

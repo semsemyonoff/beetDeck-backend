@@ -1,6 +1,6 @@
 """Tests for items blueprint routes."""
 
-import src.state as state
+import beetdeck.state as state
 from tests.conftest import insert_album, insert_item
 
 # ---------------------------------------------------------------------------
@@ -58,8 +58,8 @@ class TestMetadataBatch:
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
         mock_lib.get_album.return_value = mock_al
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
-        write = mocker.patch("src.routes.items._try_write_item", return_value=True)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        write = mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
 
         resp = client.post(
             "/api/items/metadata-batch",
@@ -90,8 +90,8 @@ class TestMetadataBatch:
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
         mock_lib.get_album.return_value = mock_al
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
-        mocker.patch("src.routes.items._try_write_item", return_value=True)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
 
         resp = client.post(
             "/api/items/metadata-batch",
@@ -110,8 +110,8 @@ class TestMetadataBatch:
         mock_item = self._make_mock_item(mocker, 2, 20)
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
-        mocker.patch("src.routes.items._try_write_item", return_value=True)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
 
         resp = client.post(
             "/api/items/metadata-batch",
@@ -128,8 +128,8 @@ class TestMetadataBatch:
         mock_item = self._make_mock_item(mocker, 3, 30)
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
-        mocker.patch("src.routes.items._try_write_item", return_value=True)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
 
         resp = client.post(
             "/api/items/metadata-batch",
@@ -150,8 +150,8 @@ class TestMetadataBatch:
         mock_item = self._make_mock_item(mocker, 3, 30)
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
-        mocker.patch("src.routes.items._try_write_item", return_value=True)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
 
         resp = client.post(
             "/api/items/metadata-batch",
@@ -164,7 +164,7 @@ class TestMetadataBatch:
     def test_unknown_item_id_produces_warning_not_500(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = None
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         # Need at least one item override since no album fields
         resp = client.post(
@@ -180,8 +180,8 @@ class TestMetadataBatch:
         mock_item = self._make_mock_item(mocker, 4, 40)
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
-        mocker.patch("src.routes.items._try_write_item", return_value=False)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=False)
 
         resp = client.post(
             "/api/items/metadata-batch",
@@ -198,8 +198,8 @@ class TestMetadataBatch:
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
         mock_lib.get_album.return_value = mock_al
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
-        mocker.patch("src.routes.items._try_write_item", return_value=True)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
 
         resp = client.post(
             "/api/items/metadata-batch",
@@ -216,8 +216,8 @@ class TestMetadataBatch:
         mock_item = self._make_mock_item(mocker, 3, 30)
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
-        mocker.patch("src.routes.items._try_write_item", return_value=True)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
 
         resp = client.post(
             "/api/items/metadata-batch",
@@ -237,8 +237,8 @@ class TestMetadataBatch:
         mock_lib.get_item.side_effect = lambda iid: next((x for x in items if x.id == iid), None)
         mock_lib.get_album.return_value = mock_al
 
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
-        write = mocker.patch("src.routes.items._try_write_item", return_value=True)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        write = mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
 
         resp = client.post(
             "/api/items/metadata-batch",
@@ -266,8 +266,8 @@ class TestMetadataBatch:
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.side_effect = lambda iid: {1: item1, 2: item2}.get(iid)
         mock_lib.get_album.side_effect = lambda aid: {10: al10, 20: al20}.get(aid)
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
-        write = mocker.patch("src.routes.items._try_write_item", return_value=True)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        write = mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
 
         resp = client.post(
             "/api/items/metadata-batch",
@@ -298,8 +298,8 @@ class TestMetadataBatch:
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.side_effect = lambda iid: {1: req_item}.get(iid)
         mock_lib.get_album.return_value = mock_al
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
-        write = mocker.patch("src.routes.items._try_write_item", return_value=True)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        write = mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
 
         resp = client.post(
             "/api/items/metadata-batch",
@@ -319,10 +319,10 @@ class TestMetadataBatch:
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.side_effect = lambda iid: {1: req_item}.get(iid)
         mock_lib.get_album.return_value = mock_al
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
         # Only the absent member (id 2) fails to write.
         mocker.patch(
-            "src.routes.items._try_write_item",
+            "beetdeck.routes.items._try_write_item",
             side_effect=lambda it: it.id != 2,
         )
 
@@ -488,7 +488,7 @@ class TestUntaggedItems:
         assert data[0]["path"] == "/music/track.mp3"
 
     def test_path_resolved_against_library_root(self, db_path):
-        from src import create_app
+        from beetdeck import create_app
         from tests.conftest import insert_album, insert_item
 
         app = create_app(
@@ -517,7 +517,7 @@ class TestUpdateMetadata:
     def test_returns_404_for_missing_item(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = None
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/items/99/metadata", json={"artist": "A", "album": "B"})
         assert resp.status_code == 404
@@ -525,7 +525,7 @@ class TestUpdateMetadata:
 
     def test_returns_400_when_no_fields(self, client, mocker):
         mock_lib = mocker.MagicMock()
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/items/1/metadata", json={})
         assert resp.status_code == 400
@@ -536,7 +536,7 @@ class TestUpdateMetadata:
         mock_item.try_write.return_value = True
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         resp = client.post(
             "/api/items/1/metadata", json={"artist": "New Artist", "album": "New Album"}
@@ -552,7 +552,7 @@ class TestUpdateMetadata:
         mock_item.try_write.return_value = True
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/items/1/metadata", json={"artist": "Only Artist"})
         assert resp.status_code == 200
@@ -563,7 +563,7 @@ class TestUpdateMetadata:
         mock_item.try_write.return_value = False
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/items/1/metadata", json={"artist": "X"})
         assert resp.status_code == 200
@@ -576,7 +576,7 @@ class TestUpdateMetadata:
         mock_item.try_write.return_value = True
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/items/42/metadata", json={"album": "My Album"})
         assert resp.status_code == 200
@@ -587,7 +587,7 @@ class TestUpdateMetadata:
         mock_item.try_write.return_value = True
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/items/1/metadata", json={"title": "New Title"})
         assert resp.status_code == 200
@@ -595,7 +595,7 @@ class TestUpdateMetadata:
 
     def test_returns_400_when_all_fields_empty(self, client, mocker):
         mock_lib = mocker.MagicMock()
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/items/1/metadata", json={"title": "", "artist": "", "album": ""})
         assert resp.status_code == 400
@@ -636,7 +636,7 @@ class TestItemsIdentify:
         mock_proposal = mocker.MagicMock()
         mock_proposal.candidates = []
 
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
         mocker.patch(
             "beets.autotag.tag_album",
             return_value=("Artist", "Album", mock_proposal),
@@ -651,7 +651,7 @@ class TestItemsIdentify:
     def test_invalid_item_id_in_background_sets_error(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = None
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         resp = client.post("/api/items/identify", json={"item_ids": [999]})
         assert resp.status_code == 200
@@ -808,7 +808,7 @@ class TestItemsConfirm:
         mock_lib.get_item.return_value = mock_item
         mock_lib.add_album.return_value = mock_album
 
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         state.identify_tasks["items_c2"] = {
             "task_id": "c2",
@@ -846,7 +846,7 @@ class TestItemsConfirm:
         mock_lib.get_item.return_value = mock_item
         mock_lib.add_album.return_value = mock_album
 
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         state.identify_tasks["items_c3"] = {
             "task_id": "c3",
@@ -878,7 +878,7 @@ class TestItemsConfirm:
         mock_lib.get_item.return_value = mock_item
         mock_lib.add_album.side_effect = RuntimeError("DB error")
 
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         state.identify_tasks["items_c4"] = {
             "task_id": "c4",
@@ -920,7 +920,7 @@ class TestItemsConfirm:
         mock_lib.get_item.side_effect = [mock_item, fresh_item]
         mock_lib.add_album.return_value = mock_album
 
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         state.identify_tasks["items_c8"] = {
             "task_id": "c8",
@@ -958,7 +958,7 @@ class TestItemsConfirm:
         mock_lib.get_item.return_value = mock_item
         mock_lib.add_album.return_value = mock_album
 
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         state.identify_tasks["items_c7"] = {
             "task_id": "c7",
@@ -979,7 +979,7 @@ class TestItemsConfirm:
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = None
 
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         state.identify_tasks["items_c5"] = {
             "task_id": "c5",
@@ -994,7 +994,7 @@ class TestItemsConfirm:
     def test_returns_400_for_invalid_candidate_index(self, client, mocker):
         mock_match = mocker.MagicMock()
         mock_lib = mocker.MagicMock()
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
 
         state.identify_tasks["items_c6"] = {
             "task_id": "c6",
@@ -1088,7 +1088,7 @@ class TestItemsBehaviorUnchanged:
 
     def test_metadata_empty_body_reaches_handler(self, client, mocker):
         mock_lib = mocker.MagicMock()
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
         # Empty body → all fields default to "" → handler's own "at least one
         # field" 400 (NOT 422).
         resp = client.post("/api/items/1/metadata", json={})
@@ -1116,8 +1116,8 @@ class TestItemsBehaviorUnchanged:
         mock_item.path = b"/music/t.mp3"
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
-        mocker.patch("src.routes.items._try_write_item", return_value=True)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
         resp = client.post(
             "/api/items/metadata-batch",
             json={"items": [{"id": 3, "track": "5", "disc": "2"}]},
@@ -1133,8 +1133,8 @@ class TestItemsBehaviorUnchanged:
         mock_item.path = b"/music/t.mp3"
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
-        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
-        mocker.patch("src.routes.items._try_write_item", return_value=True)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
         resp = client.post(
             "/api/items/metadata-batch",
             json={"items": [{"id": 3, "track": "x"}]},

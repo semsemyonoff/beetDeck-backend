@@ -4,8 +4,8 @@ import sqlite3
 
 import pytest
 
-import src.utils as src_utils
-from src import create_app, state
+import beetdeck.utils as beetdeck_utils
+from beetdeck import create_app, state
 
 BEETS_SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS albums (
@@ -165,12 +165,12 @@ def reset_global_state():
     state.identify_tasks.clear()
     state.rescan_proc = None
     state.rescan_snapshot = None
-    src_utils._beets_initialized = False
+    beetdeck_utils._beets_initialized = False
     yield
     state.identify_tasks.clear()
     state.rescan_proc = None
     state.rescan_snapshot = None
-    src_utils._beets_initialized = False
+    beetdeck_utils._beets_initialized = False
 
 
 @pytest.fixture()

@@ -13,16 +13,16 @@ import sys
 from flask import Blueprint, current_app, jsonify, request
 from spectree import Response
 
-from src import state
-from src.api import api
-from src.schemas.common import ErrorResponse
-from src.schemas.scan import (
+from beetdeck import state
+from beetdeck.api import api
+from beetdeck.schemas.common import ErrorResponse
+from beetdeck.schemas.scan import (
     RescanQuery,
     RescanRunningResponse,
     RescanStartResponse,
     RescanStatusResponse,
 )
-from src.utils import _get_ro_conn, _resolve_path, log
+from beetdeck.utils import _get_ro_conn, _resolve_path, log
 
 bp = Blueprint("scan", __name__)
 

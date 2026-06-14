@@ -46,7 +46,7 @@ models are shared rather than duplicated.
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 
-from src.schemas.identify import ApplyResponse, Candidate
+from beetdeck.schemas.identify import ApplyResponse, Candidate
 
 # Re-exported so ``routes/items.py`` can import the shared diff/candidate models
 # from a single place alongside the items-specific ones.

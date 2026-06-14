@@ -25,7 +25,7 @@ Notes:
 
 Validation-error contract (Task 11):
 - Every invalid request — across every blueprint — returns **HTTP 422** with the
-  uniform :class:`~src.schemas.common.ErrorResponse` body::
+  uniform :class:`~beetdeck.schemas.common.ErrorResponse` body::
 
       {"error": "Validation failed",
        "detail": [{"loc": [...], "msg": "...", "type": "..."}, ...]}
@@ -44,7 +44,7 @@ from typing import Any
 from pydantic import ValidationError
 from spectree import SpecTree
 
-from src.schemas.common import ErrorResponse, ValidationErrorDetail
+from beetdeck.schemas.common import ErrorResponse, ValidationErrorDetail
 
 
 def _render_validation_error(
@@ -58,7 +58,7 @@ def _render_validation_error(
     spectree builds the validation-error response as ``jsonify(errors)`` — a bare
     JSON *list* of pydantic error dicts — before invoking this hook. When a
     validation error occurred we replace that body in place with the documented
-    :class:`~src.schemas.common.ErrorResponse` object so every blueprint returns
+    :class:`~beetdeck.schemas.common.ErrorResponse` object so every blueprint returns
     one stable shape. Non-error calls (``req_validation_error is None``) are
     left untouched.
     """

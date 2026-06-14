@@ -6,10 +6,10 @@ import sqlite3
 from flask import Blueprint, jsonify
 from spectree import Response
 
-from src.api import api
-from src.schemas.albums import AlbumDetailResponse, TrackTagsResponse
-from src.schemas.common import ErrorResponse
-from src.utils import (
+from beetdeck.api import api
+from beetdeck.schemas.albums import AlbumDetailResponse, TrackTagsResponse
+from beetdeck.schemas.common import ErrorResponse
+from beetdeck.utils import (
     _album_dir_from_items,
     _decode_path,
     _detect_disc_subdirs,

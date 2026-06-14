@@ -5,10 +5,10 @@ import os
 from flask import Blueprint, current_app, jsonify, request
 from spectree import Response
 
-from src import state
-from src.api import api
-from src.schemas.common import ErrorResponse
-from src.schemas.lyrics import (
+from beetdeck import state
+from beetdeck.api import api
+from beetdeck.schemas.common import ErrorResponse
+from beetdeck.schemas.lyrics import (
     AlbumLyricsConfirmBody,
     AlbumLyricsConfirmResponse,
     AlbumLyricsEmbedResponse,
@@ -18,7 +18,7 @@ from src.schemas.lyrics import (
     TrackLyricsReadResponse,
     TrackLyricsSaveBody,
 )
-from src.utils import (
+from beetdeck.utils import (
     _find_lrc_file,
     _get_ro_conn,
     _init_beets,

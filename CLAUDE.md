@@ -7,7 +7,7 @@ library. This repository is the **backend**: a Flask REST API that serves the
 data and a single-page app. It provides album browsing, cover art management,
 genre editing, lyrics fetching, MusicBrainz identification, and library
 rescanning. The React SPA that consumes this API lives in a **separate
-repository**; its production build is served by Flask from `src/static/dist/`.
+repository**; its production build is served by Flask from `beetdeck/static/dist/`.
 
 ## Tech Stack
 
@@ -21,8 +21,8 @@ repository**; its production build is served by Flask from `src/static/dist/`.
 
 ```
 beetDeck/
-├── app.py                  # Thin entry point: calls create_app() from src/
-├── src/
+├── app.py                  # Thin entry point: calls create_app() from beetdeck/
+├── beetdeck/
 │   ├── __init__.py         # Flask app factory (create_app); calls api.register(app)
 │   ├── api.py              # SpecTree singleton + 422 validation-error hook (OpenAPI/Scalar)
 │   ├── state.py            # Shared in-memory state (globals)
@@ -52,7 +52,7 @@ beetDeck/
 │   │   ├── logo.svg
 │   │   └── dist/           # SPA build output (generated, gitignored)
 │   └── templates/
-│       └── index.html      # SPA shell; injects hashed JS/CSS from src/static/dist/ via the Vite manifest
+│       └── index.html      # SPA shell; injects hashed JS/CSS from beetdeck/static/dist/ via the Vite manifest
 ├── tests/                  # pytest suite (see Testing)
 │   ├── conftest.py         # Fixtures: create_app with temp SQLite DB, schema helpers
 │   ├── test_db_fixture.py
@@ -74,7 +74,7 @@ beetDeck/
 > The production image (Dockerfile, build, example beets config) lives in the
 > separate `beetDeck/deploy` repo, which pins this repository as a submodule.
 
-### In-Memory State (src/state.py)
+### In-Memory State (beetdeck/state.py)
 
 The application uses module-level globals for shared state across request threads:
 
@@ -135,10 +135,10 @@ The application uses module-level globals for shared state across request thread
 ## Validation Error Contract (422)
 
 Request validation is driven by **spectree** (pydantic v2). The single `SpecTree`
-singleton lives in `src/api.py`; route handlers are decorated with
+singleton lives in `beetdeck/api.py`; route handlers are decorated with
 `@api.validate(...)` and the generated spec / Scalar UI are served under `/apidoc`
 (`GET /apidoc/openapi.json`, `GET /apidoc/scalar/`). Request models live in
-`src/schemas/` (one module per blueprint plus shared `common.py`).
+`beetdeck/schemas/` (one module per blueprint plus shared `common.py`).
 
 **Any invalid request — bad query param or bad JSON body, on any endpoint —
 returns HTTP `422` with one uniform body** (consumed by the SPA):
@@ -157,7 +157,7 @@ returns HTTP `422` with one uniform body** (consumed by the SPA):
 - `detail` — one entry per offending field: `loc` (path to the field), `msg`
   (human-readable), `type` (pydantic error code).
 
-This shape is produced by the `_render_validation_error` hook in `src/api.py`
+This shape is produced by the `_render_validation_error` hook in `beetdeck/api.py`
 (spectree's raw default is a bare JSON list) and is documented in the OpenAPI
 spec via `validation_error_model=ErrorResponse` (the `ErrorResponse` component is
 the 422 response of every validated endpoint).
@@ -174,7 +174,7 @@ the 422 response of every validated endpoint).
 ## Architecture Constraints
 
 **CRITICAL: the app must run as a single process.** It relies on module-level
-in-memory globals (`rescan_proc`, `identify_tasks`, etc.) in `src/state.py` for
+in-memory globals (`rescan_proc`, `identify_tasks`, etc.) in `beetdeck/state.py` for
 state shared across request threads. Running multiple worker processes would give
 each its own memory space, siloing state per-worker and breaking background task
 tracking (identify jobs, scan status). The gunicorn invocation must always use
@@ -182,12 +182,12 @@ tracking (identify jobs, scan status). The gunicorn invocation must always use
 
 ## App Factory Pattern
 
-Routes are registered via Flask Blueprints in `create_app()` (`src/__init__.py`).
+Routes are registered via Flask Blueprints in `create_app()` (`beetdeck/__init__.py`).
 All route modules read config from `current_app.config` rather than module-level
 constants. Tests use `create_app(test_config={"LIBRARY_DB": "<tmp>", ...})` to
 inject a temporary SQLite file.
 
-The `_init_beets()` helper in `src/utils.py` accepts an explicit `library_db`
+The `_init_beets()` helper in `beetdeck/utils.py` accepts an explicit `library_db`
 parameter rather than reading from `current_app.config`, because it is called from
 background threads (identify tasks) that have no Flask app context.
 
@@ -209,14 +209,14 @@ make fmt       # ruff format
 
 - **Current**: beets 2.10.0 (pinned as a direct release tarball in `pyproject.toml` — the single source of truth; bump the tag to change it)
 - Key 2.10.0 behaviors this app handles:
-  - Genres stored as native list field (`genres`); `_format_genre()` in `src/utils.py` handles both list and legacy string values
-  - Library paths stored relative to DB root; `_resolve_path()` in `src/utils.py` joins `LIBRARY_ROOT` + relative path (absolute paths pass through unchanged)
+  - Genres stored as native list field (`genres`); `_format_genre()` in `beetdeck/utils.py` handles both list and legacy string values
+  - Library paths stored relative to DB root; `_resolve_path()` in `beetdeck/utils.py` joins `LIBRARY_ROOT` + relative path (absolute paths pass through unchanged)
   - Lyrics plugin: separate `lyrics_backend`/`lyrics_url`/`lyrics_language` fields (no "Source: URL" suffix in lyrics text)
 
 ## Testing
 
 - **Framework**: pytest + pytest-cov + pytest-mock; ruff for lint/format
-- **Test structure**: `tests/` at project root, files mirror `src/routes/`
+- **Test structure**: `tests/` at project root, files mirror `beetdeck/routes/`
 - **Config**: `pyproject.toml`
 - **Fixtures**: `tests/conftest.py` — Flask app fixture via `create_app(test_config=...)` with a temp SQLite file seeded with beets schema tables
 - **Coverage target**: 80%+ for modular code

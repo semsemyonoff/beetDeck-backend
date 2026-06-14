@@ -6,15 +6,15 @@ import sqlite3
 from flask import Blueprint, current_app, jsonify, send_file
 from spectree import Response
 
-from src import state
-from src.api import api
-from src.schemas.common import ErrorResponse
-from src.schemas.cover import (
+from beetdeck import state
+from beetdeck.api import api
+from beetdeck.schemas.common import ErrorResponse
+from beetdeck.schemas.cover import (
     CoverFetchResponse,
     CoverStatusResponse,
     CoverUploadForm,
 )
-from src.utils import (
+from beetdeck.utils import (
     _album_dir_from_items,
     _decode_path,
     _detect_disc_subdirs,
