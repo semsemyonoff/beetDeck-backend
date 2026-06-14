@@ -38,6 +38,7 @@ Validation-error contract (Task 11):
   response of every validated endpoint in the OpenAPI spec.
 """
 
+import os
 from typing import Any
 
 from pydantic import ValidationError
@@ -76,11 +77,17 @@ def _render_validation_error(
     resp.content_type = "application/json"
 
 
+#: Product release version, reported as the OpenAPI ``info.version``. Baked into
+#: the production image at build time (``APP_VERSION`` build-arg → env, wired from
+#: the release tag by the deploy repo's ``build.sh``); defaults to ``0.0.0`` for
+#: dev runs and plain ``docker build`` without the build-arg.
+APP_VERSION = os.environ.get("APP_VERSION", "0.0.0")
+
 #: Single SpecTree singleton shared across all route modules.
 api = SpecTree(
     "flask",
     title="beetDeck API",
-    version="0.0.0",
+    version=APP_VERSION,
     description="Internal OpenAPI spec for the beetDeck backend.",
     validation_error_status=422,
     validation_error_model=ErrorResponse,
