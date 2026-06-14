@@ -24,15 +24,9 @@ INVALID_REQUESTS = [
     pytest.param(
         "post", "/api/items/metadata-batch", {"items": "notalist"}, id="items-batch-bad-type"
     ),
-    pytest.param(
-        "post", "/api/items/1/metadata", {"bogus": 1}, id="items-metadata-extra"
-    ),
-    pytest.param(
-        "post", "/api/album/1/genre/save", {"bogus": 1}, id="genres-save-extra"
-    ),
-    pytest.param(
-        "post", "/api/album/1/apply", {"candidate_index": "nope"}, id="identify-bad-type"
-    ),
+    pytest.param("post", "/api/items/1/metadata", {"bogus": 1}, id="items-metadata-extra"),
+    pytest.param("post", "/api/album/1/genre/save", {"bogus": 1}, id="genres-save-extra"),
+    pytest.param("post", "/api/album/1/apply", {"candidate_index": "nope"}, id="identify-bad-type"),
     pytest.param(
         "post",
         "/api/album/1/lyrics/confirm",
@@ -48,18 +42,31 @@ INVALID_REQUESTS = [
 # above but fail here).
 INVALID_REQUESTS_WITH_FIELD = [
     pytest.param(
-        "post", "/api/items/metadata-batch", {"items": "notalist"}, "items",
+        "post",
+        "/api/items/metadata-batch",
+        {"items": "notalist"},
+        "items",
         id="items-batch-bad-type",
     ),
     pytest.param(
-        "post", "/api/album/1/apply", {"candidate_index": "nope"}, "candidate_index",
+        "post",
+        "/api/album/1/apply",
+        {"candidate_index": "nope"},
+        "candidate_index",
         id="identify-bad-type",
     ),
     pytest.param(
-        "post", "/api/album/1/genre/save", {"bogus": 1}, "bogus", id="genres-save-extra",
+        "post",
+        "/api/album/1/genre/save",
+        {"bogus": 1},
+        "bogus",
+        id="genres-save-extra",
     ),
     pytest.param(
-        "post", "/api/album/1/lyrics/confirm", {"item_ids": ["x"]}, "item_ids",
+        "post",
+        "/api/album/1/lyrics/confirm",
+        {"item_ids": ["x"]},
+        "item_ids",
         id="lyrics-bulk-non-int",
     ),
 ]
@@ -119,9 +126,7 @@ class TestErrorContractInSpec:
 
         schemas = spec["components"]["schemas"]
         error_keys = {
-            key
-            for key, schema in schemas.items()
-            if schema.get("title") == "ErrorResponse"
+            key for key, schema in schemas.items() if schema.get("title") == "ErrorResponse"
         }
         # One reused ErrorResponse component, exposing {error, detail}.
         assert len(error_keys) == 1

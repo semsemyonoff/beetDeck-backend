@@ -669,34 +669,32 @@ class TestLyricsOpenAPISpec:
         return client.get("/apidoc/openapi.json").get_json()
 
     def test_track_read_in_spec(self, client):
-        op = self._spec(client)["paths"][
-            "/api/album/{album_id}/track/{item_id}/lyrics"
-        ]["get"]
+        op = self._spec(client)["paths"]["/api/album/{album_id}/track/{item_id}/lyrics"]["get"]
         assert "lyrics" in op["tags"]
         assert "200" in op["responses"]
         assert "404" in op["responses"]
         assert "requestBody" not in op
 
     def test_track_fetch_in_spec(self, client):
-        op = self._spec(client)["paths"][
-            "/api/album/{album_id}/track/{item_id}/lyrics/fetch"
-        ]["post"]
+        op = self._spec(client)["paths"]["/api/album/{album_id}/track/{item_id}/lyrics/fetch"][
+            "post"
+        ]
         assert "lyrics" in op["tags"]
         assert "200" in op["responses"]
         # Body-less POST — no requestBody documented.
         assert "requestBody" not in op
 
     def test_track_confirm_in_spec(self, client):
-        op = self._spec(client)["paths"][
-            "/api/album/{album_id}/track/{item_id}/lyrics/confirm"
-        ]["post"]
+        op = self._spec(client)["paths"]["/api/album/{album_id}/track/{item_id}/lyrics/confirm"][
+            "post"
+        ]
         assert "lyrics" in op["tags"]
         assert "requestBody" not in op
 
     def test_track_embed_in_spec(self, client):
-        op = self._spec(client)["paths"][
-            "/api/album/{album_id}/track/{item_id}/lyrics/embed"
-        ]["post"]
+        op = self._spec(client)["paths"]["/api/album/{album_id}/track/{item_id}/lyrics/embed"][
+            "post"
+        ]
         assert "lyrics" in op["tags"]
         assert "requestBody" not in op
 
@@ -711,9 +709,9 @@ class TestLyricsOpenAPISpec:
         assert "requestBody" not in op
 
     def test_track_save_documents_json_body(self, client):
-        op = self._spec(client)["paths"][
-            "/api/album/{album_id}/track/{item_id}/lyrics/save"
-        ]["post"]
+        op = self._spec(client)["paths"]["/api/album/{album_id}/track/{item_id}/lyrics/save"][
+            "post"
+        ]
         assert "lyrics" in op["tags"]
         assert "200" in op["responses"]
         assert "application/json" in op["requestBody"]["content"]
@@ -736,15 +734,11 @@ class TestLyricsBehaviorUnchanged:
     routes now yields 422; everything else reaches the handler as before."""
 
     def test_save_unknown_field_returns_422(self, client):
-        resp = client.post(
-            "/api/album/1/track/1/lyrics/save", json={"bogus": "x"}
-        )
+        resp = client.post("/api/album/1/track/1/lyrics/save", json={"bogus": "x"})
         assert resp.status_code == 422
 
     def test_save_wrong_type_returns_422(self, client):
-        resp = client.post(
-            "/api/album/1/track/1/lyrics/save", json={"lyrics": 123}
-        )
+        resp = client.post("/api/album/1/track/1/lyrics/save", json={"lyrics": 123})
         assert resp.status_code == 422
 
     def test_save_empty_body_reaches_handler(self, client, mocker):
@@ -761,15 +755,11 @@ class TestLyricsBehaviorUnchanged:
         assert resp.status_code == 422
 
     def test_album_confirm_non_list_returns_422(self, client):
-        resp = client.post(
-            "/api/album/1/lyrics/confirm", json={"item_ids": "nope"}
-        )
+        resp = client.post("/api/album/1/lyrics/confirm", json={"item_ids": "nope"})
         assert resp.status_code == 422
 
     def test_album_confirm_non_int_element_returns_422(self, client):
-        resp = client.post(
-            "/api/album/1/lyrics/confirm", json={"item_ids": [1, "x"]}
-        )
+        resp = client.post("/api/album/1/lyrics/confirm", json={"item_ids": [1, "x"]})
         assert resp.status_code == 422
 
     def test_album_confirm_empty_body_still_400(self, client):

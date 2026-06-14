@@ -134,9 +134,7 @@ class Candidate(BaseModel):
     track_count: int | None = Field(
         default=None, description="Number of tracks in the proposed release."
     )
-    tracks: list[CandidateTrack] = Field(
-        default_factory=list, description="Per-track proposals."
-    )
+    tracks: list[CandidateTrack] = Field(default_factory=list, description="Per-track proposals.")
 
 
 class IdentifyStatusResponse(BaseModel):
@@ -181,9 +179,7 @@ class ApplyResponse(BaseModel):
     album: dict[str, Any] = Field(
         description="Album-level field diffs keyed by field name (each {old, new})."
     )
-    tracks: list[TrackDiff] = Field(
-        default_factory=list, description="Per-track field diffs."
-    )
+    tracks: list[TrackDiff] = Field(default_factory=list, description="Per-track field diffs.")
 
 
 class ConfirmResponse(BaseModel):

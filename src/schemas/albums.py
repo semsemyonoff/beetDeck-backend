@@ -56,9 +56,7 @@ class AlbumDetailResponse(BaseModel):
     mb_albumid: str = Field(description="MusicBrainz album id ('' when none).")
     path: str = Field(description="Album directory path ('' when unresolved).")
     multi_disc: bool = Field(description="Whether the album spans more than one disc.")
-    discs: list[DiscSummary] = Field(
-        default_factory=list, description="Per-disc groupings."
-    )
+    discs: list[DiscSummary] = Field(default_factory=list, description="Per-disc groupings.")
     has_cover: bool = Field(description="Whether cover art is available.")
     tagged: bool = Field(description="Whether the album is marked beetdeck_tagged.")
     ignored: bool = Field(description="Whether the album is marked beetdeck_ignored.")

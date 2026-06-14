@@ -82,17 +82,13 @@ def test_every_decorated_view_appears_in_spec(db_path, _build):
     if hasattr(api, "_spec"):
         del api._spec
 
-    app = create_app(
-        test_config={"LIBRARY_DB": db_path, "LIBRARY_ROOT": "", "TESTING": True}
-    )
+    app = create_app(test_config={"LIBRARY_DB": db_path, "LIBRARY_ROOT": "", "TESTING": True})
     decorated = _decorated_specs(app)
 
     spec = app.test_client().get(SPEC_URL).get_json()
     spec_paths = spec.get("paths", {})
 
     missing = [
-        (path, method)
-        for (path, method) in decorated
-        if method not in spec_paths.get(path, {})
+        (path, method) for (path, method) in decorated if method not in spec_paths.get(path, {})
     ]
     assert not missing, f"decorated views missing from spec: {missing}"

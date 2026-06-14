@@ -73,6 +73,4 @@ class ArtistGroup(BaseModel):
     """An artist with their albums, as returned by ``GET /api/library``."""
 
     artist: str = Field(description="Album artist name ('Unknown Artist' if empty).")
-    albums: list[AlbumSummary] = Field(
-        default_factory=list, description="Albums by this artist."
-    )
+    albums: list[AlbumSummary] = Field(default_factory=list, description="Albums by this artist.")

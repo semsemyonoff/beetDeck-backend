@@ -42,9 +42,7 @@ class ArtistQuery(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(
-        default="", description="Album artist name; empty → 400 Missing name."
-    )
+    name: str = Field(default="", description="Album artist name; empty → 400 Missing name.")
 
 
 class LibraryResponse(RootModel[list[ArtistGroup]]):
@@ -75,21 +73,13 @@ class SearchTrack(BaseModel):
 class SearchResponse(BaseModel):
     """``GET /api/search`` — grouped artist/album/track hits."""
 
-    artists: list[str] = Field(
-        default_factory=list, description="Matching album-artist names."
-    )
-    albums: list[SearchAlbum] = Field(
-        default_factory=list, description="Matching albums."
-    )
-    tracks: list[SearchTrack] = Field(
-        default_factory=list, description="Matching tracks."
-    )
+    artists: list[str] = Field(default_factory=list, description="Matching album-artist names.")
+    albums: list[SearchAlbum] = Field(default_factory=list, description="Matching albums.")
+    tracks: list[SearchTrack] = Field(default_factory=list, description="Matching tracks.")
 
 
 class ArtistResponse(BaseModel):
     """``GET /api/artist`` — one artist with their albums."""
 
     artist: str = Field(description="The queried album-artist name.")
-    albums: list[AlbumSummary] = Field(
-        default_factory=list, description="Albums by this artist."
-    )
+    albums: list[AlbumSummary] = Field(default_factory=list, description="Albums by this artist.")

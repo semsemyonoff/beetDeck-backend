@@ -165,9 +165,7 @@ class ItemsIdentifyBody(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    item_ids: list[int] = Field(
-        default_factory=list, description="Item ids to identify together."
-    )
+    item_ids: list[int] = Field(default_factory=list, description="Item ids to identify together.")
     search_artist: str = Field(default="", description="Search hint: album artist.")
     search_album: str = Field(default="", description="Search hint: album title.")
 
@@ -276,6 +274,4 @@ class ItemsConfirmResponse(BaseModel):
 
     status: str = Field(description="Always 'ok' on success.")
     album_id: int = Field(description="Id of the newly created album.")
-    warnings: list[str] | None = Field(
-        default=None, description="Non-fatal file-write failures."
-    )
+    warnings: list[str] | None = Field(default=None, description="Non-fatal file-write failures.")

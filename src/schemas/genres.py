@@ -52,9 +52,7 @@ class GenrePreviewResponse(BaseModel):
 
     status: str = Field(description="Always ``ok`` on success.")
     old_genre: str = Field(description="Current genre(s), comma-formatted.")
-    new_genre: str = Field(
-        description="Genre(s) fetched from Last.fm, comma-formatted."
-    )
+    new_genre: str = Field(description="Genre(s) fetched from Last.fm, comma-formatted.")
 
 
 class GenreWriteResponse(BaseModel):
@@ -70,7 +68,6 @@ class GenreWriteResponse(BaseModel):
     write_failures: list[int] | None = Field(
         default=None,
         description=(
-            "Item ids whose audio-file write failed (present when status is "
-            "``partial``)."
+            "Item ids whose audio-file write failed (present when status is ``partial``)."
         ),
     )
