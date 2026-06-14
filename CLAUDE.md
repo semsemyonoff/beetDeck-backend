@@ -13,7 +13,7 @@ repository**; its production build is served by Flask from `beetdeck/static/dist
 
 - **Language/framework**: Python 3.10+ (runs on 3.14), Flask, gunicorn (1 worker, 4 threads)
 - **Database**: SQLite (beets `library.db`), read mostly via direct SQL; the beets `Library` object is used for write operations
-- **Key dependencies**: beets 2.10.0, Pillow, pylast (Last.fm), requests, beautifulsoup4, pyacoustid
+- **Key dependencies**: beets 2.11.0, Pillow, pylast (Last.fm), requests, beautifulsoup4, pyacoustid
 - **Audio tooling**: ffmpeg (used by pyacoustid for fingerprinting)
 - **Dependencies & tooling config**: all declared in `pyproject.toml` (runtime under `[project]`, dev tools under the `dev` extra; pytest and ruff configured in the same file)
 
@@ -207,11 +207,13 @@ make fmt       # ruff format
 
 ## Beets Version
 
-- **Current**: beets 2.10.0 (pinned as a direct release tarball in `pyproject.toml` — the single source of truth; bump the tag to change it)
-- Key 2.10.0 behaviors this app handles:
+- **Current**: beets 2.11.0 (pinned as a direct release tarball in `pyproject.toml` — the single source of truth; bump the tag to change it)
+- Key behaviors this app handles:
   - Genres stored as native list field (`genres`); `_format_genre()` in `beetdeck/utils.py` handles both list and legacy string values
   - Library paths stored relative to DB root; `_resolve_path()` in `beetdeck/utils.py` joins `LIBRARY_ROOT` + relative path (absolute paths pass through unchanged)
   - Lyrics plugin: separate `lyrics_backend`/`lyrics_url`/`lyrics_language` fields (no "Source: URL" suffix in lyrics text)
+- 2.11.0 bump notes: no breaking API changes for this app (verified against the modules we import — `autotag.tag_album`, art embedding, `plugins`, `library.Library`, `util.{bytestring_path,move,unique_path}`, `config`). New `subtitle` media-tag field (ID3 `TIT3`) was added to `Item`, so it is included in `_ROLLBACK_FIELDS` (`beetdeck/routes/items.py`)
+  - Cover embedding imports `embed_album` from `beetsplug._utils.art` (in `beetdeck/utils.py`); the old `beets.art` shim is deprecated and slated for removal in beets 3.0.0. Cover tests patch `beetsplug._utils.art.embed_album`.
 
 ## Testing
 

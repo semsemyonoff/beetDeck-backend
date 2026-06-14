@@ -138,6 +138,7 @@ _ROLLBACK_FIELDS = (
     "length",
     "lyricist",
     "remixer",
+    "subtitle",
     "trackdisambig",
     "work",
     "work_disambig",

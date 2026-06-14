@@ -241,7 +241,7 @@ class TestSaveCoverToAlbumMultiDisc:
         src = tmp_path / "new-cover.jpg"
         self._make_jpeg(src)
 
-        mocker.patch("beets.art.embed_album")
+        mocker.patch("beetsplug._utils.art.embed_album")
 
         with app.app_context():
             _save_cover_to_album(album, str(src))
@@ -269,7 +269,7 @@ class TestSaveCoverToAlbumMultiDisc:
 
         src = tmp_path / "new.jpg"
         self._make_jpeg(src)
-        mocker.patch("beets.art.embed_album")
+        mocker.patch("beetsplug._utils.art.embed_album")
 
         with app.app_context():
             _save_cover_to_album(album, str(src))

@@ -219,9 +219,9 @@ def _save_cover_to_album(album, src_path):
     ``item_dir()`` which returns only the first item's directory, so we call
     ``art_destination`` directly with the correct common parent.
     """
-    from beets import art
     from beets.util import bytestring_path, move
     from beets.util import unique_path as beets_unique_path
+    from beetsplug._utils import art
 
     items = list(album.items())
     album_dir = _common_parent_dir([_resolve_path(it.path) for it in items]) if items else None
