@@ -177,9 +177,7 @@ def search():
             ).fetchall()
 
             track_artpath = {
-                r["album_id"]: r["artpath"]
-                for r in track_rows
-                if r["album_id"] is not None
+                r["album_id"]: r["artpath"] for r in track_rows if r["album_id"] is not None
             }
             track_dirs = _album_dirs_for_ids(conn, track_artpath.keys())
             track_cover = {
