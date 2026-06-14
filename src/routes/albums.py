@@ -4,7 +4,11 @@ import os
 import sqlite3
 
 from flask import Blueprint, jsonify
+from spectree import Response
 
+from src.api import api
+from src.schemas.albums import AlbumDetailResponse, TrackTagsResponse
+from src.schemas.common import ErrorResponse
 from src.utils import (
     _album_dir_from_items,
     _decode_path,
@@ -27,6 +31,14 @@ def _fmt_length(seconds):
 
 
 @bp.route("/api/album/<int:album_id>")
+@api.validate(
+    resp=Response(
+        HTTP_200=AlbumDetailResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["albums"],
+)
 def album_detail(album_id):
     try:
         conn = _get_ro_conn()
@@ -112,6 +124,14 @@ def album_detail(album_id):
 
 
 @bp.route("/api/album/<int:album_id>/track/<int:item_id>/tags")
+@api.validate(
+    resp=Response(
+        HTTP_200=TrackTagsResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["albums"],
+)
 def track_tags(album_id, item_id):
     try:
         conn = _get_ro_conn()
