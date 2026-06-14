@@ -196,6 +196,24 @@ class TestSearchEndpoint:
         assert track["albumartist"] == "Led Zeppelin"
         assert track["album_id"] == album_id
 
+    def test_track_has_cover_false_when_no_art(self, client, db_path):
+        album_id = insert_album(db_path, albumartist="Artist F", album="Album F", artpath=None)
+        insert_item(db_path, album_id, title="Track No Art", path=b"/nonexistent/track.mp3")
+        resp = client.get("/api/search?q=track no art")
+        data = resp.get_json()
+        assert data["tracks"][0]["has_cover"] is False
+
+    def test_track_has_cover_true_when_artpath_valid(self, client, db_path, tmp_path):
+        img_file = tmp_path / "cover.jpg"
+        img_file.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+        album_id = insert_album(
+            db_path, albumartist="Artist G", album="Album G", artpath=str(img_file).encode()
+        )
+        insert_item(db_path, album_id, title="Track With Art", path=b"/nonexistent/track.mp3")
+        resp = client.get("/api/search?q=track with art")
+        data = resp.get_json()
+        assert data["tracks"][0]["has_cover"] is True
+
 
 # ---------------------------------------------------------------------------
 # GET /api/artist

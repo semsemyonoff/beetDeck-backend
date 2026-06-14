@@ -47,6 +47,69 @@ class TestAlbumCover:
         assert resp.status_code == 200
 
 
+def _write_jpeg(path, size=(300, 300), color="red"):
+    """Write a real JPEG (Pillow-readable) so thumbnailing can run."""
+    from PIL import Image
+
+    Image.new("RGB", size, color=color).save(str(path), format="JPEG")
+
+
+class TestAlbumCoverThumbnail:
+    def test_invalid_size_returns_400(self, client, db_path, tmp_path):
+        img_file = tmp_path / "cover.jpg"
+        _write_jpeg(img_file)
+        album_id = insert_album(db_path, album="Thumb Album", artpath=str(img_file).encode())
+        resp = client.get(f"/api/album/{album_id}/cover?size=999")
+        assert resp.status_code == 400
+        assert "size must be one of" in resp.get_json()["error"]
+
+    def test_size_returns_webp(self, client, db_path, tmp_path):
+        img_file = tmp_path / "cover.jpg"
+        _write_jpeg(img_file, size=(300, 300))
+        album_id = insert_album(db_path, album="Thumb Album", artpath=str(img_file).encode())
+        resp = client.get(f"/api/album/{album_id}/cover?size=64")
+        assert resp.status_code == 200
+        assert resp.mimetype == "image/webp"
+        assert "max-age" in resp.headers.get("Cache-Control", "")
+        # Body is a valid WebP downscaled to fit the 64px box.
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(resp.data))
+        assert img.format == "WEBP"
+        assert max(img.size) <= 64
+
+    def test_thumbnail_is_cached(self, client, app, db_path, tmp_path):
+        img_file = tmp_path / "cover.jpg"
+        _write_jpeg(img_file)
+        album_id = insert_album(db_path, album="Cached Album", artpath=str(img_file).encode())
+        cache_dir = app.config["COVER_CACHE_DIR"]
+        client.get(f"/api/album/{album_id}/cover?size=128")
+        import os
+
+        cached = [f for f in os.listdir(cache_dir) if f.endswith(".webp")]
+        assert len(cached) == 1
+        # Second request reuses the cache (no new file).
+        client.get(f"/api/album/{album_id}/cover?size=128")
+        assert os.listdir(cache_dir) == cached
+
+    def test_no_size_serves_original(self, client, db_path, tmp_path):
+        img_file = tmp_path / "cover.jpg"
+        _write_jpeg(img_file)
+        album_id = insert_album(db_path, album="Orig Album", artpath=str(img_file).encode())
+        resp = client.get(f"/api/album/{album_id}/cover")
+        assert resp.status_code == 200
+        assert resp.mimetype != "image/webp"
+
+    def test_unreadable_source_falls_back_to_original(self, client, db_path, tmp_path):
+        # Not a real image: thumbnailing fails, route streams the original bytes.
+        img_file = tmp_path / "cover.jpg"
+        img_file.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+        album_id = insert_album(db_path, album="Bad Img", artpath=str(img_file).encode())
+        resp = client.get(f"/api/album/{album_id}/cover?size=64")
+        assert resp.status_code == 200
+        assert resp.mimetype != "image/webp"
+
+
 # ---------------------------------------------------------------------------
 # GET /api/album/<id>/cover/preview
 # ---------------------------------------------------------------------------

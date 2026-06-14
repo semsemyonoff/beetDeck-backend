@@ -53,6 +53,12 @@ COVER_HIRES_MAX = 1200
 COVER_EMBED_MAX = 500
 COVER_EMBED_QUALITY = 70
 
+# Allowed max-side sizes for the on-the-fly cover thumbnails served by
+# ``GET /api/album/<id>/cover?size=`` — bounded so the disk cache cannot be
+# inflated with arbitrary dimensions.
+COVER_THUMB_SIZES = (64, 128, 256, 400)
+COVER_THUMB_QUALITY = 80
+
 # ---------------------------------------------------------------------------
 # Beets initialization state
 # ---------------------------------------------------------------------------
@@ -205,6 +211,43 @@ def _resize_image(src_path, max_size, quality=95):
             os.unlink(tmp.name)
             raise
     return tmp.name
+
+
+def _cover_thumbnail(src_path, size, cache_dir):
+    """Return the path to a cached WebP thumbnail of ``src_path``.
+
+    The thumbnail fits within a ``size``×``size`` box (aspect preserved) and is
+    generated on first request, then cached on disk under ``cache_dir`` keyed by
+    the source path, requested size and source mtime. A changed cover (new
+    mtime) yields a fresh key, so stale thumbnails are simply orphaned rather
+    than served. Returns ``None`` if the source cannot be read as an image.
+    """
+    import hashlib
+
+    from PIL import Image, UnidentifiedImageError
+
+    try:
+        mtime = int(os.path.getmtime(src_path))
+    except OSError:
+        return None
+
+    key = hashlib.sha1(f"{src_path}|{size}|{mtime}".encode()).hexdigest()
+    out_path = os.path.join(cache_dir, f"{key}.webp")
+    if os.path.isfile(out_path):
+        return out_path
+
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        with Image.open(src_path) as img:
+            img.thumbnail((size, size), Image.LANCZOS)
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            tmp = f"{out_path}.{threading.get_ident()}.tmp"
+            img.save(tmp, format="WEBP", quality=COVER_THUMB_QUALITY, method=6)
+        os.replace(tmp, out_path)
+    except (OSError, UnidentifiedImageError):
+        return None
+    return out_path
 
 
 def _save_cover_to_album(album, src_path):
