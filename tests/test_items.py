@@ -139,6 +139,28 @@ class TestMetadataBatch:
         assert mock_item.track == 5
         assert mock_item.disc == 2
 
+    def test_per_track_numeric_float_reaches_handler_not_422(self, client, mocker):
+        """A fractional JSON float for track/disc/year must reach the handler's
+        int() coerce-and-warn path (200), not be rejected at the schema as 422.
+
+        The lenient numeric fields are typed ``int | float | str | None`` so the
+        documented "any JSON scalar passes; the handler decides" contract holds
+        for JSON numbers as well as strings (matches pre-spectree behavior:
+        int(1.5) -> 1)."""
+        mock_item = self._make_mock_item(mocker, 3, 30)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("src.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("src.routes.items._try_write_item", return_value=True)
+
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"items": [{"id": 3, "track": 1.5, "disc": 2.0}]},
+        )
+        assert resp.status_code == 200
+        assert mock_item.track == 1
+        assert mock_item.disc == 2
+
     def test_unknown_item_id_produces_warning_not_500(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = None

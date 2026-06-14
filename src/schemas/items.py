@@ -24,7 +24,9 @@ decision — documented here, applied all-or-nothing):
   and emits a *warning* (not an error) on a bad value, returning ``200`` with a
   populated ``warnings`` list. Typing them in pydantic would turn those warnings
   into ``422`` and break the documented partial-success contract, so they are
-  modelled as ``int | str | None`` (any JSON scalar passes; the handler decides).
+  modelled as ``int | float | str | None`` (any JSON scalar passes — including a
+  fractional float like ``1.5``, which the handler's ``int()`` coerces; the
+  handler decides).
 - **Semantic / cross-field rules stay in the handler → 400.** "at least one
   album field or item override is required" and "≥1 item id required when album
   fields are present" remain the handler's authoritative ``400`` checks. They
@@ -95,15 +97,15 @@ class MetadataBatchAlbum(BaseModel):
     """Album-level fields for ``POST /api/items/metadata-batch``.
 
     String scalars are strictly typed (wrong type → ``422``). ``year`` is left
-    lenient (``int | str | None``) so the handler's coerce-and-warn behavior is
-    preserved. ``extra="forbid"`` rejects unknown album keys.
+    lenient (``int | float | str | None``) so the handler's coerce-and-warn
+    behavior is preserved. ``extra="forbid"`` rejects unknown album keys.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     album: str | None = Field(default=None, description="Album title.")
     albumartist: str | None = Field(default=None, description="Album artist.")
-    year: int | str | None = Field(
+    year: int | float | str | None = Field(
         default=None,
         description="Release year (lenient: bad values warn, not 422).",
     )
@@ -126,10 +128,10 @@ class MetadataBatchItem(BaseModel):
     id: int = Field(strict=True, description="Item id (integer; JSON booleans rejected).")
     title: str | None = Field(default=None, description="Per-track title override.")
     artist: str | None = Field(default=None, description="Per-track artist override.")
-    track: int | str | None = Field(
+    track: int | float | str | None = Field(
         default=None, description="Track number (lenient: bad values warn)."
     )
-    disc: int | str | None = Field(
+    disc: int | float | str | None = Field(
         default=None, description="Disc number (lenient: bad values warn)."
     )
 
