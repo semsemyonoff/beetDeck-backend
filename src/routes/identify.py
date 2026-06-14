@@ -13,8 +13,20 @@ import threading
 import uuid
 
 from flask import Blueprint, current_app, jsonify, request
+from spectree import Response
 
 from src import state
+from src.api import api
+from src.schemas.common import ErrorResponse
+from src.schemas.identify import (
+    ApplyResponse,
+    CandidateBody,
+    ConfirmResponse,
+    IdentifyStartBody,
+    IdentifyStartResponse,
+    IdentifyStatusResponse,
+    IgnoreResponse,
+)
 from src.utils import (
     _get_ro_conn,
     _get_task_json,
@@ -136,6 +148,10 @@ def _run_identify(
 
 
 @bp.route("/api/album/<int:album_id>/ignore", methods=["POST"])
+@api.validate(
+    resp=Response(HTTP_200=IgnoreResponse, HTTP_404=ErrorResponse, HTTP_500=ErrorResponse),
+    tags=["identify"],
+)
 def toggle_ignore(album_id):
     lib = None
     try:
@@ -164,8 +180,13 @@ def toggle_ignore(album_id):
 
 
 @bp.route("/api/album/<int:album_id>/identify", methods=["POST"])
+@api.validate(
+    json=IdentifyStartBody,
+    resp=Response(HTTP_200=IdentifyStartResponse, HTTP_409=IdentifyStartResponse),
+    tags=["identify"],
+)
 def identify(album_id):
-    data = request.get_json(silent=True) or {}
+    data = request.context.json
 
     library_db = current_app.config["LIBRARY_DB"]
     library_dir = current_app.config.get("LIBRARY_ROOT") or None
@@ -203,9 +224,9 @@ def identify(album_id):
         args=(
             f"album_{album_id}",
             album_id,
-            data.get("artist", ""),
-            data.get("album", ""),
-            data.get("search_id", ""),
+            data.artist,
+            data.album,
+            data.search_id,
             library_db,
             library_dir,
         ),
@@ -217,6 +238,10 @@ def identify(album_id):
 
 
 @bp.route("/api/album/<int:album_id>/identify/status")
+@api.validate(
+    resp=Response(HTTP_200=IdentifyStatusResponse),
+    tags=["identify"],
+)
 def identify_status(album_id):
     with state.identify_lock:
         task = state.identify_tasks.get(f"album_{album_id}")
@@ -227,12 +252,19 @@ def identify_status(album_id):
 
 
 @bp.route("/api/album/<int:album_id>/apply", methods=["POST"])
+@api.validate(
+    json=CandidateBody,
+    resp=Response(
+        HTTP_200=ApplyResponse,
+        HTTP_400=ErrorResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["identify"],
+)
 def apply_match(album_id):
     """Preview what would change if this candidate is applied."""
-    data = request.get_json(silent=True) or {}
-    candidate_index = data.get("candidate_index", 0)
-    if not isinstance(candidate_index, int):
-        return jsonify({"error": "candidate_index must be an integer"}), 400
+    candidate_index = request.context.json.candidate_index
 
     with state.identify_lock:
         task = state.identify_tasks.get(f"album_{album_id}")
@@ -294,12 +326,19 @@ def apply_match(album_id):
 
 
 @bp.route("/api/album/<int:album_id>/confirm", methods=["POST"])
+@api.validate(
+    json=CandidateBody,
+    resp=Response(
+        HTTP_200=ConfirmResponse,
+        HTTP_400=ErrorResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["identify"],
+)
 def confirm_match(album_id):
     """Apply the selected match using beets API and write tags to files."""
-    data = request.get_json(silent=True) or {}
-    candidate_index = data.get("candidate_index", 0)
-    if not isinstance(candidate_index, int):
-        return jsonify({"error": "candidate_index must be an integer"}), 400
+    candidate_index = request.context.json.candidate_index
 
     lib = None
     with state.identify_lock:
