@@ -281,10 +281,9 @@ class TestRescan:
         resp = client.post("/api/rescan?mode=bogus")
         assert resp.status_code == 422
         body = resp.get_json()
-        # Pre-Task-11 default body: a list of pydantic error entries
-        # (loc/msg/type). The uniform ErrorResponse shape lands in Task 11.
-        assert isinstance(body, list) and body
-        assert {"loc", "msg", "type"} <= set(body[0])
+        # Task 11: uniform ErrorResponse body {error, detail:[{loc,msg,type}]}.
+        assert body["error"] == "Validation failed"
+        assert body["detail"] and {"loc", "msg", "type"} <= set(body["detail"][0])
 
     def test_unknown_query_param_returns_422(self, client):
         """An unknown query param is rejected with 422 (extra=forbid)."""

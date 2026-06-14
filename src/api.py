@@ -17,9 +17,59 @@ Notes:
 - Response validation stays disabled (``mode="normal"``). ``resp=`` on handlers
   only feeds the spec; handlers keep returning their existing raw ``jsonify(...)``
   bodies untouched.
+
+Validation-error contract (Task 11):
+- Every invalid request — across every blueprint — returns **HTTP 422** with the
+  uniform :class:`~src.schemas.common.ErrorResponse` body::
+
+      {"error": "Validation failed",
+       "detail": [{"loc": [...], "msg": "...", "type": "..."}, ...]}
+
+  ``error`` is a short machine-readable message; ``detail`` carries one entry per
+  offending field (mirroring pydantic's error format). spectree's default emits a
+  bare JSON *list* of pydantic errors — the ``_render_validation_error`` hook below
+  rewrites it into this object so the SPA has a single shape to parse.
+- ``validation_error_model=ErrorResponse`` documents that same shape as the 422
+  response of every validated endpoint in the OpenAPI spec.
 """
 
+from typing import Any
+
+from pydantic import ValidationError
 from spectree import SpecTree
+
+from src.schemas.common import ErrorResponse, ValidationErrorDetail
+
+
+def _render_validation_error(
+    req: Any,
+    resp: Any,
+    req_validation_error: ValidationError | None,
+    instance: Any,
+) -> None:
+    """spectree ``before`` hook: rewrite the 422 body into the uniform shape.
+
+    spectree builds the validation-error response as ``jsonify(errors)`` — a bare
+    JSON *list* of pydantic error dicts — before invoking this hook. When a
+    validation error occurred we replace that body in place with the documented
+    :class:`~src.schemas.common.ErrorResponse` object so every blueprint returns
+    one stable shape. Non-error calls (``req_validation_error is None``) are
+    left untouched.
+    """
+    if req_validation_error is None or resp is None:
+        return
+    detail = [
+        ValidationErrorDetail(
+            loc=list(err.get("loc", ())),
+            msg=err.get("msg", ""),
+            type=err.get("type", ""),
+        )
+        for err in req_validation_error.errors(include_context=False)
+    ]
+    body = ErrorResponse(error="Validation failed", detail=detail)
+    resp.set_data(body.model_dump_json())
+    resp.content_type = "application/json"
+
 
 #: Single SpecTree singleton shared across all route modules.
 api = SpecTree(
@@ -28,4 +78,6 @@ api = SpecTree(
     version="0.0.0",
     description="Internal OpenAPI spec for the beetDeck backend.",
     validation_error_status=422,
+    validation_error_model=ErrorResponse,
+    before=_render_validation_error,
 )

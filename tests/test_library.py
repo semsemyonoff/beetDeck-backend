@@ -372,17 +372,16 @@ class TestLibraryValidation:
         resp = client.get("/api/search?bogus=1")
         assert resp.status_code == 422
         body = resp.get_json()
-        # Pre-Task-11 default body: a list of pydantic error entries
-        # (loc/msg/type). The uniform ErrorResponse shape lands in Task 11.
-        assert isinstance(body, list) and body
-        assert {"loc", "msg", "type"} <= set(body[0])
+        # Task 11: uniform ErrorResponse body {error, detail:[{loc,msg,type}]}.
+        assert body["error"] == "Validation failed"
+        assert body["detail"] and {"loc", "msg", "type"} <= set(body["detail"][0])
 
     def test_malformed_artist_query_returns_422(self, client):
         resp = client.get("/api/artist?name=x&bogus=1")
         assert resp.status_code == 422
         body = resp.get_json()
-        assert isinstance(body, list) and body
-        assert {"loc", "msg", "type"} <= set(body[0])
+        assert body["error"] == "Validation failed"
+        assert body["detail"] and {"loc", "msg", "type"} <= set(body["detail"][0])
 
     def test_library_documented_in_spec(self, client):
         """The 3 library routes appear in the generated spec under the tag."""

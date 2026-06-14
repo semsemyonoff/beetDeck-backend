@@ -7,9 +7,22 @@ This module holds:
   ``library`` blueprint's ``/api/library`` and ``/api/artist`` endpoints.
 
 The error **status code** is locked to 422 on the ``SpecTree`` singleton (see
-``src/api.py``); the error **body** shape is finalized in Task 11. ``ErrorResponse``
-here is the documented candidate shape — a short machine-readable ``error`` plus an
-optional list of field-level ``detail`` entries mirroring pydantic's error format.
+``src/api.py``); the error **body** shape is finalized here (Task 11). Every
+invalid request returns this uniform ``ErrorResponse`` body::
+
+    {"error": "Validation failed",
+     "detail": [{"loc": [...], "msg": "...", "type": "..."}, ...]}
+
+``error`` is a short machine-readable message and ``detail`` carries one
+field-level entry per offending field (mirroring pydantic's error format). The
+``_render_validation_error`` hook in ``src/api.py`` produces this body, and
+``validation_error_model=ErrorResponse`` documents it as the 422 response of
+every validated endpoint in the spec.
+
+Note: handler-owned semantic errors (e.g. a missing album → 404, "Genre cannot
+be empty" → 400) keep their own ``{"error": "..."}`` bodies with ``detail``
+absent — they are not request-validation failures and are out of scope of this
+contract.
 """
 
 from pydantic import BaseModel, Field
