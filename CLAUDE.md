@@ -23,9 +23,21 @@ repository**; its production build is served by Flask from `src/static/dist/`.
 beetDeck/
 ├── app.py                  # Thin entry point: calls create_app() from src/
 ├── src/
-│   ├── __init__.py         # Flask app factory (create_app)
+│   ├── __init__.py         # Flask app factory (create_app); calls api.register(app)
+│   ├── api.py              # SpecTree singleton + 422 validation-error hook (OpenAPI/Scalar)
 │   ├── state.py            # Shared in-memory state (globals)
 │   ├── utils.py            # Shared helpers and constants
+│   ├── schemas/            # spectree/pydantic request & response models (one module per blueprint)
+│   │   ├── __init__.py     # re-exports shared models
+│   │   ├── common.py       # ErrorResponse + reusable nested types (AlbumSummary, ArtistGroup)
+│   │   ├── library.py
+│   │   ├── albums.py
+│   │   ├── cover.py
+│   │   ├── genres.py
+│   │   ├── lyrics.py
+│   │   ├── identify.py
+│   │   ├── items.py
+│   │   └── scan.py
 │   ├── routes/
 │   │   ├── __init__.py
 │   │   ├── library.py      # GET /, /api/library, /api/search, /api/artist
@@ -52,7 +64,10 @@ beetDeck/
 │   ├── test_lyrics.py
 │   ├── test_identify.py
 │   ├── test_items.py
-│   └── test_scan.py
+│   ├── test_scan.py
+│   ├── test_openapi.py     # spec/Scalar routes + decorated-view-in-spec coverage
+│   ├── test_schemas.py     # shared schema serialization
+│   └── test_error_contract.py  # uniform 422 body across blueprints
 └── pyproject.toml          # Dependencies, pytest, and ruff configuration
 ```
 
@@ -78,6 +93,8 @@ The application uses module-level globals for shared state across request thread
 
 ### API Routes
 
+- `GET /apidoc/openapi.json` — generated OpenAPI 3.x spec (single source of truth)
+- `GET /apidoc/scalar` — interactive Scalar API documentation viewer
 - `GET /` — serves SPA
 - `GET /api/library` — album list
 - `GET /api/search` — search albums/artists
