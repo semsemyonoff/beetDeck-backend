@@ -23,93 +23,18 @@ Works well alongside tools like Lidarr that manage the file library, while beets
 - **Tag editing** — edit album-level and per-track tags (title, artist, track #, year, genre) directly from the album page via an *Edit tags* modal; album-level changes propagate to the album row and are written to every track file
 - **Light/dark theme** — auto-detects system preference with manual toggle, persisted in localStorage
 
-## Quick start
+## Deployment
 
-### 1. Prepare beets config
+beetDeck is published as a single Docker image (`semsemyonoff/beetdeck`) that
+bundles this API and the pre-built SPA. **Building and self-hosting the release
+is handled in the separate `beetDeck/deploy` repository**, which pins this
+backend and the frontend as submodules, builds the multi-arch image, and ships
+the production `docker-compose.yml`, `.env.example`, and an example beets
+`config.yaml`. See that repo's README for install, configuration (env vars,
+volumes, beets plugins), and release instructions.
 
-Create a directory for beets configuration and copy the example config:
-
-```bash
-mkdir -p ./beetdeck-config
-cp config.yaml ./beetdeck-config/config.yaml
-```
-
-See [`config.yaml`](config.yaml) for an example beets configuration.
-
-### 2. Run with docker compose
-
-```yaml
-# docker-compose.yml
-services:
-  beetdeck:
-    image: semsemyonoff/beetdeck
-    container_name: beetdeck
-    user: "1000:1000"  # match your music library file ownership
-    environment:
-      - TZ=Europe/London
-      - BEETSDIR=/config/beets
-      - BEETS_LIBRARY_DB=/data/beets/library.db
-      - BEETS_IMPORT_DIR=/music
-    volumes:
-      - ./beetdeck-config:/config/beets:ro   # beets config (read-only)
-      - ./beetdeck-data:/data/beets           # database & state (writable)
-      - /path/to/your/music:/music            # music library (writable)
-    ports:
-      - "5000:5000"
-    restart: unless-stopped
-```
-
-```bash
-docker compose up -d
-```
-
-Open `http://localhost:5000` in your browser.
-
-### 4. Initial library scan
-
-Click **Rescan Library** → **Full Scan** in the UI to populate the beets database from your music directory. After the initial scan, use **Quick Scan** for incremental updates.
-
-## Configuration
-
-### Environment variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TZ` | `UTC` | Container timezone |
-| `BEETSDIR` | `/config/beets` | beets configuration directory |
-| `BEETS_LIBRARY_DB` | `/data/beets/library.db` | Path to beets SQLite database |
-| `BEETS_IMPORT_DIR` | `/music` | Music library root for rescan |
-| `BEETS_LIBRARY_ROOT` | auto-detected | beets library directory for resolving relative paths (auto-detected from beets config if unset) |
-
-### Volumes
-
-| Container path | Description |
-|----------------|-------------|
-| `/config/beets` | beets configuration — **read-only** |
-| `/data/beets` | Database (`library.db`) and state (`state.pickle`) — **must be writable** |
-| `/music` | Music library — **must be writable** for tag writing, cover embedding, lyrics |
-
-### Running as non-root
-
-The container runs as whatever `user:` is set in compose. Make sure the UID/GID has:
-- **Read** access to the beets config volume (`/config/beets`)
-- **Read/write** access to the data volume (`/data/beets`)
-- **Read/write** access to the music library volume (for writing tags, covers, lyrics)
-
-### beets plugins
-
-The following beets plugins are used and should be listed in `config.yaml`:
-
-| Plugin | Purpose |
-|--------|---------|
-| `musicbrainz` | Album identification / autotag |
-| `fetchart` | Cover art fetching from online sources |
-| `embedart` | Embedding cover art into audio files |
-| `lastgenre` | Genre tagging via Last.fm |
-| `lyrics` | Lyrics fetching (lrclib) |
-| `info` | Reading raw file tags |
-
-All plugins have `auto: no` — beetDeck triggers them on demand through the UI.
+The app reads `BEETS_LIBRARY_DB`, `BEETS_IMPORT_DIR`, `BEETS_LIBRARY_ROOT`, and
+`BEETSDIR` from the environment — see the table in `src/CLAUDE.md` for defaults.
 
 ## Architecture
 
@@ -141,28 +66,14 @@ make fmt
 make coverage
 ```
 
-The frontend SPA lives in its own repository. To exercise the full UI locally,
-build it there and copy `dist/` into `src/static/dist/`, then `make run` and
-open `http://localhost:5000`.
+The frontend SPA lives in its own repository and is served by Flask in
+production from `src/static/dist/` (the Vite manifest is read at request time to
+inject the hashed JS/CSS into `src/templates/index.html`). To exercise the full
+UI locally, use the DWE dev workspace — the `frontend` service runs the Vite dev
+server (HMR) and proxies the API to this backend.
 
-### Syncing the frontend build (production hand-off)
-
-The production Docker image bundles the pre-built SPA. Flask reads
-`src/static/dist/.vite/manifest.json` at request time to inject the hashed
-JS/CSS into `src/templates/index.html`; `build.sh` aborts with an error if
-that file is missing.
-
-One-command sync (requires the DWE stack running):
-
-```bash
-make sync-frontend-dist   # builds SPA in-container, then copies dist/ here
-make build                # build and push the multi-arch Docker image
-```
-
-What it does:
-1. Runs `npm run build` inside the `frontend` DWE container (outputs to
-   `services/frontend/src/dist/` on the host via the bind mount).
-2. Copies that `dist/` tree into `src/static/dist/` so `build.sh` can find it.
+Producing the production image (which builds the SPA and bakes it in) is the job
+of the `beetDeck/deploy` repository; see its README.
 
 ## API reference
 

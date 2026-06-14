@@ -25,10 +25,10 @@
     <script type="module" src="{{ url_for('static', filename='dist/' ~ vite_entry) }}"></script>
     {% else %}
     <p style="font-family: system-ui, sans-serif; padding: 2rem;">
-      Frontend assets not built. In the frontend repo run <code>npm run build</code>,
-      then copy <code>dist/</code> into <code>src/static/dist/</code> here.
-      From the backend repo you can run <code>make sync-frontend-dist</code> to do
-      both steps in one command (requires the DWE stack to be running).
+      Frontend assets not built. This is the production shell — the SPA is built
+      and baked into the image by the <code>beetDeck/deploy</code> repository
+      (<code>make release</code>). For local UI work, use the DWE dev workspace,
+      where the frontend runs under the Vite dev server.
     </p>
     {% endif %}
   </body>

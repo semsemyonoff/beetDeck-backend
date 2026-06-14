@@ -41,7 +41,7 @@ beetDeck/
 │   │   └── dist/           # SPA build output (generated, gitignored)
 │   └── templates/
 │       └── index.html      # SPA shell; injects hashed JS/CSS from src/static/dist/ via the Vite manifest
-├── tests/
+├── tests/                  # pytest suite (see Testing)
 │   ├── conftest.py         # Fixtures: create_app with temp SQLite DB, schema helpers
 │   ├── test_db_fixture.py
 │   ├── test_utils.py
@@ -53,9 +53,11 @@ beetDeck/
 │   ├── test_identify.py
 │   ├── test_items.py
 │   └── test_scan.py
-├── pyproject.toml          # Dependencies, pytest, and ruff configuration
-└── config.yaml             # Example beets configuration
+└── pyproject.toml          # Dependencies, pytest, and ruff configuration
 ```
+
+> The production image (Dockerfile, build, example beets config) lives in the
+> separate `beetDeck/deploy` repo, which pins this repository as a submodule.
 
 ### In-Memory State (src/state.py)
 
