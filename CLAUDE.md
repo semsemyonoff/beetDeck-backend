@@ -66,6 +66,7 @@ The application uses module-level globals for shared state across request thread
 - `rescan_snapshot` (dict | None) — item snapshot `{id: (title, artist, album_id, path)}` taken before scan starts; path is resolved via `_resolve_path()` and used by `_compute_scan_diff()` to match by filesystem path rather than ID
 - `identify_tasks` (dict) — background autotag tasks; album tasks keyed by `album_id` (int), items group tasks keyed by `f"items_{uuid}"`, cover previews stored under `f"cover_{album_id}"` keys
 - `identify_lock` (threading.Lock) — guards identify task access
+- `metadata_write_lock` (threading.Lock) — guards the batch metadata write in `POST /api/items/metadata-batch` (one beets Library handle at a time; keeps SQLite writes serialized)
 
 ### Key Config (app.config via create_app)
 
@@ -106,6 +107,7 @@ The application uses module-level globals for shared state across request thread
 - `GET /api/rescan/status` — rescan status
 - `GET /api/items/untagged` — list items belonging to albums with NULL/empty albumartist
 - `POST /api/items/<item_id>/metadata` — update artist/album on a single untagged item
+- `POST /api/items/metadata-batch` — album/folder-aware batch write: `{album:{album?,albumartist?,year?,genre?}, items:[{id,title?,artist?,track?,disc?},…]}`; resolves distinct album_ids from items, writes album-level fields via the beets Album object (clears untagged filter), then writes per-item overrides; returns `{status, warnings:[], albums_updated:[]}`; ≥1 item id required when album fields present
 - `POST /api/items/identify` — start background identification for a list of item IDs
 - `GET /api/items/identify/<task_id>/status` — poll items identification status
 - `POST /api/items/identify/<task_id>/apply` — preview tag diff for selected candidate

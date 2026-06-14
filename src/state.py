@@ -15,3 +15,6 @@ identify_lock = threading.Lock()
 rescan_lock = threading.Lock()
 rescan_proc = None  # subprocess.Popen | None
 rescan_snapshot = None  # {item_id: (title, artist, album_id, path)} | None
+
+# Metadata batch write state
+metadata_write_lock = threading.Lock()

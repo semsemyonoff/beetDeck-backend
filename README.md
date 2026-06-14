@@ -19,7 +19,8 @@ Works well alongside tools like Lidarr that manage the file library, while beets
 - **Cover art** — fetch from multiple sources (filesystem, Cover Art Archive, iTunes, Amazon), preview, confirm; manual upload supported. High-res file + embedded thumbnail
 - **Lyrics** — per-track and bulk album lyrics via lrclib (synced and plain text). Inline viewer/editor, online search with diff preview, external `.lrc` file embed
 - **Rescan** — quick (incremental) or full library rescan to add new files and remove stale entries
-- **Unknown artist management** — list untagged items, edit artist/album inline, and identify a group of files against MusicBrainz to create a properly tagged album
+- **Untagged triage** — loose files (no albumartist) are grouped by directory and surfaced in a pinned banner atop the library; a per-folder editor offers bulk album-level fields plus a per-track grid, then a MusicBrainz identify hand-off to create a properly tagged album
+- **Tag editing** — edit album-level and per-track tags (title, artist, track #, year, genre) directly from the album page via an *Edit tags* modal; album-level changes propagate to the album row and are written to every track file
 - **Light/dark theme** — auto-detects system preference with manual toggle, persisted in localStorage
 
 ## Quick start
@@ -229,6 +230,7 @@ What it does:
 |--------|----------|-------------|
 | GET | `/api/items/untagged` | List items belonging to albums with no albumartist |
 | POST | `/api/items/<id>/metadata` | Update artist/album fields on a single item |
+| POST | `/api/items/metadata-batch` | Album/folder-aware batch write: album-level fields (`album`/`albumartist`/`year`/`genre`) propagated to the album row **and** flushed to every member file, plus per-track overrides (`title`/`artist`/`track`/`disc`), in one locked request. Returns `{status, warnings, albums_updated}` |
 | POST | `/api/items/identify` | Start MusicBrainz autotag for a group of item IDs |
 | GET | `/api/items/identify/<task_id>/status` | Poll identification progress and candidates |
 | POST | `/api/items/identify/<task_id>/apply` | Preview tag changes for a candidate |
