@@ -323,3 +323,43 @@ class TestTrackTags:
         tags = resp.get_json()
         assert "bitrate" not in tags
         assert "samplerate" not in tags
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI spec coverage (spectree decoration — doc-only, response validation off)
+# ---------------------------------------------------------------------------
+
+
+class TestAlbumsOpenAPISpec:
+    """The two albums GETs are decorated with ``@api.validate`` (path params +
+    response docs only, no body/query validation). Assert they appear in the
+    generated spec, tagged ``albums``, without changing the success bodies."""
+
+    def test_album_detail_in_spec(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        op = spec["paths"]["/api/album/{album_id}"]["get"]
+        assert "albums" in op["tags"]
+        assert "200" in op["responses"]
+        assert "404" in op["responses"]
+
+    def test_track_tags_in_spec(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        op = spec["paths"]["/api/album/{album_id}/track/{item_id}/tags"]["get"]
+        assert "albums" in op["tags"]
+        assert "200" in op["responses"]
+        assert "404" in op["responses"]
+
+    def test_album_detail_success_body_unchanged(self, client, db_path):
+        """Response validation is off → handler body is untouched by decoration."""
+        album_id = insert_album(db_path, album="Spec Album", albumartist="Spec Artist")
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["id"] == album_id
+        assert data["album"] == "Spec Album"
+        assert data["tracks"] == []
+
+    def test_album_detail_404_body_unchanged(self, client):
+        resp = client.get("/api/album/123456")
+        assert resp.status_code == 404
+        assert resp.get_json()["error"] == "Album not found"

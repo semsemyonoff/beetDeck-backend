@@ -23,9 +23,21 @@ repository**; its production build is served by Flask from `src/static/dist/`.
 beetDeck/
 ├── app.py                  # Thin entry point: calls create_app() from src/
 ├── src/
-│   ├── __init__.py         # Flask app factory (create_app)
+│   ├── __init__.py         # Flask app factory (create_app); calls api.register(app)
+│   ├── api.py              # SpecTree singleton + 422 validation-error hook (OpenAPI/Scalar)
 │   ├── state.py            # Shared in-memory state (globals)
 │   ├── utils.py            # Shared helpers and constants
+│   ├── schemas/            # spectree/pydantic request & response models (one module per blueprint)
+│   │   ├── __init__.py     # re-exports shared models
+│   │   ├── common.py       # ErrorResponse + reusable nested types (AlbumSummary, ArtistGroup)
+│   │   ├── library.py
+│   │   ├── albums.py
+│   │   ├── cover.py
+│   │   ├── genres.py
+│   │   ├── lyrics.py
+│   │   ├── identify.py
+│   │   ├── items.py
+│   │   └── scan.py
 │   ├── routes/
 │   │   ├── __init__.py
 │   │   ├── library.py      # GET /, /api/library, /api/search, /api/artist
@@ -52,7 +64,10 @@ beetDeck/
 │   ├── test_lyrics.py
 │   ├── test_identify.py
 │   ├── test_items.py
-│   └── test_scan.py
+│   ├── test_scan.py
+│   ├── test_openapi.py     # spec/Scalar routes + decorated-view-in-spec coverage
+│   ├── test_schemas.py     # shared schema serialization
+│   └── test_error_contract.py  # uniform 422 body across blueprints
 └── pyproject.toml          # Dependencies, pytest, and ruff configuration
 ```
 
@@ -78,6 +93,8 @@ The application uses module-level globals for shared state across request thread
 
 ### API Routes
 
+- `GET /apidoc/openapi.json` — generated OpenAPI 3.x spec (single source of truth)
+- `GET /apidoc/scalar/` — interactive Scalar API documentation viewer (bare `/apidoc/scalar` 308-redirects to it)
 - `GET /` — serves SPA
 - `GET /api/library` — album list
 - `GET /api/search` — search albums/artists
@@ -114,6 +131,45 @@ The application uses module-level globals for shared state across request thread
 - `GET /api/items/identify/<task_id>/status` — poll items identification status
 - `POST /api/items/identify/<task_id>/apply` — preview tag diff for selected candidate
 - `POST /api/items/identify/<task_id>/confirm` — create album and write tags (DB failure → rollback; partial file write failure → warnings returned)
+
+## Validation Error Contract (422)
+
+Request validation is driven by **spectree** (pydantic v2). The single `SpecTree`
+singleton lives in `src/api.py`; route handlers are decorated with
+`@api.validate(...)` and the generated spec / Scalar UI are served under `/apidoc`
+(`GET /apidoc/openapi.json`, `GET /apidoc/scalar/`). Request models live in
+`src/schemas/` (one module per blueprint plus shared `common.py`).
+
+**Any invalid request — bad query param or bad JSON body, on any endpoint —
+returns HTTP `422` with one uniform body** (consumed by the SPA):
+
+```json
+{
+  "error": "Validation failed",
+  "detail": [
+    { "loc": ["body", "items", 0, "id"], "msg": "Field required", "type": "missing" }
+  ]
+}
+```
+
+- `error` — short machine-readable message (always `"Validation failed"` for
+  request-validation failures).
+- `detail` — one entry per offending field: `loc` (path to the field), `msg`
+  (human-readable), `type` (pydantic error code).
+
+This shape is produced by the `_render_validation_error` hook in `src/api.py`
+(spectree's raw default is a bare JSON list) and is documented in the OpenAPI
+spec via `validation_error_model=ErrorResponse` (the `ErrorResponse` component is
+the 422 response of every validated endpoint).
+
+> **Not part of this contract:** handler-owned *semantic* errors keep their own
+> `{"error": "..."}` bodies with `detail` absent, e.g. a missing album → `404
+> {"error": "Album not found"}`, an empty-but-typed value → `400 {"error":
+> "Genre cannot be empty"}`. Rule of thumb: wrong *type/shape/unknown field* →
+> `422` (uniform body); bad *value* / missing requirement / not-found → `400`/
+> `404` (handler body). The frontend should branch on status code: treat `422`
+> as a field-level validation error and parse `detail`; treat `400`/`404`/`409`
+> as the existing single-message errors.
 
 ## Architecture Constraints
 

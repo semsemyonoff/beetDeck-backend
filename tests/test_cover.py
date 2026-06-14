@@ -346,3 +346,97 @@ class TestFetchCover:
         assert data["preview_url"] == "/api/album/77/cover/preview"
         assert "cover_77" in state.identify_tasks
         assert state.identify_tasks["cover_77"]["candidate_path"] == str(img_file)
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI spec coverage (spectree decoration)
+# ---------------------------------------------------------------------------
+
+
+class TestCoverOpenAPISpec:
+    """The five cover routes are decorated with ``@api.validate`` (tags + response
+    docs; multipart ``form`` on upload, no JSON body validation). Assert they
+    appear in the generated spec, tagged ``cover``, without altering behavior."""
+
+    def test_fetch_in_spec(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        op = spec["paths"]["/api/album/{album_id}/cover/fetch"]["post"]
+        assert "cover" in op["tags"]
+        assert "200" in op["responses"]
+        assert "404" in op["responses"]
+
+    def test_confirm_in_spec(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        op = spec["paths"]["/api/album/{album_id}/cover/confirm"]["post"]
+        assert "cover" in op["tags"]
+        assert "200" in op["responses"]
+        assert "400" in op["responses"]
+
+    def test_upload_documented_as_multipart(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        op = spec["paths"]["/api/album/{album_id}/cover/upload"]["post"]
+        assert "cover" in op["tags"]
+        # Upload body is documented as multipart/form-data, not JSON.
+        content = op["requestBody"]["content"]
+        assert "multipart/form-data" in content
+        assert "application/json" not in content
+
+    def test_binary_gets_undecorated(self, client):
+        # The two send_file binary routes are intentionally left undecorated
+        # (spectree's response post-processing breaks Flask passthrough mode).
+        # spectree still lists every Flask route, so they appear in the spec, but
+        # without our ``cover`` tag or documented responses.
+        spec = client.get("/apidoc/openapi.json").get_json()
+        cover = spec["paths"]["/api/album/{album_id}/cover"]["get"]
+        preview = spec["paths"]["/api/album/{album_id}/cover/preview"]["get"]
+        assert cover.get("tags", []) == []
+        assert cover.get("responses", {}) == {}
+        assert preview.get("tags", []) == []
+        assert preview.get("responses", {}) == {}
+
+
+class TestCoverBehaviorUnchanged:
+    """Decoration must not change request behavior: body-less fetch/confirm POSTs
+    still work, and upload's bespoke 400 file validation still fires."""
+
+    def setup_method(self):
+        keys = [k for k in state.identify_tasks if k.startswith("cover_")]
+        for k in keys:
+            del state.identify_tasks[k]
+
+    def test_confirm_without_body_still_400_no_task(self, client):
+        # No JSON body, no task → handler's own 400, NOT a spectree 422.
+        resp = client.post("/api/album/1/cover/confirm")
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "No cover art to confirm"
+
+    def test_fetch_without_body_reaches_handler(self, client, mocker):
+        # Body-less fetch must reach the handler (not 422); album missing → 404.
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_album.return_value = None
+        mocker.patch("src.routes.cover._init_beets", return_value=mock_lib)
+        resp = client.post("/api/album/9999/cover/fetch")
+        assert resp.status_code == 404
+        assert resp.get_json()["error"] == "Album not found"
+
+    def test_upload_missing_file_still_400(self, client):
+        # form= model keeps the file optional, so the handler's 400 still fires.
+        resp = client.post("/api/album/1/cover/upload", data={})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "No file uploaded"
+
+    def test_upload_valid_file_still_ok(self, client, db_path, mocker):
+        album_id = insert_album(db_path, album="Spec Upload Album")
+        insert_item(db_path, album_id, path=b"/music/album/track.mp3")
+        mock_album = mocker.MagicMock()
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_album.return_value = mock_album
+        mocker.patch("src.routes.cover._init_beets", return_value=mock_lib)
+        mocker.patch("src.routes.cover._save_cover_to_album")
+        resp = client.post(
+            f"/api/album/{album_id}/cover/upload",
+            data={"file": (io.BytesIO(b"\xff\xd8\xff\xe0" + b"\x00" * 100), "cover.jpg")},
+            content_type="multipart/form-data",
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "ok"

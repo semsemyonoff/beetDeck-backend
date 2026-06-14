@@ -321,3 +321,76 @@ class TestSaveGenre:
         resp = client.post("/api/album/1/genre/save", json={"genre": "  Rock  "})
         assert resp.status_code == 200
         assert resp.get_json()["genre"] == "Rock"
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI spec coverage (spectree decoration)
+# ---------------------------------------------------------------------------
+
+
+class TestGenresOpenAPISpec:
+    """The three genre routes are decorated with ``@api.validate`` (tagged
+    ``genres``). fetch/confirm are documented response-only (no body); save
+    documents a JSON body. Assert they appear in the generated spec."""
+
+    def test_preview_in_spec(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        op = spec["paths"]["/api/album/{album_id}/genre"]["post"]
+        assert "genres" in op["tags"]
+        assert "200" in op["responses"]
+        assert "404" in op["responses"]
+        # No JSON body documented (body-less POST).
+        assert "requestBody" not in op
+
+    def test_confirm_in_spec(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        op = spec["paths"]["/api/album/{album_id}/genre/confirm"]["post"]
+        assert "genres" in op["tags"]
+        assert "200" in op["responses"]
+        assert "requestBody" not in op
+
+    def test_save_documents_json_body(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        op = spec["paths"]["/api/album/{album_id}/genre/save"]["post"]
+        assert "genres" in op["tags"]
+        assert "200" in op["responses"]
+        assert "application/json" in op["requestBody"]["content"]
+
+
+class TestGenresBehaviorUnchanged:
+    """Decoration must not change behavior: body-less preview/confirm POSTs still
+    reach the handler, and save's own empty-genre 400 still fires; only a
+    malformed save body (unknown field / wrong type) now yields 422."""
+
+    def test_save_unknown_field_returns_422(self, client):
+        # extra="forbid" → unknown field rejected by pydantic before the handler.
+        resp = client.post("/api/album/1/genre/save", json={"bogus": "x"})
+        assert resp.status_code == 422
+
+    def test_save_wrong_type_returns_422(self, client):
+        # genre must be a string; an int is rejected → 422 (not the handler's 400).
+        resp = client.post("/api/album/1/genre/save", json={"genre": 123})
+        assert resp.status_code == 422
+
+    def test_save_empty_body_still_400(self, client):
+        # Empty body is valid against the optional model → handler's own 400 fires.
+        resp = client.post("/api/album/1/genre/save", json={})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "Genre cannot be empty"
+
+    def test_preview_without_body_reaches_handler(self, client, mocker):
+        # Body-less preview must reach the handler (not 422); album missing → 404.
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_album.return_value = None
+        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        resp = client.post("/api/album/9999/genre")
+        assert resp.status_code == 404
+        assert resp.get_json()["error"] == "Album not found"
+
+    def test_confirm_without_body_reaches_handler(self, client, mocker):
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_album.return_value = None
+        mocker.patch("src.routes.genres._init_beets", return_value=mock_lib)
+        resp = client.post("/api/album/9999/genre/confirm")
+        assert resp.status_code == 404
+        assert resp.get_json()["error"] == "Album not found"

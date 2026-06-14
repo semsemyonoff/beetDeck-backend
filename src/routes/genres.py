@@ -3,7 +3,15 @@
 import threading
 
 from flask import Blueprint, current_app, jsonify, request
+from spectree import Response
 
+from src.api import api
+from src.schemas.common import ErrorResponse
+from src.schemas.genres import (
+    GenrePreviewResponse,
+    GenreSaveBody,
+    GenreWriteResponse,
+)
 from src.utils import _format_genre, _init_beets, _try_write_item, log
 
 bp = Blueprint("genres", __name__)
@@ -15,6 +23,14 @@ _genre_plugin_lock = threading.Lock()
 
 
 @bp.route("/api/album/<int:album_id>/genre", methods=["POST"])
+@api.validate(
+    resp=Response(
+        HTTP_200=GenrePreviewResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["genres"],
+)
 def fetch_genre_preview(album_id):
     """Fetch genre from Last.fm without writing. Returns old and new values."""
     lib = None
@@ -96,6 +112,14 @@ def fetch_genre_preview(album_id):
 
 
 @bp.route("/api/album/<int:album_id>/genre/confirm", methods=["POST"])
+@api.validate(
+    resp=Response(
+        HTTP_200=GenreWriteResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["genres"],
+)
 def confirm_genre(album_id):
     """Write the fetched genre to album and its tracks."""
     lib = None
@@ -175,9 +199,19 @@ def confirm_genre(album_id):
 
 
 @bp.route("/api/album/<int:album_id>/genre/save", methods=["POST"])
+@api.validate(
+    json=GenreSaveBody,
+    resp=Response(
+        HTTP_200=GenreWriteResponse,
+        HTTP_400=ErrorResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["genres"],
+)
 def save_genre(album_id):
     """Manually set genre for album and its tracks."""
-    genre = (request.get_json(silent=True) or {}).get("genre", "").strip()
+    genre = (request.context.json.genre or "").strip()
     if not genre:
         return jsonify({"error": "Genre cannot be empty"}), 400
 

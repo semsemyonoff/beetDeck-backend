@@ -275,10 +275,20 @@ class TestRescan:
         cmd_arg = popen_mock.call_args[0][0]
         assert " -i " in cmd_arg
 
-    def test_returns_400_for_invalid_mode(self, client):
+    def test_returns_422_for_invalid_mode(self, client):
+        """Invalid `mode` is now rejected by spectree (Literal) with a 422,
+        replacing the handler's old ad-hoc 400 check."""
         resp = client.post("/api/rescan?mode=bogus")
-        assert resp.status_code == 400
-        assert "Invalid mode" in resp.get_json()["error"]
+        assert resp.status_code == 422
+        body = resp.get_json()
+        # Task 11: uniform ErrorResponse body {error, detail:[{loc,msg,type}]}.
+        assert body["error"] == "Validation failed"
+        assert body["detail"] and {"loc", "msg", "type"} <= set(body["detail"][0])
+
+    def test_unknown_query_param_returns_422(self, client):
+        """An unknown query param is rejected with 422 (extra=forbid)."""
+        resp = client.post("/api/rescan?bogus=1")
+        assert resp.status_code == 422
 
     def test_returns_409_when_already_running(self, client, mocker):
         mock_proc = mocker.MagicMock()
@@ -397,3 +407,46 @@ class TestRescanStatus:
         resp = client.get("/api/rescan/status")
         data = resp.get_json()
         assert data["returncode"] == 1
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI spec coverage
+# ---------------------------------------------------------------------------
+
+
+class TestScanOpenAPISpec:
+    def setup_method(self):
+        _reset_scan_state()
+
+    def test_both_routes_documented_and_tagged(self, client):
+        """Both scan routes appear in the spec under the `scan` tag."""
+        spec = client.get("/apidoc/openapi.json").get_json()
+        paths = spec["paths"]
+
+        rescan = paths["/api/rescan"]["post"]
+        assert "scan" in rescan["tags"]
+        status = paths["/api/rescan/status"]["get"]
+        assert "scan" in status["tags"]
+
+    def test_rescan_documents_mode_query_param(self, client):
+        """`POST /api/rescan` documents the `mode` query parameter."""
+        spec = client.get("/apidoc/openapi.json").get_json()
+        params = spec["paths"]["/api/rescan"]["post"].get("parameters", [])
+        names = {p["name"] for p in params if p.get("in") == "query"}
+        assert "mode" in names
+
+    def test_rescan_documents_422(self, client):
+        """The validated rescan endpoint documents a 422 response."""
+        spec = client.get("/apidoc/openapi.json").get_json()
+        assert "422" in spec["paths"]["/api/rescan"]["post"]["responses"]
+
+    def test_default_mode_when_param_missing(self, client, mocker):
+        """Missing `mode` still defaults to quick (behavior unchanged)."""
+        mock_proc = mocker.MagicMock()
+        mock_proc.poll.return_value = None
+        mocker.patch("src.routes.scan.subprocess.Popen", return_value=mock_proc)
+        mocker.patch("src.routes.scan._take_snapshot", return_value={})
+
+        resp = client.post("/api/rescan")
+        assert resp.status_code == 200
+        assert resp.get_json()["mode"] == "quick"

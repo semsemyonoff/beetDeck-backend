@@ -379,3 +379,109 @@ class TestToggleIgnore:
         assert resp.get_json() == {"ignored": False}
         assert mock_album.beetdeck_ignored == "0"
         mock_album.store.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI spec coverage
+# ---------------------------------------------------------------------------
+
+
+class TestIdentifyOpenAPISpec:
+    """All five identify routes are decorated with ``@api.validate`` (tagged
+    ``identify``). ``ignore`` and ``identify/status`` are body-less (response-only);
+    ``identify``, ``apply`` and ``confirm`` document a JSON body. Assert they appear
+    in the spec under their ``/api/album/...`` paths."""
+
+    def _spec(self, client):
+        return client.get("/apidoc/openapi.json").get_json()
+
+    def test_ignore_in_spec(self, client):
+        op = self._spec(client)["paths"]["/api/album/{album_id}/ignore"]["post"]
+        assert "identify" in op["tags"]
+        assert "200" in op["responses"]
+        assert "404" in op["responses"]
+        # Body-less POST — no requestBody documented.
+        assert "requestBody" not in op
+
+    def test_status_in_spec(self, client):
+        op = self._spec(client)["paths"]["/api/album/{album_id}/identify/status"]["get"]
+        assert "identify" in op["tags"]
+        assert "200" in op["responses"]
+        assert "requestBody" not in op
+
+    def test_identify_documents_json_body(self, client):
+        op = self._spec(client)["paths"]["/api/album/{album_id}/identify"]["post"]
+        assert "identify" in op["tags"]
+        assert "200" in op["responses"]
+        assert "409" in op["responses"]
+        assert "application/json" in op["requestBody"]["content"]
+
+    def test_apply_documents_json_body(self, client):
+        op = self._spec(client)["paths"]["/api/album/{album_id}/apply"]["post"]
+        assert "identify" in op["tags"]
+        assert "200" in op["responses"]
+        assert "application/json" in op["requestBody"]["content"]
+
+    def test_confirm_documents_json_body(self, client):
+        op = self._spec(client)["paths"]["/api/album/{album_id}/confirm"]["post"]
+        assert "identify" in op["tags"]
+        assert "200" in op["responses"]
+        assert "application/json" in op["requestBody"]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Behavior unchanged after decoration
+# ---------------------------------------------------------------------------
+
+
+class TestIdentifyBehaviorUnchanged:
+    """Decoration must not change behavior for the existing contracts: only a
+    malformed JSON body (unknown field / wrong-typed ``candidate_index``) on the
+    body-validated routes now yields 422; everything else reaches the handler as
+    before."""
+
+    def setup_method(self):
+        _reset_state()
+
+    def test_identify_unknown_field_returns_422(self, client):
+        resp = client.post("/api/album/1/identify", json={"bogus": "x"})
+        assert resp.status_code == 422
+
+    def test_identify_empty_body_reaches_handler(self, client, mocker):
+        mock_lib = mocker.MagicMock()
+        mock_album = mocker.MagicMock()
+        mock_album.albumartist = "Artist"
+        mock_album.album = "Album"
+        mock_album.items.return_value = [mocker.MagicMock()]
+        mock_lib.get_album.return_value = mock_album
+        mock_proposal = mocker.MagicMock()
+        mock_proposal.candidates = []
+        mocker.patch("src.routes.identify._init_beets", return_value=mock_lib)
+        mocker.patch(
+            "beets.autotag.tag_album",
+            return_value=("Artist", "Album", mock_proposal),
+        )
+        resp = client.post("/api/album/1/identify", json={})
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "started"
+
+    def test_apply_wrong_type_candidate_returns_422(self, client):
+        resp = client.post("/api/album/1/apply", json={"candidate_index": "nope"})
+        assert resp.status_code == 422
+
+    def test_apply_unknown_field_returns_422(self, client):
+        resp = client.post("/api/album/1/apply", json={"bogus": 1})
+        assert resp.status_code == 422
+
+    def test_apply_empty_body_reaches_handler(self, client):
+        # Empty body → candidate_index defaults to 0 → handler's own "no task" 400.
+        resp = client.post("/api/album/1/apply", json={})
+        assert resp.status_code == 400
+
+    def test_confirm_wrong_type_candidate_returns_422(self, client):
+        resp = client.post("/api/album/1/confirm", json={"candidate_index": 1.5})
+        assert resp.status_code == 422
+
+    def test_confirm_empty_body_reaches_handler(self, client):
+        resp = client.post("/api/album/1/confirm", json={})
+        assert resp.status_code == 400

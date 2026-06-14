@@ -3,8 +3,21 @@
 import os
 
 from flask import Blueprint, current_app, jsonify, request
+from spectree import Response
 
 from src import state
+from src.api import api
+from src.schemas.common import ErrorResponse
+from src.schemas.lyrics import (
+    AlbumLyricsConfirmBody,
+    AlbumLyricsConfirmResponse,
+    AlbumLyricsEmbedResponse,
+    AlbumLyricsFetchResponse,
+    LyricsStatusResponse,
+    TrackLyricsFetchResponse,
+    TrackLyricsReadResponse,
+    TrackLyricsSaveBody,
+)
 from src.utils import (
     _find_lrc_file,
     _get_ro_conn,
@@ -19,6 +32,14 @@ bp = Blueprint("lyrics", __name__)
 
 
 @bp.route("/api/album/<int:album_id>/track/<int:item_id>/lyrics")
+@api.validate(
+    resp=Response(
+        HTTP_200=TrackLyricsReadResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["lyrics"],
+)
 def track_lyrics(album_id, item_id):
     """Get current lyrics for a track (from DB/tags or external .lrc file)."""
     import sqlite3
@@ -65,6 +86,14 @@ def track_lyrics(album_id, item_id):
 
 
 @bp.route("/api/album/<int:album_id>/track/<int:item_id>/lyrics/fetch", methods=["POST"])
+@api.validate(
+    resp=Response(
+        HTTP_200=TrackLyricsFetchResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["lyrics"],
+)
 def fetch_track_lyrics(album_id, item_id):
     """Fetch lyrics for a single track from online sources (preview)."""
     lib = None
@@ -129,6 +158,15 @@ def fetch_track_lyrics(album_id, item_id):
 
 
 @bp.route("/api/album/<int:album_id>/track/<int:item_id>/lyrics/confirm", methods=["POST"])
+@api.validate(
+    resp=Response(
+        HTTP_200=LyricsStatusResponse,
+        HTTP_400=ErrorResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["lyrics"],
+)
 def confirm_track_lyrics(album_id, item_id):
     """Write fetched lyrics to a single track."""
     with state.identify_lock:
@@ -187,6 +225,14 @@ def confirm_track_lyrics(album_id, item_id):
 
 
 @bp.route("/api/album/<int:album_id>/track/<int:item_id>/lyrics/embed", methods=["POST"])
+@api.validate(
+    resp=Response(
+        HTTP_200=LyricsStatusResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["lyrics"],
+)
 def embed_lrc_lyrics(album_id, item_id):
     """Embed lyrics from external .lrc file into track and delete the .lrc."""
     lib = None
@@ -227,6 +273,14 @@ def embed_lrc_lyrics(album_id, item_id):
 
 
 @bp.route("/api/album/<int:album_id>/lyrics/embed", methods=["POST"])
+@api.validate(
+    resp=Response(
+        HTTP_200=AlbumLyricsEmbedResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["lyrics"],
+)
 def embed_all_lrc(album_id):
     """Embed all external .lrc files for an album into tracks."""
     lib = None
@@ -267,10 +321,18 @@ def embed_all_lrc(album_id):
 
 
 @bp.route("/api/album/<int:album_id>/track/<int:item_id>/lyrics/save", methods=["POST"])
+@api.validate(
+    json=TrackLyricsSaveBody,
+    resp=Response(
+        HTTP_200=LyricsStatusResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["lyrics"],
+)
 def save_track_lyrics(album_id, item_id):
     """Manually save edited lyrics to a track."""
-    data = request.get_json(silent=True) or {}
-    lyrics_text = data.get("lyrics", "")
+    lyrics_text = request.context.json.lyrics
 
     lib = None
     try:
@@ -306,6 +368,14 @@ def save_track_lyrics(album_id, item_id):
 
 
 @bp.route("/api/album/<int:album_id>/lyrics/fetch", methods=["POST"])
+@api.validate(
+    resp=Response(
+        HTTP_200=AlbumLyricsFetchResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["lyrics"],
+)
 def fetch_album_lyrics(album_id):
     """Fetch lyrics for all tracks in an album (preview)."""
     lib = None
@@ -395,16 +465,21 @@ def fetch_album_lyrics(album_id):
 
 
 @bp.route("/api/album/<int:album_id>/lyrics/confirm", methods=["POST"])
+@api.validate(
+    json=AlbumLyricsConfirmBody,
+    resp=Response(
+        HTTP_200=AlbumLyricsConfirmResponse,
+        HTTP_400=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["lyrics"],
+)
 def confirm_album_lyrics(album_id):
     """Write fetched lyrics for selected tracks in album."""
-    data = request.get_json(silent=True) or {}
-    item_ids = data.get("item_ids", [])
+    item_ids = request.context.json.item_ids
 
-    if not isinstance(item_ids, list) or not item_ids:
+    if not item_ids:
         return jsonify({"error": "No tracks selected"}), 400
-
-    if not all(isinstance(i, int) for i in item_ids):
-        return jsonify({"error": "item_ids must be a list of integers"}), 400
 
     lib = None
     try:

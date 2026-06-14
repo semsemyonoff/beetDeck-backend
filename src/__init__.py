@@ -46,6 +46,12 @@ def create_app(test_config=None):
     app.register_blueprint(lyrics_bp)
     app.register_blueprint(scan_bp)
 
+    # Mount the OpenAPI spec (/apidoc/openapi.json) and Scalar viewer
+    # (/apidoc/scalar) after all blueprints so spectree sees every decorated view.
+    from .api import api
+
+    api.register(app)
+
     @app.context_processor
     def _inject_vite_assets():
         manifest_path = os.path.join(app.static_folder, "dist", ".vite", "manifest.json")

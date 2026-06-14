@@ -11,8 +11,17 @@ import subprocess
 import sys
 
 from flask import Blueprint, current_app, jsonify, request
+from spectree import Response
 
 from src import state
+from src.api import api
+from src.schemas.common import ErrorResponse
+from src.schemas.scan import (
+    RescanQuery,
+    RescanRunningResponse,
+    RescanStartResponse,
+    RescanStatusResponse,
+)
 from src.utils import _get_ro_conn, _resolve_path, log
 
 bp = Blueprint("scan", __name__)
@@ -147,10 +156,19 @@ def _compute_scan_diff(before, after):
 
 
 @bp.route("/api/rescan", methods=["POST"])
+@api.validate(
+    query=RescanQuery,
+    resp=Response(
+        HTTP_200=RescanStartResponse,
+        HTTP_409=RescanRunningResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["scan"],
+)
 def rescan():
-    mode = request.args.get("mode", "quick")
-    if mode not in {"quick", "full"}:
-        return jsonify({"error": f"Invalid mode: {mode!r}. Must be 'quick' or 'full'"}), 400
+    # `mode` is validated by RescanQuery (Literal['quick','full']); an invalid
+    # value is rejected upstream by spectree with a 422.
+    mode = request.context.query.mode
     import_dir = current_app.config["IMPORT_DIR"]
     library_db = current_app.config["LIBRARY_DB"]
     library_root = current_app.config.get("LIBRARY_ROOT", "")
@@ -176,6 +194,10 @@ def rescan():
 
 
 @bp.route("/api/rescan/status")
+@api.validate(
+    resp=Response(HTTP_200=RescanStatusResponse),
+    tags=["scan"],
+)
 def rescan_status():
     with state.rescan_lock:
         proc = state.rescan_proc

@@ -4,8 +4,16 @@ import os
 import sqlite3
 
 from flask import Blueprint, current_app, jsonify, send_file
+from spectree import Response
 
 from src import state
+from src.api import api
+from src.schemas.common import ErrorResponse
+from src.schemas.cover import (
+    CoverFetchResponse,
+    CoverStatusResponse,
+    CoverUploadForm,
+)
 from src.utils import (
     _album_dir_from_items,
     _decode_path,
@@ -21,6 +29,12 @@ from src.utils import (
 bp = Blueprint("cover", __name__)
 
 
+# NOTE: the two binary cover routes (``album_cover`` / ``cover_preview``) are
+# intentionally **left undecorated**. They stream image data via ``send_file``,
+# which puts the Flask response into direct-passthrough mode; spectree's response
+# post-processing calls ``response.get_data()`` unconditionally on every decorated
+# view, which raises ``RuntimeError`` on a passthrough response. Decorating them
+# would therefore break binary delivery, so they do not appear in the OpenAPI spec.
 @bp.route("/api/album/<int:album_id>/cover")
 def album_cover(album_id):
     try:
@@ -49,6 +63,14 @@ def album_cover(album_id):
 
 
 @bp.route("/api/album/<int:album_id>/cover/fetch", methods=["POST"])
+@api.validate(
+    resp=Response(
+        HTTP_200=CoverFetchResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["cover"],
+)
 def fetch_cover(album_id):
     """Fetch cover art from online sources via fetchart plugin (preview)."""
     lib = None
@@ -115,7 +137,7 @@ def fetch_cover(album_id):
             lib._close()
 
 
-@bp.route("/api/album/<int:album_id>/cover/preview")
+@bp.route("/api/album/<int:album_id>/cover/preview")  # binary stream — see note above
 def cover_preview(album_id):
     """Serve the fetched cover art candidate for preview."""
     with state.identify_lock:
@@ -129,6 +151,15 @@ def cover_preview(album_id):
 
 
 @bp.route("/api/album/<int:album_id>/cover/confirm", methods=["POST"])
+@api.validate(
+    resp=Response(
+        HTTP_200=CoverStatusResponse,
+        HTTP_400=ErrorResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["cover"],
+)
 def confirm_cover(album_id):
     """Save fetched cover to album directory and embed into files."""
     with state.identify_lock:
@@ -169,6 +200,16 @@ def confirm_cover(album_id):
 
 
 @bp.route("/api/album/<int:album_id>/cover/upload", methods=["POST"])
+@api.validate(
+    form=CoverUploadForm,
+    resp=Response(
+        HTTP_200=CoverStatusResponse,
+        HTTP_400=ErrorResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["cover"],
+)
 def upload_cover(album_id):
     """Upload a cover art image, save to album dir and embed into files."""
     import tempfile
