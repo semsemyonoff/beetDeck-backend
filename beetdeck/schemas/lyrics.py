@@ -174,6 +174,9 @@ class AlbumLyricsConfirmResponse(BaseModel):
 
     status: str = Field(description="Always 'ok' on success.")
     written: int = Field(description="Number of tracks successfully written.")
+    written_item_ids: list[int] = Field(
+        default_factory=list, description="Item ids that were successfully written."
+    )
     failed: list[int] = Field(
         default_factory=list, description="Item ids whose audio-file write failed."
     )

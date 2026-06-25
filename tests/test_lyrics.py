@@ -195,6 +195,54 @@ class TestFetchTrackLyrics:
         assert "lyrics_1" in state.identify_tasks
         assert state.identify_tasks["lyrics_1"]["_lyrics_obj"] is lyrics_obj
 
+    def test_miss_includes_current_lyrics_when_track_has_embedded(self, client, mocker):
+        mock_item = mocker.MagicMock()
+        mock_item.album_id = 1
+        mock_item.artist = "Artist"
+        mock_item.title = "Song"
+        mock_item.lyrics = "Existing lyrics"
+        mock_item.path = b"/music/track.mp3"
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+
+        mock_plugin = mocker.MagicMock()
+        mock_plugin.name = "lyrics"
+        mock_plugin.find_lyrics.return_value = None
+
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beets.plugins.find_plugins", return_value=[mock_plugin])
+
+        resp = client.post("/api/album/1/track/1/lyrics/fetch")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["found"] is False
+        assert data["current_lyrics"] == "Existing lyrics"
+        assert data["current_source"] == "embedded"
+
+    def test_miss_includes_empty_current_lyrics_when_no_lyrics(self, client, mocker):
+        mock_item = mocker.MagicMock()
+        mock_item.album_id = 1
+        mock_item.artist = "Artist"
+        mock_item.title = "Song"
+        mock_item.lyrics = ""
+        mock_item.path = b"/music/track.mp3"
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+
+        mock_plugin = mocker.MagicMock()
+        mock_plugin.name = "lyrics"
+        mock_plugin.find_lyrics.return_value = None
+
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beets.plugins.find_plugins", return_value=[mock_plugin])
+
+        resp = client.post("/api/album/1/track/1/lyrics/fetch")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["found"] is False
+        assert data["current_lyrics"] == ""
+        assert data["current_source"] is None
+
 
 # ---------------------------------------------------------------------------
 # POST /api/album/<id>/track/<id>/lyrics/confirm
@@ -653,6 +701,67 @@ class TestConfirmAlbumLyrics:
         assert data["failed"] == [1]
         # task preserved for retry
         assert "lyrics_1" in state.identify_tasks
+
+    def test_returns_written_item_ids_for_successful_writes(self, client, mocker):
+        state.identify_tasks["lyrics_1"] = {"_lyrics_obj": _make_lyrics_obj(mocker)}
+        state.identify_tasks["lyrics_2"] = {"_lyrics_obj": _make_lyrics_obj(mocker)}
+
+        mock_item1 = mocker.MagicMock()
+        mock_item1.album_id = 1
+        mock_item1.path = b"/music/t1.mp3"
+
+        mock_item2 = mocker.MagicMock()
+        mock_item2.album_id = 1
+        mock_item2.path = b"/music/t2.mp3"
+
+        def get_item(item_id):
+            return {1: mock_item1, 2: mock_item2}.get(item_id)
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.side_effect = get_item
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/album/1/lyrics/confirm", json={"item_ids": [1, 2]})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert sorted(data["written_item_ids"]) == [1, 2]
+        assert data["written"] == 2
+
+    def test_missing_stash_id_not_in_written_item_ids(self, client, mocker):
+        state.identify_tasks.clear()
+        state.identify_tasks["lyrics_1"] = {"_lyrics_obj": _make_lyrics_obj(mocker)}
+
+        mock_item1 = mocker.MagicMock()
+        mock_item1.album_id = 1
+        mock_item1.path = b"/music/t1.mp3"
+
+        def get_item(item_id):
+            return {1: mock_item1}.get(item_id)
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.side_effect = get_item
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+
+        # item_id 99 has no stash entry, item_id 1 does
+        resp = client.post("/api/album/1/lyrics/confirm", json={"item_ids": [1, 99]})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["written_item_ids"] == [1]
+        assert 99 not in data["written_item_ids"]
+
+    def test_wrong_album_id_not_in_written_item_ids(self, client, mocker):
+        state.identify_tasks["lyrics_5"] = {"_lyrics_obj": _make_lyrics_obj(mocker)}
+
+        mock_item = mocker.MagicMock()
+        mock_item.album_id = 99  # different album
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/album/1/lyrics/confirm", json={"item_ids": [5]})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["written_item_ids"] == []
 
 
 # ---------------------------------------------------------------------------

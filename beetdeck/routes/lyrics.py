@@ -117,23 +117,30 @@ def fetch_track_lyrics(album_id, item_id):
 
         log.info("Fetching lyrics for item_id=%d: %s - %s", item_id, item.artist, item.title)
 
-        result = lyrics_plugin.find_lyrics(item)
-
-        if not result or not result.text:
-            log.info("No lyrics found for item_id=%d", item_id)
-            return jsonify({"status": "ok", "found": False})
-
-        with state.identify_lock:
-            state.identify_tasks[f"lyrics_{item_id}"] = {
-                "_lyrics_obj": result,
-            }
-
         old_lyrics = item.lyrics or ""
         item_path = _resolve_path(item.path)
         lrc_path = _find_lrc_file(item_path)
         lrc_text = _read_lrc_file(lrc_path) if lrc_path else None
         current_lyrics = old_lyrics or lrc_text or ""
         current_source = "embedded" if old_lyrics else ("lrc_file" if lrc_text else None)
+
+        result = lyrics_plugin.find_lyrics(item)
+
+        if not result or not result.text:
+            log.info("No lyrics found for item_id=%d", item_id)
+            return jsonify(
+                {
+                    "status": "ok",
+                    "found": False,
+                    "current_lyrics": current_lyrics,
+                    "current_source": current_source,
+                }
+            )
+
+        with state.identify_lock:
+            state.identify_tasks[f"lyrics_{item_id}"] = {
+                "_lyrics_obj": result,
+            }
 
         log.info("Lyrics found for item_id=%d from %s", item_id, result.backend or "unknown")
 
@@ -486,7 +493,7 @@ def confirm_album_lyrics(album_id):
         library_db = current_app.config["LIBRARY_DB"]
         library_dir = current_app.config.get("LIBRARY_ROOT") or None
         lib = _init_beets(library_db, library_dir)
-        written = 0
+        written_item_ids = []
         failed = []
 
         for item_id in item_ids:
@@ -524,13 +531,20 @@ def confirm_album_lyrics(album_id):
                         log.info("Removed .lrc file: %s", lrc_path)
                     except OSError:
                         log.warning("Failed to remove .lrc file: %s", lrc_path)
-                written += 1
+                written_item_ids.append(item_id)
                 log.info("Lyrics written for item_id=%d", item_id)
             else:
                 log.warning("Failed to write tags for item_id=%d", item_id)
                 failed.append(item_id)
 
-        return jsonify({"status": "ok", "written": written, "failed": failed})
+        return jsonify(
+            {
+                "status": "ok",
+                "written": len(written_item_ids),
+                "written_item_ids": written_item_ids,
+                "failed": failed,
+            }
+        )
 
     except Exception as e:
         log.exception("Album lyrics confirm failed for album_id=%d", album_id)
