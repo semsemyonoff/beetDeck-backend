@@ -17,6 +17,7 @@ from beetdeck.utils import (
     _find_lrc_file,
     _format_genre,
     _get_ro_conn,
+    _read_lrc_file,
     _resolve_path,
 )
 
@@ -60,7 +61,7 @@ def album_detail(album_id):
             items = conn.execute(
                 """
                 SELECT id, title, artist, track, disc, length, format, bitrate,
-                       samplerate, path
+                       samplerate, path, lyrics
                 FROM items WHERE album_id = ? ORDER BY disc, track
                 """,
                 (album_id,),
@@ -81,6 +82,7 @@ def album_detail(album_id):
     tracks = []
     for it in items:
         item_path = _resolve_path(it["path"]) if it["path"] else None
+        lrc_path = _find_lrc_file(item_path)
         tracks.append(
             {
                 "id": it["id"],
@@ -92,7 +94,8 @@ def album_detail(album_id):
                 "format": it["format"],
                 "bitrate": it["bitrate"],
                 "samplerate": it["samplerate"],
-                "has_lrc": bool(_find_lrc_file(item_path)),
+                "has_lrc": bool(lrc_path),
+                "has_lyrics": bool(it["lyrics"]) or bool(lrc_path and _read_lrc_file(lrc_path)),
             }
         )
 

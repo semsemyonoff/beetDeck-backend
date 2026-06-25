@@ -253,6 +253,63 @@ class TestAlbumDetail:
         assert resp.status_code == 200
         assert resp.get_json()["year"] == 1975
 
+    def test_has_lyrics_true_when_embedded_lyrics(self, client, db_path):
+        album_id = insert_album(db_path, album="Lyrics Album", albumartist="Artist L")
+        insert_item(db_path, album_id, title="Lyric Track", lyrics="Some lyrics text")
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        track = resp.get_json()["tracks"][0]
+        assert track["has_lyrics"] is True
+
+    def test_has_lyrics_true_when_readable_lrc(self, client, db_path, tmp_path):
+        lrc_file = tmp_path / "song.lrc"
+        lrc_file.write_text("[00:01.00] Hello world\n", encoding="utf-8")
+        audio_path = str(tmp_path / "song.mp3")
+        album_id = insert_album(db_path, album="LRC Album", albumartist="Artist LRC")
+        insert_item(
+            db_path,
+            album_id,
+            title="LRC Track",
+            path=audio_path.encode(),
+        )
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        track = resp.get_json()["tracks"][0]
+        assert track["has_lrc"] is True
+        assert track["has_lyrics"] is True
+
+    def test_has_lyrics_false_when_lrc_empty(self, client, db_path, tmp_path):
+        lrc_file = tmp_path / "empty.lrc"
+        lrc_file.write_text("", encoding="utf-8")
+        audio_path = str(tmp_path / "empty.mp3")
+        album_id = insert_album(db_path, album="Empty LRC Album", albumartist="Artist EL")
+        insert_item(
+            db_path,
+            album_id,
+            title="Empty LRC Track",
+            path=audio_path.encode(),
+        )
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        track = resp.get_json()["tracks"][0]
+        assert track["has_lrc"] is True
+        assert track["has_lyrics"] is False
+
+    def test_has_lyrics_false_when_no_lyrics_and_no_lrc(self, client, db_path):
+        album_id = insert_album(db_path, album="Plain Album", albumartist="Artist PL")
+        insert_item(
+            db_path,
+            album_id,
+            title="Plain Track",
+            path=b"/nonexistent/path/plain.mp3",
+        )
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        track = resp.get_json()["tracks"][0]
+        assert track["has_lrc"] is False
+        assert track["has_lyrics"] is False
+        assert "has_lyrics" in track
+
 
 # ---------------------------------------------------------------------------
 # GET /api/album/<id>/track/<id>/tags

@@ -33,6 +33,9 @@ class TrackSummary(BaseModel):
     bitrate: int | None = Field(default=None, description="Bitrate in bits per second.")
     samplerate: int | None = Field(default=None, description="Sample rate in Hz.")
     has_lrc: bool = Field(description="Whether a sidecar .lrc lyrics file exists.")
+    has_lyrics: bool = Field(
+        description="Whether the track has lyrics (embedded or readable non-empty sidecar .lrc)."
+    )
 
 
 class DiscSummary(BaseModel):
