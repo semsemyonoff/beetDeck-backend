@@ -5,16 +5,17 @@
 beetDeck is a web UI for browsing and managing a [beets](https://beets.io) music
 library. This repository is the **backend**: a Flask REST API that serves the
 data and a single-page app. It provides album browsing, cover art management,
-genre editing, lyrics fetching, MusicBrainz identification, and library
-rescanning. The React SPA that consumes this API lives in a **separate
-repository**; its production build is served by Flask from `beetdeck/static/dist/`.
+genre editing, lyrics fetching, BPM computation (beets `autobpm` plugin),
+MusicBrainz identification, and library rescanning. The React SPA that consumes
+this API lives in a **separate repository**; its production build is served by
+Flask from `beetdeck/static/dist/`.
 
 ## Tech Stack
 
 - **Language/framework**: Python 3.10+ (runs on 3.14), Flask, gunicorn (1 worker, 4 threads)
 - **Database**: SQLite (beets `library.db`), read mostly via direct SQL; the beets `Library` object is used for write operations
-- **Key dependencies**: beets 2.11.0, Pillow, pylast (Last.fm), requests, beautifulsoup4, pyacoustid
-- **Audio tooling**: ffmpeg (used by pyacoustid for fingerprinting)
+- **Key dependencies**: beets 2.11.0, Pillow, pylast (Last.fm), requests, beautifulsoup4, pyacoustid, librosa + resampy (BPM computation via the `autobpm` plugin; CPU-bound, ~9s/track)
+- **Audio tooling**: ffmpeg (used by pyacoustid for fingerprinting and by librosa for audio loading during BPM computation)
 - **Dependencies & tooling config**: all declared in `pyproject.toml` (runtime under `[project]`, dev tools under the `dev` extra; pytest and ruff configured in the same file)
 
 ## Project Structure
@@ -220,6 +221,7 @@ make fmt       # ruff format
   - Genres stored as native list field (`genres`); `_format_genre()` in `beetdeck/utils.py` handles both list and legacy string values
   - Library paths stored relative to DB root; `_resolve_path()` in `beetdeck/utils.py` joins `LIBRARY_ROOT` + relative path (absolute paths pass through unchanged)
   - Lyrics plugin: separate `lyrics_backend`/`lyrics_url`/`lyrics_language` fields (no "Source: URL" suffix in lyrics text)
+  - autobpm plugin (librosa): `auto: no` so it never runs on import; `calculate_bpm` swallows librosa errors internally and never raises, so the BPM route detects failure by value (pre-clears `item.bpm`, requires a non-null value after) rather than by exception
 - 2.11.0 bump notes: no breaking API changes for this app (verified against the modules we import — `autotag.tag_album`, art embedding, `plugins`, `library.Library`, `util.{bytestring_path,move,unique_path}`, `config`). New `subtitle` media-tag field (ID3 `TIT3`) was added to `Item`, so it is included in `_ROLLBACK_FIELDS` (`beetdeck/routes/items.py`)
   - Cover embedding imports `embed_album` from `beetsplug._utils.art` (in `beetdeck/utils.py`); the old `beets.art` shim is deprecated and slated for removal in beets 3.0.0. Cover tests patch `beetsplug._utils.art.embed_album`.
 

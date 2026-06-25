@@ -109,6 +109,39 @@ class TestComputeTrackBpm:
         mock_item, _, mock_plugin = self._mock_setup(mocker, bpm_result=0)
         resp = client.post("/api/album/1/track/1/bpm/compute")
         assert resp.status_code == 400
+        assert "BPM computation failed" in resp.get_json()["error"]
+
+    def test_handler_clears_stale_bpm_before_compute(self, client, mocker):
+        """The handler must pre-clear item.bpm so a no-op plugin (one that never
+        touches bpm) is detected as a failure rather than reporting the stale
+        value. Uses a real object (not a MagicMock) so an un-set attribute would
+        keep the seeded value instead of returning a truthy mock."""
+        from types import SimpleNamespace
+
+        item = SimpleNamespace(album_id=1, artist="Artist", title="Track", bpm=99)
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = item
+
+        mock_plugin = mocker.MagicMock()
+        mock_plugin.name = "autobpm"
+        mock_plugin.calculate_bpm.side_effect = lambda *a, **k: None  # no-op
+
+        mocker.patch("beetdeck.routes.bpm._init_beets", return_value=mock_lib)
+        mocker.patch("beets.plugins.find_plugins", return_value=[mock_plugin])
+
+        resp = client.post("/api/album/1/track/1/bpm/compute")
+        assert resp.status_code == 400
+        assert "BPM computation failed" in resp.get_json()["error"]
+
+    def test_returns_500_when_compute_raises(self, client, mocker):
+        """Unexpected exceptions surface as 500 and the lib is still closed."""
+        mock_item, mock_lib, mock_plugin = self._mock_setup(mocker)
+        mock_plugin.calculate_bpm.side_effect = RuntimeError("boom")
+        resp = client.post("/api/album/1/track/1/bpm/compute")
+        assert resp.status_code == 500
+        assert "boom" in resp.get_json()["error"]
+        mock_lib._close.assert_called_once()
 
     def test_lib_is_closed_on_success(self, client, mocker):
         mock_item, mock_lib, _ = self._mock_setup(mocker)
