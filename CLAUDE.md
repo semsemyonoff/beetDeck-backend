@@ -103,7 +103,7 @@ The application uses module-level globals for shared state across request thread
 - `GET /api/library` — album list
 - `GET /api/search` — search albums/artists
 - `GET /api/artist` — artist albums
-- `GET /api/album/<id>` — album detail with tracks
+- `GET /api/album/<id>` — album detail with tracks; each track carries `has_lrc` (a sidecar `.lrc` file exists) and `has_lyrics` (embedded lyrics OR a readable non-empty `.lrc` — same definition as `GET .../lyrics`, distinct from `has_lrc`)
 - `GET /api/album/<id>/track/<id>/tags` — track tags
 - `GET /api/album/<id>/cover` — serve current cover image
 - `POST /api/album/<id>/cover/fetch` — fetch cover from online sources (preview)
@@ -119,7 +119,7 @@ The application uses module-level globals for shared state across request thread
 - `POST /api/album/<id>/track/<id>/lyrics/embed` — embed .lrc file into track
 - `POST /api/album/<id>/track/<id>/lyrics/save` — manually save lyrics
 - `POST /api/album/<id>/lyrics/fetch` — bulk fetch lyrics for all tracks
-- `POST /api/album/<id>/lyrics/confirm` — bulk confirm lyrics for selected tracks
+- `POST /api/album/<id>/lyrics/confirm` — bulk confirm lyrics for selected tracks (`{item_ids:[…]}`); returns `{written, written_item_ids:[…], failed:[…]}` — `written_item_ids` lists the ids actually written (a missing stash entry / wrong-album id is silently skipped, so it can be shorter than `item_ids` with `failed` empty)
 - `POST /api/album/<id>/lyrics/embed` — bulk embed .lrc files for all tracks
 - `POST /api/album/<id>/ignore` — toggle beetdeck_ignored flag (returns `{"ignored": bool}`)
 - `POST /api/album/<id>/identify` — start background identification

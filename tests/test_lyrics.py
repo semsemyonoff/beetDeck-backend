@@ -727,6 +727,41 @@ class TestConfirmAlbumLyrics:
         assert sorted(data["written_item_ids"]) == [1, 2]
         assert data["written"] == 2
 
+    def test_partitions_written_and_failed_in_same_request(self, client, mocker):
+        # One item writes successfully, another fails its tag write: the two
+        # must be partitioned — written_item_ids holds only the success, failed
+        # holds only the failure (no overlap, no dropped ids).
+        state.identify_tasks.clear()
+        state.identify_tasks["lyrics_1"] = {"_lyrics_obj": _make_lyrics_obj(mocker)}
+        state.identify_tasks["lyrics_2"] = {"_lyrics_obj": _make_lyrics_obj(mocker)}
+
+        mock_item1 = mocker.MagicMock()
+        mock_item1.album_id = 1
+        mock_item1.path = b"/music/t1.mp3"
+        mock_item1.try_write.return_value = True
+
+        mock_item2 = mocker.MagicMock()
+        mock_item2.album_id = 1
+        mock_item2.path = b"/music/t2.mp3"
+        mock_item2.try_write.return_value = False
+
+        def get_item(item_id):
+            return {1: mock_item1, 2: mock_item2}.get(item_id)
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.side_effect = get_item
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/album/1/lyrics/confirm", json={"item_ids": [1, 2]})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["written_item_ids"] == [1]
+        assert data["written"] == 1
+        assert data["failed"] == [2]
+        # the failed item's task is preserved for retry; the written one popped
+        assert "lyrics_1" not in state.identify_tasks
+        assert "lyrics_2" in state.identify_tasks
+
     def test_missing_stash_id_not_in_written_item_ids(self, client, mocker):
         state.identify_tasks.clear()
         state.identify_tasks["lyrics_1"] = {"_lyrics_obj": _make_lyrics_obj(mocker)}
