@@ -92,6 +92,11 @@ class TrackLyricsReadResponse(BaseModel):
         default=None,
         description="Path to the external .lrc file (present only for lrc_file source).",
     )
+    has_lrc: bool = Field(
+        default=False,
+        description="Whether a sidecar .lrc file currently exists (file-existence flag, "
+        "independent of has_lyrics). Lets clients track sidecar state after writes.",
+    )
 
 
 class TrackLyricsFetchResponse(BaseModel):
@@ -121,9 +126,48 @@ class TrackLyricsFetchResponse(BaseModel):
 
 
 class LyricsStatusResponse(BaseModel):
-    """``{"status": "ok"}`` returned by single-track confirm / embed / save."""
+    """``{"status": "ok"}`` returned by single-track embed."""
 
     status: str = Field(description="Always 'ok' on success.")
+
+
+class TrackLyricsSaveResponse(BaseModel):
+    """``POST /api/album/<id>/track/<id>/lyrics/save`` — manual save result.
+
+    Carries the authoritative post-save presence so a client whose refresh GET
+    fails still records the truth: ``has_lyrics`` reflects embedded text OR a
+    readable non-empty sidecar (an empty save preserves the .lrc, which only
+    keeps the track "has lyrics" when it is readable), and ``has_lrc`` is the
+    sidecar file-existence flag — distinct from ``has_lyrics``.
+    """
+
+    status: str = Field(description="Always 'ok' on success.")
+    has_lyrics: bool = Field(
+        default=False,
+        description="Whether the track has lyrics after the save (embedded text "
+        "OR a readable non-empty sidecar .lrc).",
+    )
+    has_lrc: bool = Field(
+        default=False,
+        description="Whether a sidecar .lrc file still exists after the save "
+        "(file-existence flag, independent of has_lyrics).",
+    )
+
+
+class TrackLyricsConfirmResponse(BaseModel):
+    """``POST /api/album/<id>/track/<id>/lyrics/confirm`` — written preview result.
+
+    Carries the real post-write sidecar state so a client whose authoritative
+    refresh fails still records the truth: ``has_lrc`` is ``True`` only when the
+    .lrc removal was attempted but failed (the sidecar lingers on disk).
+    """
+
+    status: str = Field(description="Always 'ok' on success.")
+    has_lrc: bool = Field(
+        default=False,
+        description="Whether a sidecar .lrc file still exists after the write "
+        "(True only when its removal failed).",
+    )
 
 
 class EmbeddedTrack(BaseModel):
@@ -176,6 +220,11 @@ class AlbumLyricsConfirmResponse(BaseModel):
     written: int = Field(description="Number of tracks successfully written.")
     written_item_ids: list[int] = Field(
         default_factory=list, description="Item ids that were successfully written."
+    )
+    retained_lrc_item_ids: list[int] = Field(
+        default_factory=list,
+        description="Written item ids whose sidecar .lrc removal failed, so the "
+        "file still exists on disk (subset of written_item_ids).",
     )
     failed: list[int] = Field(
         default_factory=list, description="Item ids whose audio-file write failed."

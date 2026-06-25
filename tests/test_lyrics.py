@@ -51,6 +51,7 @@ class TestTrackLyrics:
         assert data["has_lyrics"] is False
         assert data["lyrics"] == ""
         assert data["source"] is None
+        assert data["has_lrc"] is False
 
     def test_returns_embedded_lyrics(self, client, db_path):
         album_id = insert_album(db_path)
@@ -76,6 +77,19 @@ class TestTrackLyrics:
         assert data["has_lyrics"] is True
         assert data["source"] == "lrc_file"
         assert "[00:00.00]Synced lyrics" in data["lyrics"]
+        assert data["has_lrc"] is True
+
+    def test_reports_has_lrc_with_embedded_lyrics(self, client, db_path, tmp_path):
+        """has_lrc tracks the sidecar independently of has_lyrics/source."""
+        album_id = insert_album(db_path)
+        lrc_file = tmp_path / "track.lrc"
+        lrc_file.write_text("[00:00.00]Synced", encoding="utf-8")
+        audio_path = str(tmp_path / "track.mp3")
+        item_id = insert_item(db_path, album_id, lyrics="Embedded", path=audio_path.encode())
+        resp = client.get(f"/api/album/{album_id}/track/{item_id}/lyrics")
+        data = resp.get_json()
+        assert data["source"] == "embedded"
+        assert data["has_lrc"] is True
 
     def test_prefers_embedded_over_lrc(self, client, db_path, tmp_path):
         album_id = insert_album(db_path)
@@ -314,6 +328,29 @@ class TestConfirmTrackLyrics:
         resp = client.post("/api/album/1/track/1/lyrics/confirm")
         assert resp.status_code == 200
         assert not lrc_file.exists()
+        assert resp.get_json()["has_lrc"] is False
+
+    def test_reports_has_lrc_when_sidecar_removal_fails(self, client, mocker, tmp_path):
+        # A swallowed os.remove failure leaves the .lrc on disk; the response must
+        # report has_lrc=True so the client doesn't record the sidecar as gone.
+        lyrics_obj = _make_lyrics_obj(mocker, text="L", full_text="L")
+        state.identify_tasks["lyrics_1"] = {"_lyrics_obj": lyrics_obj}
+
+        lrc_file = tmp_path / "track.lrc"
+        lrc_file.write_text("[00:00]line", encoding="utf-8")
+        audio_path = str(tmp_path / "track.mp3")
+
+        mock_item = mocker.MagicMock()
+        mock_item.album_id = 1
+        mock_item.path = audio_path.encode()
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics.os.remove", side_effect=OSError("denied"))
+
+        resp = client.post("/api/album/1/track/1/lyrics/confirm")
+        assert resp.status_code == 200
+        assert resp.get_json()["has_lrc"] is True
 
     def test_returns_500_when_write_fails(self, client, mocker):
         lyrics_obj = _make_lyrics_obj(mocker)
@@ -464,7 +501,11 @@ class TestSaveTrackLyrics:
 
         resp = client.post("/api/album/1/track/1/lyrics/save", json={"lyrics": "My lyrics"})
         assert resp.status_code == 200
-        assert resp.get_json()["status"] == "ok"
+        body = resp.get_json()
+        assert body["status"] == "ok"
+        # Embedded text present, no sidecar → has_lyrics True, has_lrc False.
+        assert body["has_lyrics"] is True
+        assert body["has_lrc"] is False
         assert mock_item.lyrics == "My lyrics"
         mock_item.store.assert_called_once()
         mock_item.try_write.assert_called_once()
@@ -479,7 +520,11 @@ class TestSaveTrackLyrics:
 
         resp = client.post("/api/album/1/track/1/lyrics/save", json={})
         assert resp.status_code == 200
+        body = resp.get_json()
         assert mock_item.lyrics == ""
+        # No embedded text, no sidecar → has_lyrics False, has_lrc False.
+        assert body["has_lyrics"] is False
+        assert body["has_lrc"] is False
 
     def test_removes_lrc_file_when_saving_non_empty_lyrics(self, client, mocker, tmp_path):
         lrc_file = tmp_path / "track.lrc"
@@ -496,6 +541,10 @@ class TestSaveTrackLyrics:
         resp = client.post("/api/album/1/track/1/lyrics/save", json={"lyrics": "New lyrics"})
         assert resp.status_code == 200
         assert not lrc_file.exists()
+        body = resp.get_json()
+        # Sidecar removed, embedded text present → has_lyrics True, has_lrc False.
+        assert body["has_lyrics"] is True
+        assert body["has_lrc"] is False
 
     def test_keeps_lrc_file_when_saving_empty_lyrics(self, client, mocker, tmp_path):
         lrc_file = tmp_path / "track.lrc"
@@ -511,6 +560,52 @@ class TestSaveTrackLyrics:
 
         resp = client.post("/api/album/1/track/1/lyrics/save", json={"lyrics": ""})
         assert resp.status_code == 200
+        assert lrc_file.exists()
+        body = resp.get_json()
+        # Empty save kept a readable sidecar → has_lyrics True via the sidecar.
+        assert body["has_lyrics"] is True
+        assert body["has_lrc"] is True
+
+    def test_empty_save_with_empty_lrc_reports_no_lyrics(self, client, mocker, tmp_path):
+        # The .lrc exists but is empty/unreadable: has_lrc is True (file exists)
+        # yet has_lyrics must be False — has_lrc is a file-existence flag, not a
+        # readable-content proxy. The empty save keeps the sidecar.
+        lrc_file = tmp_path / "track.lrc"
+        lrc_file.write_text("", encoding="utf-8")
+        audio_path = str(tmp_path / "track.mp3")
+
+        mock_item = mocker.MagicMock()
+        mock_item.album_id = 1
+        mock_item.path = audio_path.encode()
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/album/1/track/1/lyrics/save", json={"lyrics": ""})
+        assert resp.status_code == 200
+        assert lrc_file.exists()
+        body = resp.get_json()
+        assert body["has_lyrics"] is False
+        assert body["has_lrc"] is True
+
+    def test_whitespace_only_save_is_treated_as_empty(self, client, mocker, tmp_path):
+        # Whitespace-only is "no lyrics": it must store "" (not a truthy blank)
+        # and keep the sidecar, matching the empty-save path and the client which
+        # trims before deciding presence.
+        lrc_file = tmp_path / "track.lrc"
+        lrc_file.write_text("[00:00]old", encoding="utf-8")
+        audio_path = str(tmp_path / "track.mp3")
+
+        mock_item = mocker.MagicMock()
+        mock_item.album_id = 1
+        mock_item.path = audio_path.encode()
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/album/1/track/1/lyrics/save", json={"lyrics": "   \n\t  "})
+        assert resp.status_code == 200
+        assert mock_item.lyrics == ""
         assert lrc_file.exists()
 
     def test_returns_500_when_try_write_fails(self, client, mocker):
@@ -797,6 +892,31 @@ class TestConfirmAlbumLyrics:
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["written_item_ids"] == []
+
+    def test_reports_retained_lrc_item_ids_when_removal_fails(self, client, mocker, tmp_path):
+        # The write succeeds but the sidecar removal fails: the id is still
+        # counted as written, and also reported in retained_lrc_item_ids so the
+        # client records the lingering .lrc instead of assuming it is gone.
+        state.identify_tasks.clear()
+        state.identify_tasks["lyrics_1"] = {"_lyrics_obj": _make_lyrics_obj(mocker)}
+
+        lrc_file = tmp_path / "track.lrc"
+        lrc_file.write_text("[00:00]old", encoding="utf-8")
+        audio_path = str(tmp_path / "track.mp3")
+
+        mock_item = mocker.MagicMock()
+        mock_item.album_id = 1
+        mock_item.path = audio_path.encode()
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.lyrics.os.remove", side_effect=OSError("denied"))
+
+        resp = client.post("/api/album/1/lyrics/confirm", json={"item_ids": [1]})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["written_item_ids"] == [1]
+        assert data["retained_lrc_item_ids"] == [1]
 
 
 # ---------------------------------------------------------------------------

@@ -14,9 +14,11 @@ from beetdeck.schemas.lyrics import (
     AlbumLyricsEmbedResponse,
     AlbumLyricsFetchResponse,
     LyricsStatusResponse,
+    TrackLyricsConfirmResponse,
     TrackLyricsFetchResponse,
     TrackLyricsReadResponse,
     TrackLyricsSaveBody,
+    TrackLyricsSaveResponse,
 )
 from beetdeck.utils import (
     _find_lrc_file,
@@ -63,6 +65,7 @@ def track_lyrics(album_id, item_id):
 
     lrc_path = _find_lrc_file(item_path)
     lrc_text = _read_lrc_file(lrc_path) if lrc_path else None
+    has_lrc = bool(lrc_path)
 
     if lyrics_text:
         return jsonify(
@@ -70,6 +73,7 @@ def track_lyrics(album_id, item_id):
                 "has_lyrics": True,
                 "lyrics": lyrics_text,
                 "source": "embedded",
+                "has_lrc": has_lrc,
             }
         )
     elif lrc_text:
@@ -79,10 +83,11 @@ def track_lyrics(album_id, item_id):
                 "lyrics": lrc_text,
                 "source": "lrc_file",
                 "lrc_path": lrc_path,
+                "has_lrc": has_lrc,
             }
         )
     else:
-        return jsonify({"has_lyrics": False, "lyrics": "", "source": None})
+        return jsonify({"has_lyrics": False, "lyrics": "", "source": None, "has_lrc": has_lrc})
 
 
 @bp.route("/api/album/<int:album_id>/track/<int:item_id>/lyrics/fetch", methods=["POST"])
@@ -167,7 +172,7 @@ def fetch_track_lyrics(album_id, item_id):
 @bp.route("/api/album/<int:album_id>/track/<int:item_id>/lyrics/confirm", methods=["POST"])
 @api.validate(
     resp=Response(
-        HTTP_200=LyricsStatusResponse,
+        HTTP_200=TrackLyricsConfirmResponse,
         HTTP_400=ErrorResponse,
         HTTP_404=ErrorResponse,
         HTTP_500=ErrorResponse,
@@ -211,17 +216,21 @@ def confirm_track_lyrics(album_id, item_id):
                     state.identify_tasks.pop(f"lyrics_{item_id}", None)
             item_path = _resolve_path(item.path)
             lrc_path = _find_lrc_file(item_path)
+            sidecar_remains = False
             if lrc_path:
                 try:
                     os.remove(lrc_path)
                     log.info("Removed .lrc file: %s", lrc_path)
                 except OSError:
+                    sidecar_remains = True
                     log.warning("Failed to remove .lrc file: %s", lrc_path)
         else:
             log.warning("Failed to write tags for item_id=%d", item_id)
             return jsonify({"error": "Failed to write tags to audio file"}), 500
 
-        return jsonify({"status": "ok"})
+        # Report the real post-write sidecar state: a swallowed os.remove failure
+        # leaves the .lrc on disk, so the client must not assume it is gone.
+        return jsonify({"status": "ok", "has_lrc": sidecar_remains})
 
     except Exception as e:
         log.exception("Lyrics confirm failed for item_id=%d", item_id)
@@ -331,7 +340,7 @@ def embed_all_lrc(album_id):
 @api.validate(
     json=TrackLyricsSaveBody,
     resp=Response(
-        HTTP_200=LyricsStatusResponse,
+        HTTP_200=TrackLyricsSaveResponse,
         HTTP_404=ErrorResponse,
         HTTP_500=ErrorResponse,
     ),
@@ -340,6 +349,11 @@ def embed_all_lrc(album_id):
 def save_track_lyrics(album_id, item_id):
     """Manually save edited lyrics to a track."""
     lyrics_text = request.context.json.lyrics
+    # Whitespace-only is "no lyrics" — collapse it to "" so presence semantics
+    # match the client (which trims) and the empty-save path (keeps the sidecar,
+    # reports has_lyrics=False) rather than storing a truthy blank.
+    if not lyrics_text.strip():
+        lyrics_text = ""
 
     lib = None
     try:
@@ -359,12 +373,22 @@ def save_track_lyrics(album_id, item_id):
             if lrc_path and lyrics_text:
                 os.remove(lrc_path)
                 log.info("Removed .lrc file after manual edit: %s", lrc_path)
+                lrc_path = None
         else:
             log.warning("Failed to write tags for item_id=%d", item_id)
             return jsonify({"error": "Failed to write tags to audio file"}), 500
 
+        # Report authoritative post-save presence so the client seeds real
+        # content rather than the has_lrc file-existence flag. An empty save
+        # keeps the sidecar, but it only counts as lyrics when it is readable and
+        # non-empty (same definition as GET .../lyrics): an empty/unreadable .lrc
+        # has has_lrc=True yet has_lyrics=False.
+        lrc_text = _read_lrc_file(lrc_path) if lrc_path else None
+        has_lrc = bool(lrc_path)
+        has_lyrics = bool(lyrics_text) or bool(lrc_text)
+
         log.info("Lyrics manually saved for item_id=%d", item_id)
-        return jsonify({"status": "ok"})
+        return jsonify({"status": "ok", "has_lyrics": has_lyrics, "has_lrc": has_lrc})
 
     except Exception as e:
         log.exception("Lyrics save failed for item_id=%d", item_id)
@@ -494,6 +518,7 @@ def confirm_album_lyrics(album_id):
         library_dir = current_app.config.get("LIBRARY_ROOT") or None
         lib = _init_beets(library_db, library_dir)
         written_item_ids = []
+        retained_lrc_item_ids = []
         failed = []
 
         for item_id in item_ids:
@@ -530,6 +555,9 @@ def confirm_album_lyrics(album_id):
                         os.remove(lrc_path)
                         log.info("Removed .lrc file: %s", lrc_path)
                     except OSError:
+                        # The lyrics write succeeded but the sidecar lingers; tell
+                        # the client so it doesn't record has_lrc=False for this id.
+                        retained_lrc_item_ids.append(item_id)
                         log.warning("Failed to remove .lrc file: %s", lrc_path)
                 written_item_ids.append(item_id)
                 log.info("Lyrics written for item_id=%d", item_id)
@@ -542,6 +570,7 @@ def confirm_album_lyrics(album_id):
                 "status": "ok",
                 "written": len(written_item_ids),
                 "written_item_ids": written_item_ids,
+                "retained_lrc_item_ids": retained_lrc_item_ids,
                 "failed": failed,
             }
         )
