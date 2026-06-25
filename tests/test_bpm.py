@@ -19,6 +19,10 @@ class TestComputeTrackBpm:
         mock_item.artist = "Artist"
         mock_item.title = "Track"
         mock_item.bpm = None
+        # Real bytes path so _resolve_path/bytestring_path operate on it (a bare
+        # MagicMock path would blow up os.path.isabs). LIBRARY_ROOT is "" in the
+        # test app, so this resolves to itself (relative path unchanged).
+        mock_item.path = b"Artist/Album/01.mp3"
 
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = mock_item
@@ -83,6 +87,7 @@ class TestComputeTrackBpm:
         mock_item.album_id = 1
         mock_item.artist = "Artist"
         mock_item.title = "Track"
+        mock_item.path = b"Artist/Album/01.mp3"
 
         def _noop(items, write=True, force=True):
             for it in items:
@@ -118,7 +123,13 @@ class TestComputeTrackBpm:
         keep the seeded value instead of returning a truthy mock."""
         from types import SimpleNamespace
 
-        item = SimpleNamespace(album_id=1, artist="Artist", title="Track", bpm=99)
+        item = SimpleNamespace(
+            album_id=1,
+            artist="Artist",
+            title="Track",
+            bpm=99,
+            path=b"Artist/Album/01.mp3",
+        )
 
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = item
@@ -160,6 +171,7 @@ class TestComputeTrackBpm:
         mock_item.album_id = 1
         mock_item.artist = "Artist"
         mock_item.title = "Track"
+        mock_item.path = b"Artist/Album/01.mp3"
 
         def _noop(items, write=True, force=True):
             for it in items:
@@ -177,6 +189,53 @@ class TestComputeTrackBpm:
 
         client.post("/api/album/1/track/1/bpm/compute")
         mock_lib._close.assert_called_once()
+
+    def test_resolves_relative_path_for_plugin_and_restores_db_path(self, client, mocker):
+        """The repo stores RELATIVE paths; autobpm loads item.filepath and writes
+        via item.path. The handler must hand the plugin a LIBRARY_ROOT-resolved
+        absolute path, then restore the relative DB path so the DB stays relative."""
+        client.application.config["LIBRARY_ROOT"] = "/library"
+
+        seen = {}
+
+        class FakeItem:
+            def __init__(self):
+                self.path = b"Artist/Album/01.mp3"
+                self.album_id = 1
+                self.artist = "Artist"
+                self.title = "Track"
+                self.bpm = None
+                self.stored = 0
+
+            def store(self):
+                self.stored += 1
+
+        item = FakeItem()
+
+        def _set_bpm(items, write=True, force=True):
+            for it in items:
+                seen["path"] = it.path  # path beets actually computes/writes against
+                it.bpm = 140
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = item
+
+        mock_plugin = mocker.MagicMock()
+        mock_plugin.name = "autobpm"
+        mock_plugin.calculate_bpm.side_effect = _set_bpm
+
+        mocker.patch("beetdeck.routes.bpm._init_beets", return_value=mock_lib)
+        mocker.patch("beets.plugins.find_plugins", return_value=[mock_plugin])
+
+        resp = client.post("/api/album/1/track/1/bpm/compute")
+        assert resp.status_code == 200
+        assert resp.get_json()["bpm"] == 140
+        # The plugin saw the resolved absolute path (so librosa.load/try_write hit
+        # the real file), not the relative DB value.
+        assert seen["path"] == b"/library/Artist/Album/01.mp3"
+        # The DB path was restored to the original relative value and persisted.
+        assert item.path == b"Artist/Album/01.mp3"
+        assert item.stored >= 1
 
 
 # ---------------------------------------------------------------------------
