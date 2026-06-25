@@ -61,7 +61,7 @@ def album_detail(album_id):
             items = conn.execute(
                 """
                 SELECT id, title, artist, track, disc, length, format, bitrate,
-                       samplerate, path, lyrics
+                       samplerate, path, lyrics, bpm
                 FROM items WHERE album_id = ? ORDER BY disc, track
                 """,
                 (album_id,),
@@ -96,6 +96,7 @@ def album_detail(album_id):
                 "samplerate": it["samplerate"],
                 "has_lrc": bool(lrc_path),
                 "has_lyrics": bool(it["lyrics"]) or bool(lrc_path and _read_lrc_file(lrc_path)),
+                "has_bpm": bool(it["bpm"]),
             }
         )
 

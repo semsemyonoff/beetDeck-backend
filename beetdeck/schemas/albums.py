@@ -36,6 +36,7 @@ class TrackSummary(BaseModel):
     has_lyrics: bool = Field(
         description="Whether the track has lyrics (embedded or readable non-empty sidecar .lrc)."
     )
+    has_bpm: bool = Field(description="Whether the track has a BPM value stored.")
 
 
 class DiscSummary(BaseModel):
