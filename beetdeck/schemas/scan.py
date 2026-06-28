@@ -101,3 +101,23 @@ class RescanDismissResponse(BaseModel):
     """``POST /api/rescan/dismiss`` success."""
 
     status: str = Field(description="Always 'ok'.")
+
+
+class RescanLogQuery(BaseModel):
+    """Query params for ``GET /api/rescan/log``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str = Field(description="Run identifier returned by POST /api/rescan.")
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Byte offset to start reading from (0 = beginning of file).",
+    )
+
+
+class RescanLogResponse(BaseModel):
+    """``GET /api/rescan/log`` success — incremental log content."""
+
+    text: str = Field(description="Log content from offset to current end of file.")
+    offset: int = Field(description="New byte offset (end of the returned text).")

@@ -843,6 +843,100 @@ class TestScanController:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/rescan/log
+# ---------------------------------------------------------------------------
+
+
+class TestRescanLog:
+    def setup_method(self):
+        _reset_scan_state()
+
+    def _write_log(self, app, content: bytes) -> tuple[str, str]:
+        """Write a log file under the app's scan-logs dir; return (run_id, log_path)."""
+        from flask import current_app
+
+        with app.app_context():
+            library_db = current_app.config["LIBRARY_DB"]
+        import os
+
+        log_dir = os.path.join(os.path.dirname(library_db), "scan-logs")
+        os.makedirs(log_dir, exist_ok=True)
+        run_id = "test-log-run-001"
+        log_path = os.path.join(log_dir, f"{run_id}.log")
+        with open(log_path, "wb") as f:
+            f.write(content)
+        return run_id, log_path
+
+    def test_full_read_offset_zero(self, client, app):
+        run_id, _ = self._write_log(app, b"line1\nline2\n")
+        resp = client.get(f"/api/rescan/log?run_id={run_id}&offset=0")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["text"] == "line1\nline2\n"
+        assert data["offset"] == 12
+
+    def test_incremental_read_from_offset(self, client, app):
+        run_id, _ = self._write_log(app, b"AAAA\nBBBB\n")
+        # First fetch
+        resp1 = client.get(f"/api/rescan/log?run_id={run_id}&offset=0")
+        data1 = resp1.get_json()
+        assert data1["text"] == "AAAA\nBBBB\n"
+        new_offset = data1["offset"]
+        # Second fetch from end → empty
+        resp2 = client.get(f"/api/rescan/log?run_id={run_id}&offset={new_offset}")
+        data2 = resp2.get_json()
+        assert data2["text"] == ""
+        assert data2["offset"] == new_offset
+
+    def test_incremental_read_partial(self, client, app):
+        run_id, _ = self._write_log(app, b"Hello World")
+        # Read first 5 bytes
+        resp = client.get(f"/api/rescan/log?run_id={run_id}&offset=5")
+        data = resp.get_json()
+        assert data["text"] == " World"
+        assert data["offset"] == 11
+
+    def test_unknown_run_id_returns_404(self, client):
+        resp = client.get("/api/rescan/log?run_id=nonexistent-run-id-999")
+        assert resp.status_code == 404
+        assert "error" in resp.get_json()
+
+    def test_offset_past_eof_returns_empty_text_same_offset(self, client, app):
+        run_id, _ = self._write_log(app, b"short")
+        resp = client.get(f"/api/rescan/log?run_id={run_id}&offset=9999")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["text"] == ""
+        assert data["offset"] == 9999
+
+    def test_default_offset_is_zero(self, client, app):
+        run_id, _ = self._write_log(app, b"abc")
+        resp = client.get(f"/api/rescan/log?run_id={run_id}")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["text"] == "abc"
+        assert data["offset"] == 3
+
+    def test_negative_offset_returns_422(self, client, app):
+        run_id, _ = self._write_log(app, b"abc")
+        resp = client.get(f"/api/rescan/log?run_id={run_id}&offset=-1")
+        assert resp.status_code == 422
+
+    def test_path_traversal_run_id_returns_404(self, client):
+        resp = client.get("/api/rescan/log?run_id=../../etc/passwd")
+        assert resp.status_code == 404
+
+    def test_log_documented_in_openapi(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        assert "/api/rescan/log" in spec["paths"]
+        assert "get" in spec["paths"]["/api/rescan/log"]
+
+    def test_missing_run_id_param_returns_422(self, client):
+        resp = client.get("/api/rescan/log")
+        assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
 # OpenAPI spec coverage
 # ---------------------------------------------------------------------------
 

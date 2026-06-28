@@ -19,6 +19,8 @@ from beetdeck.api import api
 from beetdeck.schemas.common import ErrorResponse
 from beetdeck.schemas.scan import (
     RescanDismissResponse,
+    RescanLogQuery,
+    RescanLogResponse,
     RescanQuery,
     RescanRunningResponse,
     RescanStartResponse,
@@ -463,3 +465,32 @@ def rescan_dismiss():
             state.rescan_phase = "idle"
             state.rescan_result = None
     return jsonify({"status": "ok"})
+
+
+@bp.route("/api/rescan/log")
+@api.validate(
+    query=RescanLogQuery,
+    resp=Response(HTTP_200=RescanLogResponse, HTTP_404=ErrorResponse),
+    tags=["scan"],
+)
+def rescan_log():
+    """Return incremental log content for a run starting at a byte offset."""
+    run_id = request.context.query.run_id
+    offset = request.context.query.offset
+    library_db = current_app.config["LIBRARY_DB"]
+    log_dir = os.path.join(os.path.dirname(library_db), "scan-logs")
+    log_path = os.path.join(log_dir, f"{run_id}.log")
+    # Guard against path traversal (run_id must resolve inside log_dir)
+    if not os.path.abspath(log_path).startswith(os.path.abspath(log_dir) + os.sep):
+        return jsonify({"error": "Unknown run_id"}), 404
+    if not os.path.isfile(log_path):
+        return jsonify({"error": "Unknown run_id"}), 404
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(offset)
+            chunk = f.read()
+        text = chunk.decode("utf-8", errors="replace")
+        new_offset = offset + len(chunk)
+    except OSError:
+        return jsonify({"error": "Unknown run_id"}), 404
+    return jsonify({"text": text, "offset": new_offset})
