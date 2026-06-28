@@ -27,6 +27,7 @@ beetDeck/
 │   ├── __init__.py         # Flask app factory (create_app); calls api.register(app)
 │   ├── api.py              # SpecTree singleton + 422 validation-error hook (OpenAPI/Scalar)
 │   ├── state.py            # Shared in-memory state (globals)
+│   ├── scan_progress.py    # Pure parser: beets verbose line → progress update + log level
 │   ├── utils.py            # Shared helpers and constants
 │   ├── schemas/            # spectree/pydantic request & response models (one module per blueprint)
 │   │   ├── __init__.py     # re-exports shared models
@@ -72,6 +73,8 @@ beetDeck/
 │   ├── test_items.py
 │   ├── test_meta.py
 │   ├── test_scan.py
+│   ├── test_scan_progress.py  # unit tests for the pure progress parser (beetdeck/scan_progress.py)
+│   ├── test_scan_replace.py   # integration tests for format-replace (mp3→flac, duplicate_action: remove)
 │   ├── test_openapi.py     # spec/Scalar routes + decorated-view-in-spec coverage
 │   ├── test_schemas.py     # shared schema serialization
 │   └── test_error_contract.py  # uniform 422 body across blueprints
@@ -85,9 +88,17 @@ beetDeck/
 
 The application uses module-level globals for shared state across request threads:
 
-- `rescan_lock` (threading.Lock) — guards scan process access
-- `rescan_proc` (subprocess.Popen | None) — running beet import/scan subprocess
+- `rescan_lock` (threading.Lock) — guards all scan state reads/writes
+- `rescan_proc` (subprocess.Popen | None) — active subprocess (import or update); used internally by the controller thread
 - `rescan_snapshot` (dict | None) — item snapshot `{id: (title, artist, album_id, path)}` taken before scan starts; path is resolved via `_resolve_path()` and used by `_compute_scan_diff()` to match by filesystem path rather than ID
+- `rescan_run_id` (str | None) — unique identifier for the current/last run (timestamp with microseconds, e.g. `YYYYMMDD-HHMMSS-ffffff`; the microsecond suffix guarantees uniqueness for runs started in the same second)
+- `rescan_log_path` (str | None) — path to the per-run log file (`/data/beets/scan-logs/<run_id>.log`)
+- `rescan_phase` (str) — lifecycle phase: `idle` | `importing` | `updating` | `done` | `error`
+- `rescan_result` (dict | None) — persisted finish-state (`{status, returncode, added, removed}`); stays set until dismissed via `POST /api/rescan/dismiss`
+- `rescan_thread` (threading.Thread | None) — controller thread reference (used in tests)
+- `rescan_processed` (int) — albums/singletons processed so far in the current run
+- `rescan_total` (int | None) — total expected albums for full scan; `None` for quick/incremental scan (indeterminate progress)
+- `rescan_current_item` (str | None) — most recent item path being processed
 - `identify_tasks` (dict) — background autotag tasks; album tasks keyed by `album_id` (int), items group tasks keyed by `f"items_{uuid}"`, cover previews stored under `f"cover_{album_id}"` keys
 - `identify_lock` (threading.Lock) — guards identify task access
 - `metadata_write_lock` (threading.Lock) — guards the batch metadata write in `POST /api/items/metadata-batch` (one beets Library handle at a time; keeps SQLite writes serialized)
@@ -131,8 +142,10 @@ The application uses module-level globals for shared state across request thread
 - `GET /api/album/<id>/identify/status` — poll identification status
 - `POST /api/album/<id>/apply` — preview diff for a candidate
 - `POST /api/album/<id>/confirm` — write chosen candidate tags to files/DB
-- `POST /api/rescan` — start library rescan
-- `GET /api/rescan/status` — rescan status
+- `POST /api/rescan` — start library rescan (`?mode=quick|full`); returns `{status:"started", mode}` immediately; `409 {status:"running"}` if a scan is already running. The `run_id` is not in this response — obtain it by polling `GET /api/rescan/status`
+- `GET /api/rescan/status` — rescan status; fields: `phase` (`idle`|`importing`|`updating`|`done`|`error`), `processed` (int), `total` (int|null — null for quick/incremental scans), `current_item` (str|null), `run_id` (str|null), plus `added`/`removed`/`returncode` when finished; finished result persists until dismissed
+- `GET /api/rescan/log` — incremental log tail; query params: `run_id`, `offset` (byte); returns `{text, offset}` (new end offset for next fetch); 404 on unknown `run_id`; safe when file is mid-write
+- `POST /api/rescan/dismiss` — clear the persisted finished result (idempotent); next `status` returns `idle`
 - `GET /api/items/untagged` — list items belonging to albums with NULL/empty albumartist
 - `POST /api/items/<item_id>/metadata` — update artist/album on a single untagged item
 - `POST /api/items/metadata-batch` — album/folder-aware batch write: `{album:{album?,albumartist?,year?,genre?}, items:[{id,title?,artist?,track?,disc?},…]}`; resolves distinct album_ids from items, writes album-level fields via the beets Album object (clears untagged filter), then writes per-item overrides; returns `{status, warnings:[], albums_updated:[]}`; ≥1 item id required when album fields present
@@ -222,9 +235,27 @@ make fmt       # ruff format
   - Library paths stored relative to DB root; `_resolve_path()` in `beetdeck/utils.py` joins `LIBRARY_ROOT` + relative path (absolute paths pass through unchanged)
   - Lyrics plugin: separate `lyrics_backend`/`lyrics_url`/`lyrics_language` fields (no "Source: URL" suffix in lyrics text)
   - autobpm plugin (librosa): `auto: no` so it never runs on import; `calculate_bpm` swallows librosa errors internally and never raises, so the BPM route detects failure by value (pre-clears `item.bpm`, requires a non-null value after) rather than by exception
+  - `duplicate_action: remove` (set in `workspace/templates/config/backend/config.yaml.tmpl`, rendered via `dwe render config backend`) — ensures a re-import of a track in a different format (e.g. mp3→flac) replaces the old item in one pass rather than requiring two imports (the old `skip` behavior caused a disappear-on-first/reappear-on-second issue)
 - 2.12.0 bump notes: no breaking API changes for this app. The lyrics plugin was reworked (synced lyrics now written to the `SYLT` ID3 frame, the standalone `LyricsSession` was folded into `beetsplug._utils.requests`), but the `Lyrics` result object returned by `lyrics_plugin.find_lyrics(item)` still exposes every attribute we read (`text`, `full_text`, `synced`, `backend`, `url`, `language`, `translation_language`), so `beetdeck/routes/lyrics.py` is unchanged. `art.embed_album` signature is unchanged. Relevant upstream fixes we benefit from: fetchart now catches `OSError` instead of crashing on a locked art file, and lyrics HTTP requests now rate-limit/back off on `429`.
 - 2.11.0 bump notes: no breaking API changes for this app (verified against the modules we import — `autotag.tag_album`, art embedding, `plugins`, `library.Library`, `util.{bytestring_path,move,unique_path}`, `config`). New `subtitle` media-tag field (ID3 `TIT3`) was added to `Item`, so it is included in `_ROLLBACK_FIELDS` (`beetdeck/routes/items.py`)
   - Cover embedding imports `embed_album` from `beetsplug._utils.art` (in `beetdeck/utils.py`); the old `beets.art` shim is deprecated and slated for removal in beets 3.0.0. Cover tests patch `beetsplug._utils.art.embed_album`.
+
+## Scan Controller and Progress Parser
+
+The rescan pipeline (`beetdeck/routes/scan.py`) uses a **daemon controller thread** model:
+
+- `POST /api/rescan` generates a `run_id`, starts the controller thread, and returns immediately.
+- The controller thread runs two sequential `Popen`s: `beet import` then (conditionally) `beet update -M`. Both write stdout+stderr to `/data/beets/scan-logs/<run_id>.log`. Update is skipped when the post-import diff is empty (optimization).
+- A **log-tail thread** (started by the controller) reads new lines from the log file, feeds each to the progress parser, and applies updates to `state` under `rescan_lock`. It stops when the controller finishes.
+- All `state` reads/writes in route handlers go through `rescan_lock`.
+
+**Progress parser** (`beetdeck/scan_progress.py`): a **pure function** that maps a single beets verbose output line to an optional progress update (`phase`, `processed`, `current_item`) and a UI log level (`info|added|removed|warn|skip|summary`). Keeping it pure (no I/O, no threads) makes it fully unit-testable over fixed sample output and isolates fragile beets-format parsing from the controller. Tests live in `tests/test_scan_progress.py`.
+
+**Progress modes:**
+- Full scan (`-I`): pre-counts album directories containing audio under `/music` via `os.walk` → `total`; parser increments `processed` per album started → real percentage.
+- Quick scan (`-i`, incremental): denominator unknown → `total = None`; UI shows indeterminate bar + "processed N".
+
+**Log file location:** `/data/beets/scan-logs/<run_id>.log` (directory created on demand; log retention/rotation is out of scope for this iteration).
 
 ## Testing
 

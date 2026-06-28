@@ -59,13 +59,35 @@ class ScanChange(BaseModel):
 class RescanStatusResponse(BaseModel):
     """``GET /api/rescan/status`` — current rescan state.
 
-    ``status`` is one of ``idle`` / ``running`` / ``done``. ``returncode`` and the
-    ``added`` / ``removed`` diff lists are only present once a scan has finished.
+    ``status`` is one of ``idle`` / ``running`` / ``done`` / ``error``. ``returncode``
+    and the ``added`` / ``removed`` diff lists are only present once a scan has
+    finished.  Progress fields (``phase``, ``processed``, ``total``,
+    ``current_item``, ``run_id``) are present in running and finished responses.
     """
 
-    status: str = Field(description="One of 'idle', 'running', 'done'.")
+    status: str = Field(description="One of 'idle', 'running', 'done', 'error'.")
+    phase: str | None = Field(
+        default=None,
+        description="Lifecycle phase: 'importing', 'updating', 'done', 'error', or 'idle'.",
+    )
+    processed: int | None = Field(
+        default=None,
+        description="Albums/singletons processed so far in the current run.",
+    )
+    total: int | None = Field(
+        default=None,
+        description="Total albums expected (null for quick/indeterminate scans).",
+    )
+    current_item: str | None = Field(
+        default=None,
+        description="Most recent item path being processed.",
+    )
+    run_id: str | None = Field(
+        default=None,
+        description="Unique identifier for the current or last run.",
+    )
     returncode: int | None = Field(
-        default=None, description="Subprocess exit code (present when status='done')."
+        default=None, description="Subprocess exit code (present when status='done' or 'error')."
     )
     added: list[ScanChange] | None = Field(
         default=None, description="Items newly added by the rescan."
@@ -73,3 +95,29 @@ class RescanStatusResponse(BaseModel):
     removed: list[ScanChange] | None = Field(
         default=None, description="Items removed by the rescan."
     )
+
+
+class RescanDismissResponse(BaseModel):
+    """``POST /api/rescan/dismiss`` success."""
+
+    status: str = Field(description="Always 'ok'.")
+
+
+class RescanLogQuery(BaseModel):
+    """Query params for ``GET /api/rescan/log``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str = Field(description="Run identifier returned by POST /api/rescan.")
+    offset: int = Field(
+        default=0,
+        ge=0,
+        description="Byte offset to start reading from (0 = beginning of file).",
+    )
+
+
+class RescanLogResponse(BaseModel):
+    """``GET /api/rescan/log`` success — incremental log content."""
+
+    text: str = Field(description="Log content from offset to current end of file.")
+    offset: int = Field(description="New byte offset (end of the returned text).")
