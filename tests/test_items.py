@@ -1357,6 +1357,53 @@ class TestItemTagsPatch:
         assert data["status"] == "ok"
         assert any("file write failed" in w for w in data["warnings"])
 
+    def test_clearing_absent_field_is_noop_not_500(self, client, mocker):
+        # del item[name] for a field that was never present raises KeyError in
+        # beets; the handler must treat that as a no-op (200), not surface a 500.
+        mock_item = self._make_mock_item(mocker, 11)
+        mock_item.__delitem__.side_effect = KeyError("no such field 'ghost'")
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
+
+        resp = client.patch("/api/items/11/tags", json={"fields": {"ghost": ""}})
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "ok"
+        mock_item.store.assert_called_once()
+
+    def test_multiple_fields_all_written_with_single_store(self, client, mocker):
+        mock_item = self._make_mock_item(mocker, 12)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
+
+        resp = client.patch(
+            "/api/items/12/tags",
+            json={"fields": {"title": "T", "artist": "A"}},
+        )
+        assert resp.status_code == 200
+        mock_item.__setitem__.assert_any_call("title", "T")
+        mock_item.__setitem__.assert_any_call("artist", "A")
+        mock_item.store.assert_called_once()
+
+    def test_bad_value_in_later_field_aborts_before_store(self, client, mocker):
+        # A bad value on any field must 400 without persisting the in-memory
+        # mutations applied by the earlier valid fields.
+        mock_item = self._make_mock_item(mocker, 13)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.patch(
+            "/api/items/13/tags",
+            json={"fields": {"title": "T", "track": "notanumber"}},
+        )
+        assert resp.status_code == 400
+        assert "track" in resp.get_json()["error"]
+        mock_item.store.assert_not_called()
+
     def test_unknown_toplevel_key_returns_422(self, client):
         resp = client.patch("/api/items/1/tags", json={"fields": {"title": "X"}, "bogus": 1})
         assert resp.status_code == 422

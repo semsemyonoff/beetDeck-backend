@@ -354,7 +354,12 @@ def patch_item_tags(item_id):
                 except ValueError as exc:
                     return jsonify({"error": str(exc)}), 400
                 if coerced is CLEAR:
-                    del item[name]
+                    try:
+                        del item[name]
+                    except KeyError:
+                        # Clearing a field that isn't present (e.g. an absent
+                        # flexible attr) is a no-op, not an error.
+                        pass
                 else:
                     item[name] = coerced
 
