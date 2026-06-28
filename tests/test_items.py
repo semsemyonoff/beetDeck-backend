@@ -1223,3 +1223,149 @@ class TestItemsBehaviorUnchanged:
     def test_confirm_empty_body_reaches_handler(self, client):
         resp = client.post("/api/items/identify/t/confirm", json={})
         assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# PATCH /api/items/<item_id>/tags
+# ---------------------------------------------------------------------------
+
+
+class TestItemTagsPatch:
+    def _make_mock_item(self, mocker, item_id, album_id=10):
+        item = mocker.MagicMock()
+        item.id = item_id
+        item.album_id = album_id
+        item.path = f"/music/track{item_id}.mp3".encode()
+        return item
+
+    def test_returns_200_and_writes_field(self, client, mocker):
+        mock_item = self._make_mock_item(mocker, 1)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        write = mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
+
+        resp = client.patch("/api/items/1/tags", json={"fields": {"title": "New Title"}})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "ok"
+        assert data["warnings"] == []
+        mock_item.__setitem__.assert_called_with("title", "New Title")
+        mock_item.store.assert_called_once()
+        write.assert_called_once_with(mock_item)
+
+    def test_empty_value_clears_field_via_delitem(self, client, mocker):
+        mock_item = self._make_mock_item(mocker, 2)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
+
+        resp = client.patch("/api/items/2/tags", json={"fields": {"comments": ""}})
+        assert resp.status_code == 200
+        mock_item.__delitem__.assert_called_once_with("comments")
+        mock_item.__setitem__.assert_not_called()
+
+    def test_flexible_attr_set_via_setitem(self, client, mocker):
+        mock_item = self._make_mock_item(mocker, 3)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
+
+        resp = client.patch("/api/items/3/tags", json={"fields": {"my_flex_attr": "custom"}})
+        assert resp.status_code == 200
+        mock_item.__setitem__.assert_called_with("my_flex_attr", "custom")
+
+    def test_flexible_attr_cleared_via_empty_string(self, client, mocker):
+        mock_item = self._make_mock_item(mocker, 4)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
+
+        resp = client.patch("/api/items/4/tags", json={"fields": {"my_flex_attr": ""}})
+        assert resp.status_code == 200
+        mock_item.__delitem__.assert_called_once_with("my_flex_attr")
+
+    def test_genres_comma_string_becomes_list(self, client, mocker):
+        mock_item = self._make_mock_item(mocker, 5)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
+
+        resp = client.patch("/api/items/5/tags", json={"fields": {"genres": "Rock, Electronic"}})
+        assert resp.status_code == 200
+        mock_item.__setitem__.assert_called_with("genres", ["Rock", "Electronic"])
+
+    def test_readonly_length_returns_400(self, client):
+        resp = client.patch("/api/items/1/tags", json={"fields": {"length": "200"}})
+        assert resp.status_code == 400
+        assert "not editable" in resp.get_json()["error"]
+        assert "length" in resp.get_json()["error"]
+
+    def test_readonly_mb_trackid_returns_400(self, client):
+        resp = client.patch("/api/items/1/tags", json={"fields": {"mb_trackid": "x"}})
+        assert resp.status_code == 400
+        assert "not editable" in resp.get_json()["error"]
+
+    def test_readonly_rg_track_gain_returns_400(self, client):
+        resp = client.patch("/api/items/1/tags", json={"fields": {"rg_track_gain": "1.0"}})
+        assert resp.status_code == 400
+        assert "not editable" in resp.get_json()["error"]
+
+    def test_bad_int_value_returns_400(self, client, mocker):
+        mock_item = self._make_mock_item(mocker, 6)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.patch("/api/items/6/tags", json={"fields": {"track": "notanumber"}})
+        assert resp.status_code == 400
+        assert "track" in resp.get_json()["error"]
+
+    def test_bad_bool_value_returns_400(self, client, mocker):
+        mock_item = self._make_mock_item(mocker, 7)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.patch("/api/items/7/tags", json={"fields": {"comp": "maybe"}})
+        assert resp.status_code == 400
+        assert "comp" in resp.get_json()["error"]
+
+    def test_unknown_item_returns_404(self, client, mocker):
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = None
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.patch("/api/items/999/tags", json={"fields": {"title": "X"}})
+        assert resp.status_code == 404
+        assert "not found" in resp.get_json()["error"].lower()
+
+    def test_file_write_failure_returns_warning_and_200(self, client, mocker):
+        mock_item = self._make_mock_item(mocker, 8)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=False)
+
+        resp = client.patch("/api/items/8/tags", json={"fields": {"title": "T"}})
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["status"] == "ok"
+        assert any("file write failed" in w for w in data["warnings"])
+
+    def test_unknown_toplevel_key_returns_422(self, client):
+        resp = client.patch("/api/items/1/tags", json={"fields": {"title": "X"}, "bogus": 1})
+        assert resp.status_code == 422
+
+    def test_patch_tags_in_openapi_spec(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        op = spec["paths"]["/api/items/{item_id}/tags"]["patch"]
+        assert "items" in op["tags"]
+        assert "200" in op["responses"]
+        assert "400" in op["responses"]
+        assert "404" in op["responses"]
+        assert "application/json" in op["requestBody"]["content"]
