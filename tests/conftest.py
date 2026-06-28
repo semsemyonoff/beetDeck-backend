@@ -159,17 +159,25 @@ def insert_item(db_path: str, album_id: int, **kwargs) -> int:
         conn.close()
 
 
+def _reset_rescan_state():
+    state.rescan_proc = None
+    state.rescan_snapshot = None
+    state.rescan_run_id = None
+    state.rescan_log_path = None
+    state.rescan_phase = "idle"
+    state.rescan_result = None
+    state.rescan_thread = None
+
+
 @pytest.fixture(autouse=True)
 def reset_global_state():
     """Reset shared in-memory state before each test to prevent test pollution."""
     state.identify_tasks.clear()
-    state.rescan_proc = None
-    state.rescan_snapshot = None
+    _reset_rescan_state()
     beetdeck_utils._beets_initialized = False
     yield
     state.identify_tasks.clear()
-    state.rescan_proc = None
-    state.rescan_snapshot = None
+    _reset_rescan_state()
     beetdeck_utils._beets_initialized = False
 
 

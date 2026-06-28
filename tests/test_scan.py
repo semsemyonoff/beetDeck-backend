@@ -1,9 +1,17 @@
 """Tests for scan blueprint routes."""
 
+import os
 import sqlite3
 
 import beetdeck.state as state
-from beetdeck.routes.scan import _compute_scan_diff, _normalize_absolute_paths, _take_snapshot
+from beetdeck.routes.scan import (
+    _compute_scan_diff,
+    _make_log_path,
+    _make_run_id,
+    _normalize_absolute_paths,
+    _take_snapshot,
+    _take_snapshot_db,
+)
 from tests.conftest import insert_album, insert_item
 
 
@@ -11,11 +19,60 @@ def _reset_scan_state():
     """Reset scan globals between tests."""
     state.rescan_proc = None
     state.rescan_snapshot = None
+    state.rescan_run_id = None
+    state.rescan_log_path = None
+    state.rescan_phase = "idle"
+    state.rescan_result = None
+    state.rescan_thread = None
+
+
+def _make_mock_proc(mocker, returncode=0):
+    """Return a mock Popen object that completes with the given returncode."""
+    proc = mocker.MagicMock()
+    proc.returncode = returncode
+    proc.wait.return_value = None
+    return proc
 
 
 # ---------------------------------------------------------------------------
 # Unit tests for helper functions
 # ---------------------------------------------------------------------------
+
+
+class TestMakeRunId:
+    def test_returns_string(self):
+        assert isinstance(_make_run_id(), str)
+
+    def test_unique_across_calls(self):
+        ids = {_make_run_id() for _ in range(10)}
+        assert len(ids) >= 5  # timestamp-based, allows microsecond collisions in theory
+
+    def test_format(self):
+        run_id = _make_run_id()
+        # YYYYMMDD-HHMMSS-ffffff
+        parts = run_id.split("-")
+        assert len(parts) == 3
+        assert len(parts[0]) == 8  # YYYYMMDD
+        assert len(parts[1]) == 6  # HHMMSS
+
+
+class TestMakeLogPath:
+    def test_returns_path_under_scan_logs(self, tmp_path):
+        db = str(tmp_path / "library.db")
+        path = _make_log_path("20240101-120000-000000", db)
+        assert path == str(tmp_path / "scan-logs" / "20240101-120000-000000.log")
+
+    def test_creates_scan_logs_dir(self, tmp_path):
+        db = str(tmp_path / "sub" / "library.db")
+        os.makedirs(os.path.dirname(db))
+        _make_log_path("run1", db)
+        assert os.path.isdir(str(tmp_path / "sub" / "scan-logs"))
+
+    def test_creates_dir_idempotent(self, tmp_path):
+        db = str(tmp_path / "library.db")
+        _make_log_path("run1", db)
+        _make_log_path("run2", db)  # should not raise
+        assert os.path.isdir(str(tmp_path / "scan-logs"))
 
 
 class TestTakeSnapshot:
@@ -42,6 +99,33 @@ class TestTakeSnapshot:
             snap = _take_snapshot()
         paths = [data[3] for data in snap.values()]
         assert "/music/artist/album/track.mp3" in paths
+
+
+class TestTakeSnapshotDb:
+    def test_returns_empty_dict_for_empty_db(self, db_path):
+        snap = _take_snapshot_db(db_path, "")
+        assert snap == {}
+
+    def test_returns_items_from_db(self, db_path):
+        album_id = insert_album(db_path)
+        item_id = insert_item(db_path, album_id, title="Song A", artist="Band")
+        snap = _take_snapshot_db(db_path, "")
+        assert item_id in snap
+        title, artist, aid, path = snap[item_id]
+        assert title == "Song A"
+        assert artist == "Band"
+        assert aid == album_id
+
+    def test_resolves_relative_paths_against_root(self, db_path):
+        album_id = insert_album(db_path)
+        insert_item(db_path, album_id, path=b"artist/album/track.mp3")
+        snap = _take_snapshot_db(db_path, "/music")
+        paths = [data[3] for data in snap.values()]
+        assert "/music/artist/album/track.mp3" in paths
+
+    def test_returns_empty_on_missing_db(self, tmp_path):
+        snap = _take_snapshot_db(str(tmp_path / "nonexistent.db"), "")
+        assert snap == {}
 
 
 class TestComputeScanDiff:
@@ -240,9 +324,10 @@ class TestRescan:
         _reset_scan_state()
 
     def test_starts_rescan_quick_mode(self, client, mocker):
-        mock_proc = mocker.MagicMock()
-        mock_proc.poll.return_value = None  # running
-        mocker.patch("beetdeck.routes.scan.subprocess.Popen", return_value=mock_proc)
+        mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            return_value=_make_mock_proc(mocker),
+        )
         mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
 
         resp = client.post("/api/rescan")
@@ -252,28 +337,33 @@ class TestRescan:
         assert data["mode"] == "quick"
 
     def test_starts_rescan_full_mode(self, client, mocker):
-        mock_proc = mocker.MagicMock()
-        mock_proc.poll.return_value = None
-        popen_mock = mocker.patch("beetdeck.routes.scan.subprocess.Popen", return_value=mock_proc)
+        popen_mock = mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            return_value=_make_mock_proc(mocker),
+        )
         mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
 
         resp = client.post("/api/rescan?mode=full")
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["mode"] == "full"
-        # -I flag used for full mode
-        cmd_arg = popen_mock.call_args[0][0]
-        assert " -I " in cmd_arg
+
+        # Wait for controller and verify -I flag was used in import command
+        state.rescan_thread.join(timeout=5)
+        import_call_args = popen_mock.call_args_list[0][0][0]
+        assert "-I" in import_call_args
 
     def test_quick_mode_uses_incremental_flag(self, client, mocker):
-        mock_proc = mocker.MagicMock()
-        mock_proc.poll.return_value = None
-        popen_mock = mocker.patch("beetdeck.routes.scan.subprocess.Popen", return_value=mock_proc)
+        popen_mock = mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            return_value=_make_mock_proc(mocker),
+        )
         mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
 
         client.post("/api/rescan?mode=quick")
-        cmd_arg = popen_mock.call_args[0][0]
-        assert " -i " in cmd_arg
+        state.rescan_thread.join(timeout=5)
+        import_call_args = popen_mock.call_args_list[0][0][0]
+        assert "-i" in import_call_args
 
     def test_returns_422_for_invalid_mode(self, client):
         """Invalid `mode` is now rejected by spectree (Literal) with a 422,
@@ -290,23 +380,42 @@ class TestRescan:
         resp = client.post("/api/rescan?bogus=1")
         assert resp.status_code == 422
 
-    def test_returns_409_when_already_running(self, client, mocker):
-        mock_proc = mocker.MagicMock()
-        mock_proc.poll.return_value = None  # still running
-        state.rescan_proc = mock_proc
+    def test_returns_409_when_already_running(self, client):
+        state.rescan_phase = "importing"
+
+        resp = client.post("/api/rescan")
+        assert resp.status_code == 409
+        assert resp.get_json()["status"] == "running"
+
+    def test_returns_409_when_in_update_phase(self, client):
+        state.rescan_phase = "updating"
 
         resp = client.post("/api/rescan")
         assert resp.status_code == 409
         assert resp.get_json()["status"] == "running"
 
     def test_allows_new_scan_after_previous_finished(self, client, mocker):
-        finished_proc = mocker.MagicMock()
-        finished_proc.poll.return_value = 0  # done
-        state.rescan_proc = finished_proc
+        state.rescan_phase = "done"
+        state.rescan_result = {"status": "done", "returncode": 0, "added": [], "removed": []}
 
-        new_proc = mocker.MagicMock()
-        new_proc.poll.return_value = None
-        mocker.patch("beetdeck.routes.scan.subprocess.Popen", return_value=new_proc)
+        mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            return_value=_make_mock_proc(mocker),
+        )
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
+
+        resp = client.post("/api/rescan")
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "started"
+
+    def test_allows_new_scan_after_error(self, client, mocker):
+        state.rescan_phase = "error"
+        state.rescan_result = {"status": "error", "returncode": 1, "added": [], "removed": []}
+
+        mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            return_value=_make_mock_proc(mocker),
+        )
         mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
 
         resp = client.post("/api/rescan")
@@ -314,14 +423,37 @@ class TestRescan:
         assert resp.get_json()["status"] == "started"
 
     def test_takes_snapshot_before_starting(self, client, mocker):
-        mock_proc = mocker.MagicMock()
-        mock_proc.poll.return_value = None
-        mocker.patch("beetdeck.routes.scan.subprocess.Popen", return_value=mock_proc)
+        mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            return_value=_make_mock_proc(mocker),
+        )
         snap = {1: ("Song", "Artist", 10, "/music/song.mp3")}
         mocker.patch("beetdeck.routes.scan._take_snapshot", return_value=snap)
 
         client.post("/api/rescan")
         assert state.rescan_snapshot == snap
+
+    def test_sets_run_id_on_start(self, client, mocker):
+        mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            return_value=_make_mock_proc(mocker),
+        )
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
+
+        client.post("/api/rescan")
+        assert state.rescan_run_id is not None
+        assert isinstance(state.rescan_run_id, str)
+
+    def test_sets_log_path_on_start(self, client, mocker):
+        mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            return_value=_make_mock_proc(mocker),
+        )
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
+
+        client.post("/api/rescan")
+        assert state.rescan_log_path is not None
+        assert state.rescan_log_path.endswith(".log")
 
 
 # ---------------------------------------------------------------------------
@@ -333,27 +465,26 @@ class TestRescanStatus:
     def setup_method(self):
         _reset_scan_state()
 
-    def test_returns_idle_when_no_proc(self, client):
+    def test_returns_idle_when_phase_idle(self, client):
         resp = client.get("/api/rescan/status")
         assert resp.status_code == 200
         assert resp.get_json()["status"] == "idle"
 
-    def test_returns_running_when_proc_running(self, client, mocker):
-        mock_proc = mocker.MagicMock()
-        mock_proc.poll.return_value = None  # still running
-        state.rescan_proc = mock_proc
-
+    def test_returns_running_when_importing(self, client):
+        state.rescan_phase = "importing"
         resp = client.get("/api/rescan/status")
         assert resp.status_code == 200
         assert resp.get_json()["status"] == "running"
 
-    def test_returns_done_with_returncode_when_finished(self, client, mocker):
-        mock_proc = mocker.MagicMock()
-        mock_proc.poll.return_value = 0
-        mock_proc.returncode = 0
-        state.rescan_proc = mock_proc
-        state.rescan_snapshot = None
-        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
+    def test_returns_running_when_updating(self, client):
+        state.rescan_phase = "updating"
+        resp = client.get("/api/rescan/status")
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "running"
+
+    def test_returns_done_with_returncode_when_finished(self, client):
+        state.rescan_phase = "done"
+        state.rescan_result = {"status": "done", "returncode": 0, "added": [], "removed": []}
 
         resp = client.get("/api/rescan/status")
         assert resp.status_code == 200
@@ -361,20 +492,14 @@ class TestRescanStatus:
         assert data["status"] == "done"
         assert data["returncode"] == 0
 
-    def test_returns_diff_when_snapshot_exists(self, client, mocker):
-        mock_proc = mocker.MagicMock()
-        mock_proc.poll.return_value = 0
-        mock_proc.returncode = 0
-        state.rescan_proc = mock_proc
-
-        before = {1: ("Old Song", "Artist", 10, "/music/old.mp3")}
-        state.rescan_snapshot = before
-
-        after = {
-            1: ("Old Song", "Artist", 10, "/music/old.mp3"),
-            2: ("New Song", "Artist", 10, "/music/new.mp3"),
+    def test_returns_diff_in_result(self, client):
+        state.rescan_phase = "done"
+        state.rescan_result = {
+            "status": "done",
+            "returncode": 0,
+            "added": [{"id": 2, "title": "New Song", "artist": "Artist"}],
+            "removed": [],
         }
-        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value=after)
 
         resp = client.get("/api/rescan/status")
         data = resp.get_json()
@@ -383,30 +508,160 @@ class TestRescanStatus:
         assert data["added"][0]["id"] == 2
         assert data["removed"] == []
 
-    def test_no_diff_fields_when_no_snapshot(self, client, mocker):
-        mock_proc = mocker.MagicMock()
-        mock_proc.poll.return_value = 0
-        mock_proc.returncode = 0
-        state.rescan_proc = mock_proc
-        state.rescan_snapshot = None
-        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
-
-        resp = client.get("/api/rescan/status")
-        data = resp.get_json()
-        assert "added" not in data
-        assert "removed" not in data
-
-    def test_returns_nonzero_returncode_on_failure(self, client, mocker):
-        mock_proc = mocker.MagicMock()
-        mock_proc.poll.return_value = 1
-        mock_proc.returncode = 1
-        state.rescan_proc = mock_proc
-        state.rescan_snapshot = None
-        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
+    def test_returns_nonzero_returncode_on_failure(self, client):
+        state.rescan_phase = "error"
+        state.rescan_result = {"status": "error", "returncode": 1, "added": [], "removed": []}
 
         resp = client.get("/api/rescan/status")
         data = resp.get_json()
         assert data["returncode"] == 1
+        assert data["status"] == "error"
+
+    def test_persists_result_on_repeated_poll(self, client):
+        state.rescan_phase = "done"
+        state.rescan_result = {"status": "done", "returncode": 0, "added": [], "removed": []}
+
+        resp1 = client.get("/api/rescan/status")
+        resp2 = client.get("/api/rescan/status")
+        assert resp1.get_json()["status"] == "done"
+        assert resp2.get_json()["status"] == "done"
+
+
+# ---------------------------------------------------------------------------
+# Controller thread integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestScanController:
+    def setup_method(self):
+        _reset_scan_state()
+
+    def _start_and_wait(self, client, mocker, returncode=0, mode="quick"):
+        """Start a scan with a mock Popen and wait for the controller to finish."""
+        proc = _make_mock_proc(mocker, returncode=returncode)
+        popen_mock = mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            return_value=proc,
+        )
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
+        mocker.patch("beetdeck.routes.scan._take_snapshot_db", return_value={})
+
+        resp = client.post(f"/api/rescan?mode={mode}")
+        assert resp.status_code == 200
+        state.rescan_thread.join(timeout=5)
+        return popen_mock, resp
+
+    def test_import_then_update_sequence_runs(self, client, mocker):
+        popen_mock, _ = self._start_and_wait(client, mocker)
+        assert popen_mock.call_count == 2
+        import_cmd = popen_mock.call_args_list[0][0][0]
+        update_cmd = popen_mock.call_args_list[1][0][0]
+        assert "import" in import_cmd
+        assert "update" in update_cmd
+
+    def test_import_cmd_includes_beet_and_flags(self, client, mocker):
+        popen_mock, _ = self._start_and_wait(client, mocker, mode="quick")
+        import_cmd = popen_mock.call_args_list[0][0][0]
+        assert import_cmd[0] == "beet"
+        assert "-v" in import_cmd
+        assert "import" in import_cmd
+        assert "-i" in import_cmd  # quick mode
+
+    def test_full_mode_uses_capital_i_flag(self, client, mocker):
+        popen_mock, _ = self._start_and_wait(client, mocker, mode="full")
+        import_cmd = popen_mock.call_args_list[0][0][0]
+        assert "-I" in import_cmd
+
+    def test_log_file_created(self, client, mocker):
+        self._start_and_wait(client, mocker)
+        assert state.rescan_log_path is not None
+        assert os.path.isfile(state.rescan_log_path)
+
+    def test_popen_receives_log_file_as_stdout(self, client, mocker):
+        popen_mock, _ = self._start_and_wait(client, mocker)
+        # Both Popen calls should receive a file object as stdout
+        for call in popen_mock.call_args_list:
+            stdout = call[1].get("stdout") or call[1].get("stdout")
+            assert stdout is not None
+
+    def test_status_transitions_to_done(self, client, mocker):
+        self._start_and_wait(client, mocker)
+        assert state.rescan_phase == "done"
+        assert state.rescan_result is not None
+        assert state.rescan_result["status"] == "done"
+        assert state.rescan_result["returncode"] == 0
+
+    def test_status_result_contains_diff(self, client, mocker, db_path):
+        mocker.patch("beetdeck.routes.scan.subprocess.Popen", return_value=_make_mock_proc(mocker))
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
+        # Simulate a new item appearing after import
+        after_snap = {42: ("New Track", "Artist", 1, "/music/new.mp3")}
+        mocker.patch("beetdeck.routes.scan._take_snapshot_db", return_value=after_snap)
+
+        client.post("/api/rescan")
+        state.rescan_thread.join(timeout=5)
+
+        assert state.rescan_result["added"] == [
+            {"id": 42, "title": "New Track", "artist": "Artist"}
+        ]
+        assert state.rescan_result["removed"] == []
+
+    def test_second_concurrent_start_returns_409(self, client, mocker):
+        # Simulate in-progress scan without starting a real thread
+        state.rescan_phase = "importing"
+
+        resp = client.post("/api/rescan")
+        assert resp.status_code == 409
+        assert resp.get_json()["status"] == "running"
+
+    def test_import_nonzero_return_sets_error_phase(self, client, mocker):
+        self._start_and_wait(client, mocker, returncode=1)
+        assert state.rescan_phase == "error"
+        assert state.rescan_result["status"] == "error"
+        assert state.rescan_result["returncode"] == 1
+
+    def test_import_failure_skips_update(self, client, mocker):
+        popen_mock, _ = self._start_and_wait(client, mocker, returncode=1)
+        # Only import Popen called, update is skipped
+        assert popen_mock.call_count == 1
+
+    def test_log_dir_created_when_missing(self, client, mocker, tmp_path, app):
+        """Log dir under library_db parent is created on demand by _make_log_path."""
+        mocker.patch("beetdeck.routes.scan.subprocess.Popen", return_value=_make_mock_proc(mocker))
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
+        mocker.patch("beetdeck.routes.scan._take_snapshot_db", return_value={})
+
+        with app.app_context():
+            from flask import current_app
+
+            library_db = current_app.config["LIBRARY_DB"]
+            log_dir = os.path.join(os.path.dirname(library_db), "scan-logs")
+
+        # Ensure the dir doesn't exist yet
+        import shutil
+
+        if os.path.isdir(log_dir):
+            shutil.rmtree(log_dir)
+
+        resp = client.post("/api/rescan")
+        assert resp.status_code == 200
+        assert os.path.isdir(log_dir)
+
+    def test_update_failure_sets_error_phase(self, client, mocker):
+        import_proc = _make_mock_proc(mocker, returncode=0)
+        update_proc = _make_mock_proc(mocker, returncode=2)
+        mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            side_effect=[import_proc, update_proc],
+        )
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
+        mocker.patch("beetdeck.routes.scan._take_snapshot_db", return_value={})
+
+        client.post("/api/rescan")
+        state.rescan_thread.join(timeout=5)
+
+        assert state.rescan_phase == "error"
+        assert state.rescan_result["returncode"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -442,9 +697,10 @@ class TestScanOpenAPISpec:
 
     def test_default_mode_when_param_missing(self, client, mocker):
         """Missing `mode` still defaults to quick (behavior unchanged)."""
-        mock_proc = mocker.MagicMock()
-        mock_proc.poll.return_value = None
-        mocker.patch("beetdeck.routes.scan.subprocess.Popen", return_value=mock_proc)
+        mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            return_value=_make_mock_proc(mocker),
+        )
         mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
 
         resp = client.post("/api/rescan")

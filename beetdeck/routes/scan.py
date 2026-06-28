@@ -5,10 +5,11 @@ Endpoints:
     GET   /api/rescan/status  — poll rescan status
 """
 
-import shlex
+import datetime
+import os
 import sqlite3
 import subprocess
-import sys
+import threading
 
 from flask import Blueprint, current_app, jsonify, request
 from spectree import Response
@@ -22,7 +23,7 @@ from beetdeck.schemas.scan import (
     RescanStartResponse,
     RescanStatusResponse,
 )
-from beetdeck.utils import _get_ro_conn, _resolve_path, log
+from beetdeck.utils import _decode_path, _get_ro_conn, _resolve_path, log
 
 bp = Blueprint("scan", __name__)
 
@@ -32,8 +33,23 @@ bp = Blueprint("scan", __name__)
 # ---------------------------------------------------------------------------
 
 
+def _make_run_id():
+    """Generate a unique run identifier based on current timestamp."""
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+
+
+def _make_log_path(run_id, library_db):
+    """Return the log file path for a run, creating the scan-logs dir on demand."""
+    log_dir = os.path.join(os.path.dirname(library_db), "scan-logs")
+    os.makedirs(log_dir, exist_ok=True)
+    return os.path.join(log_dir, f"{run_id}.log")
+
+
 def _take_snapshot():
-    """Snapshot current items {id: (title, artist, album_id, path)} from the DB."""
+    """Snapshot current items {id: (title, artist, album_id, path)} from the DB.
+
+    Requires Flask app context. Use _take_snapshot_db() from background threads.
+    """
     try:
         conn = _get_ro_conn()
         try:
@@ -43,6 +59,29 @@ def _take_snapshot():
         return {
             r["id"]: (r["title"], r["artist"], r["album_id"], _resolve_path(r["path"]))
             for r in rows
+        }
+    except Exception:
+        return {}
+
+
+def _take_snapshot_db(library_db, library_root):
+    """Snapshot current items without requiring Flask app context (for threads)."""
+    try:
+        conn = sqlite3.connect(f"file:{library_db}?mode=ro", uri=True, timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute("SELECT id, title, artist, album_id, path FROM items").fetchall()
+        finally:
+            conn.close()
+
+        def _resolve(path):
+            p = _decode_path(path)
+            if not p or os.path.isabs(p):
+                return p
+            return os.path.join(library_root, p) if library_root else p
+
+        return {
+            r["id"]: (r["title"], r["artist"], r["album_id"], _resolve(r["path"])) for r in rows
         }
     except Exception:
         return {}
@@ -150,6 +189,96 @@ def _compute_scan_diff(before, after):
     return added, removed
 
 
+def _run_scan_controller(
+    run_id, log_path, inc_flag, import_dir, pre_snap, library_db, library_root
+):
+    """Daemon controller thread: run import → compute diff → run update → finalize.
+
+    Guards every state write with a run_id staleness check so a stale thread
+    (from a superseded test or dismissed scan) never corrupts shared state.
+    """
+    try:
+        with open(log_path, "wb") as log_file:
+            # Phase 1: beet import
+            import_cmd = ["beet", "-v", "import", "-A", "-C", inc_flag, import_dir]
+            log.info("Rescan %s: import %s", run_id, " ".join(import_cmd))
+            import_proc = subprocess.Popen(
+                import_cmd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+            )
+            with state.rescan_lock:
+                state.rescan_proc = import_proc
+            import_proc.wait()
+            import_rc = import_proc.returncode
+
+            # Bail out if state was reset (e.g. test teardown or new scan started)
+            with state.rescan_lock:
+                if state.rescan_run_id != run_id:
+                    return
+                if import_rc != 0:
+                    state.rescan_proc = None
+                    state.rescan_phase = "error"
+                    state.rescan_result = {
+                        "status": "error",
+                        "returncode": import_rc,
+                        "added": [],
+                        "removed": [],
+                    }
+                    log.error("Rescan %s: import failed (rc=%d)", run_id, import_rc)
+                    return
+
+            # Compute diff (no lock needed — pure local computation)
+            post_snap = _take_snapshot_db(library_db, library_root)
+            added, removed = _compute_scan_diff(pre_snap, post_snap)
+
+            # Phase 2: beet update — guard before starting the second process
+            with state.rescan_lock:
+                if state.rescan_run_id != run_id:
+                    return
+                state.rescan_phase = "updating"
+
+            update_cmd = ["beet", "-v", "update", "-M"]
+            log.info("Rescan %s: update", run_id)
+            update_proc = subprocess.Popen(
+                update_cmd,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+            )
+            with state.rescan_lock:
+                state.rescan_proc = update_proc
+            update_proc.wait()
+            update_rc = update_proc.returncode
+
+            final_phase = "error" if update_rc != 0 else "done"
+            with state.rescan_lock:
+                if state.rescan_run_id != run_id:
+                    return
+                state.rescan_proc = None
+                state.rescan_phase = final_phase
+                state.rescan_result = {
+                    "status": final_phase,
+                    "returncode": update_rc,
+                    "added": added,
+                    "removed": removed,
+                }
+            log.info("Rescan %s: %s (rc=%d)", run_id, final_phase, update_rc)
+
+    except Exception:
+        log.exception("Rescan %s: controller thread crashed", run_id)
+        with state.rescan_lock:
+            if state.rescan_run_id != run_id:
+                return
+            state.rescan_proc = None
+            state.rescan_phase = "error"
+            state.rescan_result = {
+                "status": "error",
+                "returncode": -1,
+                "added": [],
+                "removed": [],
+            }
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -173,23 +302,31 @@ def rescan():
     library_db = current_app.config["LIBRARY_DB"]
     library_root = current_app.config.get("LIBRARY_ROOT", "")
     with state.rescan_lock:
-        if state.rescan_proc and state.rescan_proc.poll() is None:
+        if state.rescan_phase in ("importing", "updating"):
             return jsonify({"status": "running"}), 409
         try:
             _normalize_absolute_paths(library_db, library_root)
         except Exception:
             log.exception("Rescan preflight: path normalization failed")
             return jsonify({"error": "Failed to normalize library paths before rescan"}), 500
-        state.rescan_snapshot = _take_snapshot()
+        pre_snap = _take_snapshot()
         inc = "-i" if mode == "quick" else "-I"
-        cmd = f"beet -v import -A -C {inc} {shlex.quote(import_dir)} && beet -v update -M"
-        log.info("Starting rescan (%s): %s", mode, cmd)
-        state.rescan_proc = subprocess.Popen(
-            cmd,
-            shell=True,
-            stdout=sys.stderr,
-            stderr=sys.stderr,
-        )
+        run_id = _make_run_id()
+        log_path = _make_log_path(run_id, library_db)
+        state.rescan_snapshot = pre_snap
+        state.rescan_run_id = run_id
+        state.rescan_log_path = log_path
+        state.rescan_phase = "importing"
+        state.rescan_result = None
+    log.info("Starting rescan (%s) run_id=%s", mode, run_id)
+    t = threading.Thread(
+        target=_run_scan_controller,
+        args=(run_id, log_path, inc, import_dir, pre_snap, library_db, library_root),
+        daemon=True,
+    )
+    with state.rescan_lock:
+        state.rescan_thread = t
+    t.start()
     return jsonify({"status": "started", "mode": mode})
 
 
@@ -200,23 +337,13 @@ def rescan():
 )
 def rescan_status():
     with state.rescan_lock:
-        proc = state.rescan_proc
-        snapshot = state.rescan_snapshot
-    if proc is None:
+        phase = state.rescan_phase
+        result = state.rescan_result
+    if phase == "idle":
         return jsonify({"status": "idle"})
-    if proc.poll() is None:
+    if phase in ("importing", "updating"):
         return jsonify({"status": "running"})
-    # Process finished: compute diff, then clear state so future polls return
-    # "idle" and repeated calls don't re-query the entire DB each time.
-    result = {"status": "done", "returncode": proc.returncode}
-    if snapshot is not None:
-        after = _take_snapshot()
-        added, removed = _compute_scan_diff(snapshot, after)
-        result["added"] = added
-        result["removed"] = removed
-    with state.rescan_lock:
-        # Only clear if no new rescan was started between our two lock acquisitions.
-        if state.rescan_proc is proc:
-            state.rescan_proc = None
-            state.rescan_snapshot = None
-    return jsonify(result)
+    # phase is "done" or "error" — return the persisted result
+    if result is not None:
+        return jsonify(result)
+    return jsonify({"status": "idle"})
