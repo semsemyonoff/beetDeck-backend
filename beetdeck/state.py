@@ -15,7 +15,9 @@ identify_lock = threading.Lock()
 rescan_lock = threading.Lock()
 rescan_proc = None  # subprocess.Popen | None — current subprocess (internal, used by controller)
 rescan_snapshot = None  # {item_id: (title, artist, album_id, path)} | None — pre-import snapshot
-rescan_run_id = None  # str | None — identifier for the current/last run
+rescan_run_id = (
+    None  # str | None — run identifier (timestamp w/ microseconds: YYYYMMDD-HHMMSS-ffffff)
+)
 rescan_log_path = None  # str | None — path to the current run log file
 rescan_phase = "idle"  # idle | importing | updating | done | error
 rescan_result = None  # dict | None — persisted finish-state (status, returncode, added, removed)

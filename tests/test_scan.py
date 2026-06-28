@@ -2,7 +2,9 @@
 
 import os
 import sqlite3
+import subprocess
 import threading
+import time
 
 import beetdeck.state as state
 from beetdeck.routes.scan import (
@@ -50,8 +52,10 @@ class TestMakeRunId:
         assert isinstance(_make_run_id(), str)
 
     def test_unique_across_calls(self):
+        # Microsecond precision (-%f) must make every id distinct; collisions
+        # would corrupt the per-run log filename and the staleness guard.
         ids = {_make_run_id() for _ in range(10)}
-        assert len(ids) >= 5  # timestamp-based, allows microsecond collisions in theory
+        assert len(ids) == 10
 
     def test_format(self):
         run_id = _make_run_id()
@@ -766,10 +770,14 @@ class TestScanController:
 
     def test_popen_receives_log_file_as_stdout(self, client, mocker):
         popen_mock, _ = self._start_and_wait(client, mocker)
-        # Both Popen calls should receive a file object as stdout
+        # Both Popen calls must write to the run-log file with stderr merged in,
+        # otherwise the verbose output the progress parser depends on is lost.
+        assert popen_mock.call_args_list, "expected at least one Popen call"
         for call in popen_mock.call_args_list:
-            stdout = call[1].get("stdout") or call[1].get("stdout")
+            stdout = call.kwargs.get("stdout")
             assert stdout is not None
+            assert getattr(stdout, "name", None) == state.rescan_log_path
+            assert call.kwargs.get("stderr") == subprocess.STDOUT
 
     def test_status_transitions_to_done(self, client, mocker):
         self._start_and_wait(client, mocker)
@@ -897,7 +905,7 @@ class TestConditionalUpdate:
 
     def test_update_runs_when_items_removed(self, client, mocker):
         # pre_snap has an item; post_snap is empty → item removed
-        mocker.patch(
+        popen_mock = mocker.patch(
             "beetdeck.routes.scan.subprocess.Popen",
             return_value=_make_mock_proc(mocker),
         )
@@ -909,9 +917,12 @@ class TestConditionalUpdate:
         resp = client.post("/api/rescan")
         assert resp.status_code == 200
         state.rescan_thread.join(timeout=5)
-        # Verify via state: update ran, scan reached done (returncode=0 from mock)
+        # The removal must be detected and the update step must run (2 Popen calls).
         assert state.rescan_phase == "done"
-        assert state.rescan_result["removed"] != [] or state.rescan_result["added"] != []
+        assert state.rescan_result["removed"] == [{"id": 1, "title": "Gone", "artist": "Artist"}]
+        assert state.rescan_result["added"] == []
+        assert popen_mock.call_count == 2
+        assert "update" in popen_mock.call_args_list[1][0][0]
 
     def test_update_skipped_when_no_diff(self, client, mocker):
         # Both snapshots empty → diff is empty → update must not run
@@ -1159,29 +1170,36 @@ class TestTailThread:
         t.start()
         t.join(timeout=5)
 
-    def test_increments_processed_on_looking_up_line(self, tmp_path):
+    def test_increments_processed_on_import_task_created(self, tmp_path):
         run_id = "test-run-001"
         state.rescan_run_id = run_id
         state.rescan_processed = 0
-        log_path = self._write_log(tmp_path, "Looking up: /music/Artist/Album\n")
+        log_path = self._write_log(tmp_path, "Sending event: import_task_created\n")
 
         self._run_thread_once(run_id, log_path)
 
         assert state.rescan_processed == 1
 
-    def test_sets_current_item_from_looking_up_line(self, tmp_path):
+    def test_sets_current_item_from_album_path_line(self, tmp_path):
         run_id = "test-run-002"
         state.rescan_run_id = run_id
-        log_path = self._write_log(tmp_path, "Looking up: /music/Artist/Album\n")
+        # Real beets -A output: the event, then the bare album path on the next line.
+        log_path = self._write_log(
+            tmp_path, "Sending event: import_task_created\n/music/Artist/Album\n"
+        )
 
         self._run_thread_once(run_id, log_path)
 
+        assert state.rescan_processed == 1
         assert state.rescan_current_item == "/music/Artist/Album"
 
     def test_increments_processed_for_each_album(self, tmp_path):
         run_id = "test-run-003"
         state.rescan_run_id = run_id
-        lines = "\n".join(f"Looking up: /music/Album{i}" for i in range(5)) + "\n"
+        lines = (
+            "\n".join(f"Sending event: import_task_created\n/music/Album{i}" for i in range(5))
+            + "\n"
+        )
         log_path = self._write_log(tmp_path, lines)
 
         self._run_thread_once(run_id, log_path)
@@ -1192,7 +1210,7 @@ class TestTailThread:
         run_id = "test-run-004"
         state.rescan_run_id = run_id
         state.rescan_total = 2
-        lines = "\n".join(f"Looking up: /music/Album{i}" for i in range(5)) + "\n"
+        lines = "\n".join("Sending event: import_task_created" for _ in range(5)) + "\n"
         log_path = self._write_log(tmp_path, lines)
 
         self._run_thread_once(run_id, log_path)
@@ -1209,7 +1227,7 @@ class TestTailThread:
     def test_stops_on_stale_run_id(self, tmp_path):
         run_id = "test-run-006"
         state.rescan_run_id = "different-run-id"  # stale
-        lines = "\n".join(f"Looking up: /music/Album{i}" for i in range(5)) + "\n"
+        lines = "\n".join("Sending event: import_task_created" for _ in range(5)) + "\n"
         log_path = self._write_log(tmp_path, lines)
 
         self._run_thread_once(run_id, log_path)
@@ -1233,7 +1251,7 @@ class TestTailThread:
         """Tail thread must do a final drain after stop_event is set."""
         run_id = "test-run-008"
         state.rescan_run_id = run_id
-        log_path = self._write_log(tmp_path, "Looking up: /music/FinalAlbum\n")
+        log_path = self._write_log(tmp_path, "Sending event: import_task_created\n")
 
         # stop_event already set → skips polling loop, only runs final drain
         stop_event = threading.Event()
@@ -1248,12 +1266,40 @@ class TestTailThread:
         run_id = "test-run-009"
         state.rescan_run_id = run_id
         state.rescan_total = None  # quick/indeterminate
-        lines = "\n".join(f"Looking up: /music/Album{i}" for i in range(10)) + "\n"
+        lines = "\n".join("Sending event: import_task_created" for _ in range(10)) + "\n"
         log_path = self._write_log(tmp_path, lines)
 
         self._run_thread_once(run_id, log_path)
 
         assert state.rescan_processed == 10
+
+    def test_marker_split_across_drains_is_not_lost(self, tmp_path):
+        """A marker split across two live reads must still be counted exactly once.
+
+        Exercises the live polling loop (not just the final drain): the first
+        read sees only a partial line (no trailing newline) and must carry it
+        over instead of consuming it as a non-matching fragment.
+        """
+        run_id = "test-run-010"
+        state.rescan_run_id = run_id
+        log_file = tmp_path / "run.log"
+        # Begin with a partial marker — no newline yet.
+        log_file.write_bytes(b"Sending event: import_")
+
+        stop_event = threading.Event()
+        t = threading.Thread(target=_run_tail_thread, args=(run_id, str(log_file), stop_event))
+        t.start()
+        try:
+            time.sleep(0.25)  # let at least one drain run on the partial line
+            # Complete the marker; append a second whole marker too.
+            with open(log_file, "ab") as f:
+                f.write(b"task_created\nSending event: import_task_created\n")
+            time.sleep(0.25)  # let the loop pick up the completed lines
+        finally:
+            stop_event.set()
+            t.join(timeout=5)
+
+        assert state.rescan_processed == 2
 
 
 # ---------------------------------------------------------------------------

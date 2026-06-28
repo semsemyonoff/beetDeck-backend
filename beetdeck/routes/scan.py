@@ -68,7 +68,7 @@ def _run_tail_thread(run_id, log_path, stop_event):
 
     offset = 0
 
-    def _drain():
+    def _drain(final=False):
         nonlocal offset
         try:
             with open(log_path, "rb") as f:
@@ -76,7 +76,20 @@ def _run_tail_thread(run_id, log_path, stop_event):
                 chunk = f.read()
             if not chunk:
                 return
-            for line in chunk.decode("utf-8", errors="replace").splitlines():
+            # The log is read mid-write, so a chunk often ends in the middle of
+            # a line. Process only complete lines (up to the last newline) and
+            # carry the trailing partial into the next drain — otherwise a marker
+            # split across two reads is parsed as two non-matching fragments and
+            # the album is never counted. The final drain processes everything,
+            # since the subprocess has exited and no more bytes will arrive.
+            if final:
+                consumed = chunk
+            else:
+                last_nl = chunk.rfind(b"\n")
+                if last_nl == -1:
+                    return
+                consumed = chunk[: last_nl + 1]
+            for line in consumed.decode("utf-8", errors="replace").splitlines():
                 result = parse_beets_line(line)
                 if result is None or result.update is None:
                     continue
@@ -90,14 +103,14 @@ def _run_tail_thread(run_id, log_path, stop_event):
                         state.rescan_processed = new_val
                     if result.update.current_item is not None:
                         state.rescan_current_item = result.update.current_item
-            offset += len(chunk)
+            offset += len(consumed)
         except (FileNotFoundError, OSError):
             pass
 
     while not stop_event.wait(timeout=0.1):
         _drain()
     # Final drain to capture any lines written between the last poll and stop
-    _drain()
+    _drain(final=True)
 
 
 def _make_run_id():

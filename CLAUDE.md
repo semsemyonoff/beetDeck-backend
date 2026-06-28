@@ -91,7 +91,7 @@ The application uses module-level globals for shared state across request thread
 - `rescan_lock` (threading.Lock) — guards all scan state reads/writes
 - `rescan_proc` (subprocess.Popen | None) — active subprocess (import or update); used internally by the controller thread
 - `rescan_snapshot` (dict | None) — item snapshot `{id: (title, artist, album_id, path)}` taken before scan starts; path is resolved via `_resolve_path()` and used by `_compute_scan_diff()` to match by filesystem path rather than ID
-- `rescan_run_id` (str | None) — unique identifier for the current/last run (timestamp-based, e.g. `YYYYMMDD-HHMMSS`)
+- `rescan_run_id` (str | None) — unique identifier for the current/last run (timestamp with microseconds, e.g. `YYYYMMDD-HHMMSS-ffffff`; the microsecond suffix guarantees uniqueness for runs started in the same second)
 - `rescan_log_path` (str | None) — path to the per-run log file (`/data/beets/scan-logs/<run_id>.log`)
 - `rescan_phase` (str) — lifecycle phase: `idle` | `importing` | `updating` | `done` | `error`
 - `rescan_result` (dict | None) — persisted finish-state (`{status, returncode, added, removed}`); stays set until dismissed via `POST /api/rescan/dismiss`
@@ -142,7 +142,7 @@ The application uses module-level globals for shared state across request thread
 - `GET /api/album/<id>/identify/status` — poll identification status
 - `POST /api/album/<id>/apply` — preview diff for a candidate
 - `POST /api/album/<id>/confirm` — write chosen candidate tags to files/DB
-- `POST /api/rescan` — start library rescan; returns `{run_id}` immediately; 409 if a scan is already running
+- `POST /api/rescan` — start library rescan (`?mode=quick|full`); returns `{status:"started", mode}` immediately; `409 {status:"running"}` if a scan is already running. The `run_id` is not in this response — obtain it by polling `GET /api/rescan/status`
 - `GET /api/rescan/status` — rescan status; fields: `phase` (`idle`|`importing`|`updating`|`done`|`error`), `processed` (int), `total` (int|null — null for quick/incremental scans), `current_item` (str|null), `run_id` (str|null), plus `added`/`removed`/`returncode` when finished; finished result persists until dismissed
 - `GET /api/rescan/log` — incremental log tail; query params: `run_id`, `offset` (byte); returns `{text, offset}` (new end offset for next fetch); 404 on unknown `run_id`; safe when file is mid-write
 - `POST /api/rescan/dismiss` — clear the persisted finished result (idempotent); next `status` returns `idle`

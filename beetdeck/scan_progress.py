@@ -15,28 +15,33 @@ where ``legacy_prefix`` is empty for the root ``"beets"`` logger and
 ``"<subname>: "`` for child loggers, e.g. ``"musicbrainz: "`` for
 ``beets.musicbrainz``.
 
-Key lines produced by ``beets/importer/stages.py`` (root "beets" logger,
-written to stderr by the CLI handler):
+Progress marker (verified against real ``beet -v import -A -C -I`` output):
+the production command imports with ``-A`` (``--noautotag``), so beets uses
+the *asis* pipeline — the autotag ``Looking up: /path`` line is **never
+emitted**.  Instead each album task produces, in order::
 
-    ``Looking up: /path``              — DEBUG; once per album in autotag mode
-    ``found duplicates: [N, …]``       — DEBUG
-    ``removing N old duplicate albums``— DEBUG (tasks.py)
-    ``deleting duplicate /path``       — DEBUG (tasks.py)
-    ``Replacing item N: /path``        — DEBUG (tasks.py, duplicate-replace)
+    ``Sending event: import_task_created``  — DEBUG; once per album task
+    ``/path/to/album``                       — INFO; the album path (import_asis)
+
+The ``import_task_created`` event is the reliable per-album increment (one
+per album in album mode); the bare album-path line that follows it supplies
+``current_item`` (best-effort).
+
+Other key lines produced during import (root "beets" logger):
+
+    ``found duplicates: [N, …]``       — DEBUG (info, no progress)
+    ``removing N old duplicate albums``— DEBUG (tasks.py) → removed
+    ``deleting duplicate /path``       — DEBUG (tasks.py) → removed
+    ``Replacing item N: /path``        — DEBUG (tasks.py) → added
     ``Skipped N paths.``               — INFO; end-of-run summary (incremental)
     ``No files imported from /path``   — WARNING
 
-Pretend mode only (``-p`` flag; not used in production – handled for
-completeness)::
-
-    ``Album: /path``     — INFO; once per album
-    ``  /path/to/track`` — INFO; per item within album
-
 Phase 2 — ``beet -v update -M`` (separate Popen, same log file)::
 
-    ``skipping /path because mtime is up to date…`` — DEBUG
-    ``  deleted``                                    — stdout via ui.print_()
-    ``error reading /path: …``                       — ERROR
+    ``skipping /path because mtime is up to date…`` — DEBUG (info)
+    ``  deleted``                                    — stdout via ui.print_() → removed
+    ``error reading /path: …``                       — ERROR (mapped to warn — no
+                                                       distinct error level in the UI)
 
 Version pinned to: beets 2.12.0
 """
@@ -92,42 +97,19 @@ def parse_beets_line(line: str) -> ParseResult | None:
         return None
 
     # ------------------------------------------------------------------ #
-    # Album / singleton start — increment processed counter once per unit  #
+    # Album start — increment processed counter once per album task        #
     # ------------------------------------------------------------------ #
 
-    # Primary progress marker (autotag mode, beet -v import -A).
-    # lookup_candidates stage emits this once per album directory.
-    if clean.startswith("Looking up: "):
-        path = clean[len("Looking up: ") :]
+    # Primary progress marker. beets emits this DEBUG event exactly once per
+    # import task (= one album in album mode) regardless of autotag mode, so
+    # it is reliable under the production -A (--noautotag) command where the
+    # autotag-only "Looking up:" line never appears. The album path is set as
+    # current_item by the bare-path branch below (the line that follows).
+    if clean == "Sending event: import_task_created":
         return ParseResult(
             log_level=LOG_LEVEL_INFO,
-            update=ProgressUpdate(increment_processed=True, current_item=path),
+            update=ProgressUpdate(increment_processed=True),
         )
-
-    # Pretend-mode markers from the log_files pipeline stage.
-    # Not emitted during normal (non-pretend) imports; handled for completeness.
-    if clean.startswith("Album: "):
-        path = clean[len("Album: ") :]
-        return ParseResult(
-            log_level=LOG_LEVEL_INFO,
-            update=ProgressUpdate(increment_processed=True, current_item=path),
-        )
-
-    if clean.startswith("Singleton: "):
-        path = clean[len("Singleton: ") :]
-        return ParseResult(
-            log_level=LOG_LEVEL_INFO,
-            update=ProgressUpdate(increment_processed=True, current_item=path),
-        )
-
-    # ------------------------------------------------------------------ #
-    # Pretend-mode per-item lines — must NOT double-count                  #
-    # ------------------------------------------------------------------ #
-
-    # Indented file paths: "  /path/to/track.mp3"
-    # Already counted as part of the album above; skip the progress update.
-    if clean.startswith("  /"):
-        return ParseResult(log_level=LOG_LEVEL_INFO)
 
     # ------------------------------------------------------------------ #
     # Added                                                                 #
@@ -189,6 +171,21 @@ def parse_beets_line(line: str) -> ParseResult | None:
     # beet update -M: read error on a file.
     if clean.startswith("error reading "):
         return ParseResult(log_level=LOG_LEVEL_WARN)
+
+    # ------------------------------------------------------------------ #
+    # Album path (import_asis stage) — set current_item, do NOT increment  #
+    # ------------------------------------------------------------------ #
+
+    # A bare absolute path printed once per album by the asis pipeline. The
+    # increment is owned by the import_task_created event above, so this only
+    # updates current_item. No other production line starts with a bare "/"
+    # (added/removed/skip/warn lines all start with a keyword; indented item
+    # paths start with whitespace).
+    if clean.startswith("/"):
+        return ParseResult(
+            log_level=LOG_LEVEL_INFO,
+            update=ProgressUpdate(current_item=clean),
+        )
 
     # ------------------------------------------------------------------ #
     # Default — unrecognized lines are shown but carry no progress data    #

@@ -51,105 +51,91 @@ def test_crlf_returns_none():
 
 
 # --------------------------------------------------------------------------- #
-# Album / singleton start — primary progress marker                             #
+# Album start — primary progress marker (import_task_created + album path)       #
 # --------------------------------------------------------------------------- #
 
 
-class TestLookingUp:
-    """'Looking up: /path' — the primary progress marker in autotag mode.
+class TestImportTaskCreated:
+    """'Sending event: import_task_created' — the per-album progress marker.
 
-    Emitted by lookup_candidates stage (beets/importer/stages.py) once per
-    album directory fed into the pipeline.
+    beets emits this DEBUG event once per import task (= one album in album
+    mode), regardless of autotag. It is the reliable counter under the
+    production -A (--noautotag) command, where 'Looking up:' never appears.
     """
 
     def test_increments_processed(self):
-        result = parse_beets_line("Looking up: /music/Artist/Album")
+        result = parse_beets_line("Sending event: import_task_created")
         assert result is not None
         assert result.update is not None
         assert result.update.increment_processed is True
 
-    def test_sets_current_item(self):
-        result = parse_beets_line("Looking up: /music/Artist/Album")
-        assert result.update.current_item == "/music/Artist/Album"
+    def test_does_not_set_current_item(self):
+        # The album path is on the following line, not this event.
+        result = parse_beets_line("Sending event: import_task_created")
+        assert result.update.current_item is None
 
     def test_log_level_is_info(self):
-        assert parse_beets_line("Looking up: /music/Artist/Album").log_level == LOG_LEVEL_INFO
+        assert parse_beets_line("Sending event: import_task_created").log_level == LOG_LEVEL_INFO
+
+    def test_other_sending_event_lines_do_not_increment(self):
+        """Only import_task_created counts; the many other 'Sending event:' lines do not."""
+        for line in (
+            "Sending event: import_begin",
+            "Sending event: database_change",
+            "Sending event: album_imported",
+            "Sending event: cli_exit",
+        ):
+            result = parse_beets_line(line)
+            assert result.update is None, line
+
+    def test_looking_up_is_no_longer_a_marker(self):
+        """'Looking up:' is autotag-only and never emitted under -A — no progress."""
+        result = parse_beets_line("Looking up: /music/Artist/Album")
+        assert result.update is None
+
+
+class TestAlbumPath:
+    """A bare absolute path (import_asis stage) sets current_item only."""
+
+    def test_sets_current_item(self):
+        result = parse_beets_line("/music/Artist/Album")
+        assert result.update is not None
+        assert result.update.current_item == "/music/Artist/Album"
+
+    def test_does_not_increment(self):
+        # The increment is owned by import_task_created; the path must not double-count.
+        result = parse_beets_line("/music/Artist/Album")
+        assert result.update.increment_processed is False
+
+    def test_log_level_is_info(self):
+        assert parse_beets_line("/music/Artist/Album").log_level == LOG_LEVEL_INFO
 
     def test_path_with_special_chars(self):
-        result = parse_beets_line("Looking up: /music/Björk/Selma Songs")
+        result = parse_beets_line("/music/Björk/Selma Songs")
         assert result.update.current_item == "/music/Björk/Selma Songs"
 
     def test_path_with_year_prefix(self):
-        result = parse_beets_line("Looking up: /music/Artist/2024 - Album Title")
+        result = parse_beets_line("/music/Artist/2024 - Album Title")
         assert result.update.current_item == "/music/Artist/2024 - Album Title"
 
     def test_trailing_newline_stripped(self):
-        result = parse_beets_line("Looking up: /music/Artist/Album\n")
+        result = parse_beets_line("/music/Artist/Album\n")
         assert result.update.current_item == "/music/Artist/Album"
 
-    def test_trailing_crlf_stripped(self):
-        result = parse_beets_line("Looking up: /music/Artist/Album\r\n")
-        assert result.update.current_item == "/music/Artist/Album"
-
-    def test_does_not_match_mid_line(self):
-        """'Looking up' appearing mid-line does not trigger progress update."""
-        result = parse_beets_line("Not Looking up anything")
-        assert result.log_level == LOG_LEVEL_INFO
+    def test_indented_path_is_not_an_album_path(self):
+        """Leading-whitespace paths are not bare album paths → no progress update."""
+        result = parse_beets_line("  /music/Artist/Album/01 - Track.mp3")
         assert result.update is None
-
-
-class TestAlbumPrefix:
-    """'Album: /path' — pretend-mode progress marker (log_files stage)."""
-
-    def test_increments_processed(self):
-        result = parse_beets_line("Album: /music/Artist/Album")
-        assert result.update.increment_processed is True
-
-    def test_sets_current_item(self):
-        result = parse_beets_line("Album: /music/Artist/Album")
-        assert result.update.current_item == "/music/Artist/Album"
-
-    def test_log_level_is_info(self):
-        assert parse_beets_line("Album: /music/Artist/Album").log_level == LOG_LEVEL_INFO
-
-
-class TestSingletonPrefix:
-    """'Singleton: /path' — pretend-mode singleton progress marker."""
-
-    def test_increments_processed(self):
-        result = parse_beets_line("Singleton: /music/Various/track.mp3")
-        assert result.update.increment_processed is True
-
-    def test_sets_current_item(self):
-        result = parse_beets_line("Singleton: /music/Various/track.mp3")
-        assert result.update.current_item == "/music/Various/track.mp3"
-
-    def test_log_level_is_info(self):
-        assert parse_beets_line("Singleton: /music/V/t.mp3").log_level == LOG_LEVEL_INFO
+        assert result.log_level == LOG_LEVEL_INFO
 
 
 # --------------------------------------------------------------------------- #
-# Indented item lines — must NOT double-count                                   #
+# beet update -M item-deleted line                                             #
 # --------------------------------------------------------------------------- #
 
 
-class TestIndentedItems:
-    """Per-item lines inside an album (pretend mode) must not increment processed."""
-
-    def test_no_update_for_indented_path(self):
-        result = parse_beets_line("  /music/Artist/Album/01 - Track.mp3")
-        assert result is not None
-        assert result.update is None
-
-    def test_log_level_is_info(self):
-        result = parse_beets_line("  /music/Artist/Album/01 - Track.mp3")
-        assert result.log_level == LOG_LEVEL_INFO
-
-    def test_no_update_for_deep_path(self):
-        result = parse_beets_line("  /music/Artist/Album/CD1/01.flac")
-        assert result.update is None
-
-    def test_indented_deleted_is_not_info(self):
+class TestUpdateDeleted:
+    def test_indented_deleted_is_removed(self):
         """'  deleted' (beet update -M) is classified as removed, not an item path."""
         result = parse_beets_line("  deleted")
         assert result.log_level == LOG_LEVEL_REMOVED
@@ -340,11 +326,16 @@ class TestInfo:
         assert result.log_level == LOG_LEVEL_INFO
         assert result.update is None
 
-    def test_bare_path_asis_is_info(self):
-        """import_asis stage logs bare paths for non-autotag imports."""
+    def test_bare_path_asis_sets_current_item(self):
+        """import_asis stage logs bare paths for non-autotag imports.
+
+        Classified as info but carries a current_item update (see TestAlbumPath).
+        """
         result = parse_beets_line("/music/Artist/Album")
         assert result.log_level == LOG_LEVEL_INFO
-        assert result.update is None
+        assert result.update is not None
+        assert result.update.current_item == "/music/Artist/Album"
+        assert result.update.increment_processed is False
 
 
 # --------------------------------------------------------------------------- #
@@ -381,55 +372,54 @@ class TestDataTypes:
 
 
 class TestNoDoubleCount:
-    """'Looking up' and 'Album:' are from mutually exclusive pipeline modes;
-    neither should produce two increments for the same album."""
+    """The per-album increment is owned solely by import_task_created; the album
+    path line and per-track lines must not add extra increments."""
 
-    def test_looking_up_increments_exactly_once(self):
-        results = [parse_beets_line("Looking up: /music/Artist/Album")]
+    def test_import_task_created_increments_exactly_once(self):
+        results = [parse_beets_line("Sending event: import_task_created")]
         increments = sum(
             1 for r in results if r is not None and r.update and r.update.increment_processed
         )
         assert increments == 1
 
-    def test_album_prefix_increments_exactly_once(self):
-        results = [parse_beets_line("Album: /music/Artist/Album")]
+    def test_album_path_does_not_increment(self):
+        """The bare album path that follows the event sets current_item only."""
+        results = [parse_beets_line("/music/Artist/Album")]
         increments = sum(
             1 for r in results if r is not None and r.update and r.update.increment_processed
         )
-        assert increments == 1
+        assert increments == 0
 
-    def test_indented_tracks_add_zero_increments(self):
-        """Tracks listed under an album must not produce any increments."""
+    def test_event_plus_path_increments_once(self):
+        """The event + its trailing album path together count as a single album."""
         lines = [
-            "Album: /music/Artist/Album",
-            "  /music/Artist/Album/01 - Track 1.mp3",
-            "  /music/Artist/Album/02 - Track 2.mp3",
-            "  /music/Artist/Album/03 - Track 3.mp3",
+            "Sending event: import_task_created",
+            "/music/Artist/Album",
         ]
         results = [parse_beets_line(line) for line in lines]
         increments = sum(
             1 for r in results if r is not None and r.update and r.update.increment_processed
         )
-        # Only the "Album:" line, not the 3 track lines
         assert increments == 1
 
     def test_full_session_sample_output(self):
-        """Fixed sample of a complete verbose import run.
+        """Fixed sample of a real verbose import run.
 
-        Reproduce what ``beet -v import -A -C -I /music`` writes to the log
-        file for a small library with two albums and one error case.
+        Reproduces what ``beet -v import -A -C -I /music`` writes to the log
+        file for a small two-album library with a duplicate replace — captured
+        from real beets 2.12.0 output (note: no 'Looking up:' lines under -A).
         """
         sample = [
-            # Import phase
-            "importer.session: import started Mon Jan  1 12:00:00 2024",
-            "Looking up: /music/Artist1/Album1",
-            "musicbrainz: Searching for: Artist1 - Album1",
-            "autotag: Best match (0.95):",
-            "Looking up: /music/Artist2/Album2",
-            "musicbrainz: Searching for: Artist2 - Album2",
-            "found duplicates: [3, 4]",
+            # Import phase (two albums, one a duplicate replace)
+            "Sending event: import_begin",
+            "Sending event: import_task_created",
+            "/music/Artist1/Album1",
+            "Sending event: import_task_created",
+            "found duplicates: [1]",
+            "/music/Artist2/Album2",
+            "Replacing item 2: /music/Artist2/Album2/track.mp3",
             "removing 1 old duplicate albums",
-            "deleting duplicate /music/Artist2/Album2/old.mp3",
+            "deleting duplicate /music/Artist1/Album1/old.mp3",
             "No files imported from /music/EmptyDir",
             "Skipped 5 paths.",
             # Update phase (separate Popen)
@@ -437,19 +427,25 @@ class TestNoDoubleCount:
         ]
         results = [parse_beets_line(line) for line in sample]
 
-        # Exactly 2 "Looking up:" → 2 increments
+        # Exactly 2 import_task_created events → 2 increments
         increments = sum(1 for r in results if r and r.update and r.update.increment_processed)
         assert increments == 2
 
+        # current_item tracks the latest album path
+        current_items = [
+            r.update.current_item for r in results if r and r.update and r.update.current_item
+        ]
+        assert current_items == ["/music/Artist1/Album1", "/music/Artist2/Album2"]
+
         # Level mapping
         levels = [r.log_level if r else None for r in results]
-        assert levels[0] == LOG_LEVEL_INFO  # import started
-        assert levels[1] == LOG_LEVEL_INFO  # Looking up → also info
-        assert levels[2] == LOG_LEVEL_INFO  # musicbrainz:
-        assert levels[3] == LOG_LEVEL_INFO  # autotag:
-        assert levels[4] == LOG_LEVEL_INFO  # Looking up
-        assert levels[5] == LOG_LEVEL_INFO  # musicbrainz:
-        assert levels[6] == LOG_LEVEL_INFO  # found duplicates
+        assert levels[0] == LOG_LEVEL_INFO  # import_begin event
+        assert levels[1] == LOG_LEVEL_INFO  # import_task_created
+        assert levels[2] == LOG_LEVEL_INFO  # album1 path
+        assert levels[3] == LOG_LEVEL_INFO  # import_task_created
+        assert levels[4] == LOG_LEVEL_INFO  # found duplicates
+        assert levels[5] == LOG_LEVEL_INFO  # album2 path
+        assert levels[6] == LOG_LEVEL_ADDED  # Replacing item
         assert levels[7] == LOG_LEVEL_REMOVED  # removing duplicate albums
         assert levels[8] == LOG_LEVEL_REMOVED  # deleting duplicate
         assert levels[9] == LOG_LEVEL_WARN  # No files imported
