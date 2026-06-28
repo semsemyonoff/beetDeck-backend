@@ -167,6 +167,9 @@ def _reset_rescan_state():
     state.rescan_phase = "idle"
     state.rescan_result = None
     state.rescan_thread = None
+    state.rescan_processed = 0
+    state.rescan_total = None
+    state.rescan_current_item = None
 
 
 @pytest.fixture(autouse=True)

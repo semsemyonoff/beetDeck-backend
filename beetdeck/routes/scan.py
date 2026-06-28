@@ -33,6 +33,70 @@ bp = Blueprint("scan", __name__)
 # ---------------------------------------------------------------------------
 
 
+_AUDIO_EXTENSIONS = frozenset(
+    {".mp3", ".flac", ".ogg", ".wav", ".aac", ".m4a", ".wma", ".opus", ".aiff", ".ape"}
+)
+
+
+def _count_album_dirs(import_dir):
+    """Count directories directly containing audio files under import_dir.
+
+    Used by full-mode scans to establish a deterministic total for the
+    progress bar.  Returns 0 when import_dir does not exist or is empty.
+    """
+    count = 0
+    try:
+        for _dirpath, _dirnames, filenames in os.walk(import_dir):
+            if any(os.path.splitext(f)[1].lower() in _AUDIO_EXTENSIONS for f in filenames):
+                count += 1
+    except OSError:
+        pass
+    return count
+
+
+def _run_tail_thread(run_id, log_path, stop_event):
+    """Background tail thread: read new log lines and update progress state.
+
+    Polls the run-log file at ~100 ms intervals, feeds each new line to the
+    progress parser, and applies counter updates to shared state under the
+    lock.  Runs until *stop_event* is set, then does one final drain.
+    """
+    from beetdeck.scan_progress import parse_beets_line
+
+    offset = 0
+
+    def _drain():
+        nonlocal offset
+        try:
+            with open(log_path, "rb") as f:
+                f.seek(offset)
+                chunk = f.read()
+            if not chunk:
+                return
+            for line in chunk.decode("utf-8", errors="replace").splitlines():
+                result = parse_beets_line(line)
+                if result is None or result.update is None:
+                    continue
+                with state.rescan_lock:
+                    if state.rescan_run_id != run_id:
+                        return
+                    if result.update.increment_processed:
+                        new_val = state.rescan_processed + 1
+                        if state.rescan_total is not None:
+                            new_val = min(new_val, state.rescan_total)
+                        state.rescan_processed = new_val
+                    if result.update.current_item is not None:
+                        state.rescan_current_item = result.update.current_item
+            offset += len(chunk)
+        except (FileNotFoundError, OSError):
+            pass
+
+    while not stop_event.wait(timeout=0.1):
+        _drain()
+    # Final drain to capture any lines written between the last poll and stop
+    _drain()
+
+
 def _make_run_id():
     """Generate a unique run identifier based on current timestamp."""
     return datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
@@ -190,13 +254,31 @@ def _compute_scan_diff(before, after):
 
 
 def _run_scan_controller(
-    run_id, log_path, inc_flag, import_dir, pre_snap, library_db, library_root
+    run_id, log_path, inc_flag, import_dir, pre_snap, library_db, library_root, mode
 ):
     """Daemon controller thread: run import → compute diff → run update → finalize.
 
     Guards every state write with a run_id staleness check so a stale thread
     (from a superseded test or dismissed scan) never corrupts shared state.
     """
+    # Pre-count album dirs (full mode only) to establish the progress total
+    total = _count_album_dirs(import_dir) if mode == "full" else None
+
+    with state.rescan_lock:
+        if state.rescan_run_id != run_id:
+            return
+        state.rescan_total = total
+        state.rescan_processed = 0
+        state.rescan_current_item = None
+
+    stop_tail = threading.Event()
+    tail_t = threading.Thread(
+        target=_run_tail_thread,
+        args=(run_id, log_path, stop_tail),
+        daemon=True,
+    )
+    tail_t.start()
+
     try:
         with open(log_path, "wb") as log_file:
             # Phase 1: beet import
@@ -277,6 +359,9 @@ def _run_scan_controller(
                 "added": [],
                 "removed": [],
             }
+    finally:
+        stop_tail.set()
+        tail_t.join(timeout=5)
 
 
 # ---------------------------------------------------------------------------
@@ -318,10 +403,13 @@ def rescan():
         state.rescan_log_path = log_path
         state.rescan_phase = "importing"
         state.rescan_result = None
+        state.rescan_processed = 0
+        state.rescan_total = None
+        state.rescan_current_item = None
     log.info("Starting rescan (%s) run_id=%s", mode, run_id)
     t = threading.Thread(
         target=_run_scan_controller,
-        args=(run_id, log_path, inc, import_dir, pre_snap, library_db, library_root),
+        args=(run_id, log_path, inc, import_dir, pre_snap, library_db, library_root, mode),
         daemon=True,
     )
     with state.rescan_lock:

@@ -2,13 +2,16 @@
 
 import os
 import sqlite3
+import threading
 
 import beetdeck.state as state
 from beetdeck.routes.scan import (
     _compute_scan_diff,
+    _count_album_dirs,
     _make_log_path,
     _make_run_id,
     _normalize_absolute_paths,
+    _run_tail_thread,
     _take_snapshot,
     _take_snapshot_db,
 )
@@ -24,6 +27,9 @@ def _reset_scan_state():
     state.rescan_phase = "idle"
     state.rescan_result = None
     state.rescan_thread = None
+    state.rescan_processed = 0
+    state.rescan_total = None
+    state.rescan_current_item = None
 
 
 def _make_mock_proc(mocker, returncode=0):
@@ -706,3 +712,220 @@ class TestScanOpenAPISpec:
         resp = client.post("/api/rescan")
         assert resp.status_code == 200
         assert resp.get_json()["mode"] == "quick"
+
+
+# ---------------------------------------------------------------------------
+# _count_album_dirs helper
+# ---------------------------------------------------------------------------
+
+
+class TestCountAlbumDirs:
+    def test_returns_zero_for_missing_dir(self, tmp_path):
+        assert _count_album_dirs(str(tmp_path / "nonexistent")) == 0
+
+    def test_returns_zero_for_empty_dir(self, tmp_path):
+        assert _count_album_dirs(str(tmp_path)) == 0
+
+    def test_counts_dirs_with_audio_files(self, tmp_path):
+        album = tmp_path / "Artist" / "Album"
+        album.mkdir(parents=True)
+        (album / "01.mp3").write_bytes(b"")
+        assert _count_album_dirs(str(tmp_path)) == 1
+
+    def test_counts_multiple_album_dirs(self, tmp_path):
+        for name in ("AlbumA", "AlbumB", "AlbumC"):
+            d = tmp_path / "Artist" / name
+            d.mkdir(parents=True)
+            (d / "01.flac").write_bytes(b"")
+        assert _count_album_dirs(str(tmp_path)) == 3
+
+    def test_ignores_non_audio_files(self, tmp_path):
+        d = tmp_path / "Artist" / "Album"
+        d.mkdir(parents=True)
+        (d / "cover.jpg").write_bytes(b"")
+        (d / "info.txt").write_bytes(b"")
+        assert _count_album_dirs(str(tmp_path)) == 0
+
+    def test_counts_dir_only_once_even_with_multiple_audio_files(self, tmp_path):
+        d = tmp_path / "Album"
+        d.mkdir()
+        for name in ("01.mp3", "02.mp3", "03.flac"):
+            (d / name).write_bytes(b"")
+        assert _count_album_dirs(str(tmp_path)) == 1
+
+    def test_recognises_all_supported_extensions(self, tmp_path):
+        exts = [".mp3", ".flac", ".ogg", ".wav", ".aac", ".m4a", ".wma", ".opus", ".aiff", ".ape"]
+        for ext in exts:
+            d = tmp_path / f"Album{ext}"
+            d.mkdir()
+            (d / f"track{ext}").write_bytes(b"")
+        assert _count_album_dirs(str(tmp_path)) == len(exts)
+
+
+# ---------------------------------------------------------------------------
+# _run_tail_thread helper
+# ---------------------------------------------------------------------------
+
+
+class TestTailThread:
+    def setup_method(self):
+        _reset_scan_state()
+
+    def _write_log(self, tmp_path, content):
+        log_file = tmp_path / "run.log"
+        log_file.write_bytes(content.encode("utf-8"))
+        return str(log_file)
+
+    def _run_thread_once(self, run_id, log_path):
+        """Run the tail thread with a pre-set stop event so it drains exactly once."""
+        stop_event = threading.Event()
+        stop_event.set()
+        t = threading.Thread(target=_run_tail_thread, args=(run_id, log_path, stop_event))
+        t.start()
+        t.join(timeout=5)
+
+    def test_increments_processed_on_looking_up_line(self, tmp_path):
+        run_id = "test-run-001"
+        state.rescan_run_id = run_id
+        state.rescan_processed = 0
+        log_path = self._write_log(tmp_path, "Looking up: /music/Artist/Album\n")
+
+        self._run_thread_once(run_id, log_path)
+
+        assert state.rescan_processed == 1
+
+    def test_sets_current_item_from_looking_up_line(self, tmp_path):
+        run_id = "test-run-002"
+        state.rescan_run_id = run_id
+        log_path = self._write_log(tmp_path, "Looking up: /music/Artist/Album\n")
+
+        self._run_thread_once(run_id, log_path)
+
+        assert state.rescan_current_item == "/music/Artist/Album"
+
+    def test_increments_processed_for_each_album(self, tmp_path):
+        run_id = "test-run-003"
+        state.rescan_run_id = run_id
+        lines = "\n".join(f"Looking up: /music/Album{i}" for i in range(5)) + "\n"
+        log_path = self._write_log(tmp_path, lines)
+
+        self._run_thread_once(run_id, log_path)
+
+        assert state.rescan_processed == 5
+
+    def test_does_not_exceed_total(self, tmp_path):
+        run_id = "test-run-004"
+        state.rescan_run_id = run_id
+        state.rescan_total = 2
+        lines = "\n".join(f"Looking up: /music/Album{i}" for i in range(5)) + "\n"
+        log_path = self._write_log(tmp_path, lines)
+
+        self._run_thread_once(run_id, log_path)
+
+        assert state.rescan_processed == 2
+
+    def test_handles_missing_log_file(self):
+        run_id = "test-run-005"
+        state.rescan_run_id = run_id
+        # Thread should not crash even if the file never appears
+        self._run_thread_once(run_id, "/tmp/nonexistent-beetdeck-test-log.log")
+        assert state.rescan_processed == 0
+
+    def test_stops_on_stale_run_id(self, tmp_path):
+        run_id = "test-run-006"
+        state.rescan_run_id = "different-run-id"  # stale
+        lines = "\n".join(f"Looking up: /music/Album{i}" for i in range(5)) + "\n"
+        log_path = self._write_log(tmp_path, lines)
+
+        self._run_thread_once(run_id, log_path)
+
+        # State must not be updated because run_id doesn't match
+        assert state.rescan_processed == 0
+        assert state.rescan_current_item is None
+
+    def test_ignores_unrecognized_lines(self, tmp_path):
+        run_id = "test-run-007"
+        state.rescan_run_id = run_id
+        content = "Some random beets output line\nAnother irrelevant line\n"
+        log_path = self._write_log(tmp_path, content)
+
+        self._run_thread_once(run_id, log_path)
+
+        assert state.rescan_processed == 0
+        assert state.rescan_current_item is None
+
+    def test_final_drain_captures_lines_written_after_stop(self, tmp_path):
+        """Tail thread must do a final drain after stop_event is set."""
+        run_id = "test-run-008"
+        state.rescan_run_id = run_id
+        log_path = self._write_log(tmp_path, "Looking up: /music/FinalAlbum\n")
+
+        # stop_event already set → skips polling loop, only runs final drain
+        stop_event = threading.Event()
+        stop_event.set()
+        t = threading.Thread(target=_run_tail_thread, args=(run_id, log_path, stop_event))
+        t.start()
+        t.join(timeout=5)
+
+        assert state.rescan_processed == 1
+
+    def test_total_none_does_not_cap_processed(self, tmp_path):
+        run_id = "test-run-009"
+        state.rescan_run_id = run_id
+        state.rescan_total = None  # quick/indeterminate
+        lines = "\n".join(f"Looking up: /music/Album{i}" for i in range(10)) + "\n"
+        log_path = self._write_log(tmp_path, lines)
+
+        self._run_thread_once(run_id, log_path)
+
+        assert state.rescan_processed == 10
+
+
+# ---------------------------------------------------------------------------
+# Progress counters set by the controller
+# ---------------------------------------------------------------------------
+
+
+class TestProgressCounters:
+    def setup_method(self):
+        _reset_scan_state()
+
+    def _start_and_wait(self, client, mocker, mode="quick", count_album_dirs_return=0):
+        mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            return_value=_make_mock_proc(mocker),
+        )
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
+        mocker.patch("beetdeck.routes.scan._take_snapshot_db", return_value={})
+        mocker.patch(
+            "beetdeck.routes.scan._count_album_dirs",
+            return_value=count_album_dirs_return,
+        )
+        resp = client.post(f"/api/rescan?mode={mode}")
+        assert resp.status_code == 200
+        state.rescan_thread.join(timeout=5)
+        return resp
+
+    def test_quick_scan_total_is_none_after_run(self, client, mocker):
+        self._start_and_wait(client, mocker, mode="quick")
+        assert state.rescan_total is None
+
+    def test_full_scan_sets_total_from_count(self, client, mocker):
+        self._start_and_wait(client, mocker, mode="full", count_album_dirs_return=7)
+        assert state.rescan_total == 7
+
+    def test_full_scan_total_zero_when_no_audio(self, client, mocker):
+        self._start_and_wait(client, mocker, mode="full", count_album_dirs_return=0)
+        assert state.rescan_total == 0
+
+    def test_new_scan_resets_processed_and_current_item(self, client, mocker):
+        # Simulate leftover state from a previous run
+        state.rescan_processed = 99
+        state.rescan_current_item = "/old/path"
+
+        self._start_and_wait(client, mocker, mode="quick")
+
+        # After the controller runs, processed/current_item start at 0/None
+        # (no log lines written by mock Popen, so tail thread finds nothing)
+        assert state.rescan_processed == 0
+        assert state.rescan_current_item is None

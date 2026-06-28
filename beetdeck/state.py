@@ -20,6 +20,9 @@ rescan_log_path = None  # str | None — path to the current run log file
 rescan_phase = "idle"  # idle | importing | updating | done | error
 rescan_result = None  # dict | None — persisted finish-state (status, returncode, added, removed)
 rescan_thread = None  # threading.Thread | None — controller thread (used in tests)
+rescan_processed = 0  # int — albums/singletons processed so far in current run
+rescan_total = None  # int | None — total expected albums (None for quick/indeterminate)
+rescan_current_item = None  # str | None — most recent item path being processed
 
 # Metadata batch write state
 metadata_write_lock = threading.Lock()
