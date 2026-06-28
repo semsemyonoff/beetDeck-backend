@@ -28,6 +28,7 @@ beetDeck/
 │   ├── api.py              # SpecTree singleton + 422 validation-error hook (OpenAPI/Scalar)
 │   ├── state.py            # Shared in-memory state (globals)
 │   ├── scan_progress.py    # Pure parser: beets verbose line → progress update + log level
+│   ├── item_fields.py      # Shared field-classification: READONLY_FIELDS, ALBUM_LEVEL_FIELDS, is_editable(), is_album_level(), build_field_catalog(), coerce_value()
 │   ├── utils.py            # Shared helpers and constants
 │   ├── schemas/            # spectree/pydantic request & response models (one module per blueprint)
 │   │   ├── __init__.py     # re-exports shared models
@@ -71,6 +72,7 @@ beetDeck/
 │   ├── test_bpm.py         # BPM compute route: success, 404, cross-album guard, compute failure
 │   ├── test_identify.py
 │   ├── test_items.py
+│   ├── test_item_fields.py  # unit tests for beetdeck/item_fields.py
 │   ├── test_meta.py
 │   ├── test_scan.py
 │   ├── test_scan_progress.py  # unit tests for the pure progress parser (beetdeck/scan_progress.py)
@@ -146,6 +148,8 @@ The application uses module-level globals for shared state across request thread
 - `GET /api/rescan/status` — rescan status; fields: `phase` (`idle`|`importing`|`updating`|`done`|`error`), `processed` (int), `total` (int|null — null for quick/incremental scans), `current_item` (str|null), `run_id` (str|null), plus `added`/`removed`/`returncode` when finished; finished result persists until dismissed
 - `GET /api/rescan/log` — incremental log tail; query params: `run_id`, `offset` (byte); returns `{text, offset}` (new end offset for next fetch); 404 on unknown `run_id`; safe when file is mid-write
 - `POST /api/rescan/dismiss` — clear the persisted finished result (idempotent); next `status` returns `idle`
+- `GET /api/items/fields` — catalog of all beets `Item._fields` entries: `[{name, type, editable, album_level}]`; `type` is `model_type.__name__` (`int`/`float`/`str`/`list`/`bool`/`bytes`); read-only/`mb_*`/computed fields have `editable: false`; album-level fields (`album`, `albumartist`, `year`, `genres`) have `album_level: true`
+- `PATCH /api/items/<item_id>/tags` — per-track free tag editor write: `{fields: {name: value}}`; validates each field against `item_fields.is_editable()` → `400 {"error":"field not editable: <name>"}` for blocked fields; coerces by `model_type` (`int`/`float`/`list`/`bool`/`str`); empty value → clears field (`del item[name]`, uniform for fixed and flex attrs); writes under `metadata_write_lock`, `item.store()` + `_try_write_item()`; file-write failure → `warnings` list + HTTP 200 (partial-success contract); `404 {"error":"Item not found"}` for unknown id
 - `GET /api/items/untagged` — list items belonging to albums with NULL/empty albumartist
 - `POST /api/items/<item_id>/metadata` — update artist/album on a single untagged item
 - `POST /api/items/metadata-batch` — album/folder-aware batch write: `{album:{album?,albumartist?,year?,genre?}, items:[{id,title?,artist?,track?,disc?},…]}`; resolves distinct album_ids from items, writes album-level fields via the beets Album object (clears untagged filter), then writes per-item overrides; returns `{status, warnings:[], albums_updated:[]}`; ≥1 item id required when album fields present
