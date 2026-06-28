@@ -19,7 +19,7 @@ dependencies = [
     "spectree",
     # beets is pinned to an exact release tarball (not on PyPI for this version);
     # bump the tag here to change the beets version — single source of truth.
-    "beets @ https://github.com/beetbox/beets/archive/refs/tags/v2.11.0.tar.gz",
+    "beets @ https://github.com/beetbox/beets/archive/refs/tags/v2.12.0.tar.gz",
     "librosa",
     "resampy",
 ]
