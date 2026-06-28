@@ -31,8 +31,12 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
-      # The suite mocks every subprocess (beets/ffmpeg) call, so no system
-      # packages are needed — just the Python deps.
+      # Most of the suite mocks subprocesses, but the format-replace integration
+      # tests (tests/test_scan_replace.py) run a real `beet import` and generate
+      # audio with ffmpeg, so ffmpeg must be on PATH for them to run rather than
+      # skip (see the shutil.which guard in that module).
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: Install project (dev extras)
         run: pip install -e ".[dev]"
       - name: Run tests
