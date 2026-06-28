@@ -1,6 +1,8 @@
 """Tests for scan blueprint routes."""
 
+import io
 import os
+import re
 import sqlite3
 import subprocess
 import threading
@@ -34,11 +36,17 @@ def _reset_scan_state():
     state.rescan_current_item = None
 
 
-def _make_mock_proc(mocker, returncode=0):
-    """Return a mock Popen object that completes with the given returncode."""
+def _make_mock_proc(mocker, returncode=0, output=b""):
+    """Return a mock Popen object that completes with the given returncode.
+
+    ``output`` is the bytes the controller's pump loop reads from ``stdout``
+    (the merged stdout/stderr pipe); it is exposed via a real ``BytesIO`` so
+    ``stream.readline`` behaves like a closed pipe once drained.
+    """
     proc = mocker.MagicMock()
     proc.returncode = returncode
     proc.wait.return_value = None
+    proc.stdout = io.BytesIO(output)
     return proc
 
 
@@ -768,16 +776,46 @@ class TestScanController:
         assert state.rescan_log_path is not None
         assert os.path.isfile(state.rescan_log_path)
 
-    def test_popen_receives_log_file_as_stdout(self, client, mocker):
+    def test_popen_pipes_stdout_with_stderr_merged(self, client, mocker):
         popen_mock, _ = self._start_and_wait(client, mocker)
-        # Both Popen calls must write to the run-log file with stderr merged in,
-        # otherwise the verbose output the progress parser depends on is lost.
+        # Both Popen calls must pipe stdout (so the controller can timestamp each
+        # line into the run-log file) with stderr merged in, otherwise the
+        # verbose output the progress parser depends on is lost.
         assert popen_mock.call_args_list, "expected at least one Popen call"
         for call in popen_mock.call_args_list:
-            stdout = call.kwargs.get("stdout")
-            assert stdout is not None
-            assert getattr(stdout, "name", None) == state.rescan_log_path
+            assert call.kwargs.get("stdout") == subprocess.PIPE
             assert call.kwargs.get("stderr") == subprocess.STDOUT
+
+    def test_log_lines_are_timestamped(self, client, mocker):
+        # The controller stamps every subprocess output line with a
+        # "[YYYY-MM-DD HH:MM:SS] " prefix as it copies it into the run log.
+        proc = _make_mock_proc(
+            mocker,
+            output=b"Sending event: import_task_created\n/music/Artist/Album\n",
+        )
+        mocker.patch("beetdeck.routes.scan.subprocess.Popen", return_value=proc)
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
+        mocker.patch("beetdeck.routes.scan._take_snapshot_db", return_value={})
+
+        # Quick mode leaves total=None so the processed counter is not clamped
+        # to a pre-counted album total (0 for the test import dir).
+        resp = client.post("/api/rescan?mode=quick")
+        assert resp.status_code == 200
+        state.rescan_thread.join(timeout=5)
+
+        with open(state.rescan_log_path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        ts_re = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
+        assert lines, "expected log content"
+        for line in lines:
+            assert ts_re.match(line), f"line not timestamped: {line!r}"
+        # Original beets text is preserved after the prefix.
+        assert lines[0].endswith("Sending event: import_task_created")
+        assert lines[1].endswith("/music/Artist/Album")
+        # And the tail parser still tracks progress through the prefix: the
+        # import_task_created marker incremented the processed counter.
+        assert state.rescan_processed == 1
+        assert state.rescan_current_item == "/music/Artist/Album"
 
     def test_status_transitions_to_done(self, client, mocker):
         self._start_and_wait(client, mocker)

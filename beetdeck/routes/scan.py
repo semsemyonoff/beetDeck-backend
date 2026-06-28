@@ -7,6 +7,7 @@ Endpoints:
 
 import datetime
 import os
+import re
 import sqlite3
 import subprocess
 import threading
@@ -39,6 +40,32 @@ bp = Blueprint("scan", __name__)
 _AUDIO_EXTENSIONS = frozenset(
     {".mp3", ".flac", ".ogg", ".wav", ".aac", ".m4a", ".wma", ".opus", ".aiff", ".ape"}
 )
+
+# Per-line timestamp framing for the run log. Every subprocess output line is
+# written to the log file prefixed with "[YYYY-MM-DD HH:MM:SS] " so the scan-log
+# UI can show when each line was emitted. The tail-thread parser strips this
+# prefix (via _LOG_TS_PREFIX_RE) before matching beets output, so the framing is
+# invisible to progress parsing. Keep this format in sync with the frontend's
+# LOG_TS_RE (services/frontend/src/src/lib/scan.js).
+_LOG_TS_FMT = "[%Y-%m-%d %H:%M:%S] "
+_LOG_TS_PREFIX_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
+
+
+def _pump_stream_to_log(stream, log_file):
+    """Copy a subprocess's merged stdout/stderr into the run log, stamping each
+    line with a wall-clock timestamp.
+
+    Reads line by line (blocking until the stream hits EOF, i.e. the process
+    closed its stdout) and flushes after every line so the tail thread and the
+    ``/api/rescan/log`` endpoint observe complete, timely output. Replaces the
+    previous direct ``stdout=log_file`` redirect, which gave the OS no place to
+    inject a per-line timestamp.
+    """
+    for raw_line in iter(stream.readline, b""):
+        stamp = datetime.datetime.now().strftime(_LOG_TS_FMT).encode("utf-8")
+        log_file.write(stamp)
+        log_file.write(raw_line)
+        log_file.flush()
 
 
 def _count_album_dirs(import_dir):
@@ -90,6 +117,10 @@ def _run_tail_thread(run_id, log_path, stop_event):
                     return
                 consumed = chunk[: last_nl + 1]
             for line in consumed.decode("utf-8", errors="replace").splitlines():
+                # Strip our own "[timestamp] " framing so the parser sees the raw
+                # beets line it was written against (markers like the bare album
+                # path and "Sending event: …" must match from the start).
+                line = _LOG_TS_PREFIX_RE.sub("", line)
                 result = parse_beets_line(line)
                 if result is None or result.update is None:
                     continue
@@ -302,11 +333,14 @@ def _run_scan_controller(
             log.info("Rescan %s: import %s", run_id, " ".join(import_cmd))
             import_proc = subprocess.Popen(
                 import_cmd,
-                stdout=log_file,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
             )
             with state.rescan_lock:
                 state.rescan_proc = import_proc
+            # Drain the pipe to the log file (timestamping each line); returns
+            # when the process closes stdout, then reap it for the return code.
+            _pump_stream_to_log(import_proc.stdout, log_file)
             import_proc.wait()
             import_rc = import_proc.returncode
 
@@ -341,11 +375,12 @@ def _run_scan_controller(
                 log.info("Rescan %s: update", run_id)
                 update_proc = subprocess.Popen(
                     update_cmd,
-                    stdout=log_file,
+                    stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                 )
                 with state.rescan_lock:
                     state.rescan_proc = update_proc
+                _pump_stream_to_log(update_proc.stdout, log_file)
                 update_proc.wait()
                 update_rc = update_proc.returncode
                 final_phase = "error" if update_rc != 0 else "done"
