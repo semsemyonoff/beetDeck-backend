@@ -317,25 +317,30 @@ def _run_scan_controller(
             post_snap = _take_snapshot_db(library_db, library_root)
             added, removed = _compute_scan_diff(pre_snap, post_snap)
 
-            # Phase 2: beet update — guard before starting the second process
-            with state.rescan_lock:
-                if state.rescan_run_id != run_id:
-                    return
-                state.rescan_phase = "updating"
+            # Phase 2: beet update — only when import changed something
+            if added or removed:
+                with state.rescan_lock:
+                    if state.rescan_run_id != run_id:
+                        return
+                    state.rescan_phase = "updating"
 
-            update_cmd = ["beet", "-v", "update", "-M"]
-            log.info("Rescan %s: update", run_id)
-            update_proc = subprocess.Popen(
-                update_cmd,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-            )
-            with state.rescan_lock:
-                state.rescan_proc = update_proc
-            update_proc.wait()
-            update_rc = update_proc.returncode
+                update_cmd = ["beet", "-v", "update", "-M"]
+                log.info("Rescan %s: update", run_id)
+                update_proc = subprocess.Popen(
+                    update_cmd,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                )
+                with state.rescan_lock:
+                    state.rescan_proc = update_proc
+                update_proc.wait()
+                update_rc = update_proc.returncode
+                final_phase = "error" if update_rc != 0 else "done"
+            else:
+                update_rc = 0
+                final_phase = "done"
+                log.info("Rescan %s: no changes, skipping update", run_id)
 
-            final_phase = "error" if update_rc != 0 else "done"
             with state.rescan_lock:
                 if state.rescan_run_id != run_id:
                     return

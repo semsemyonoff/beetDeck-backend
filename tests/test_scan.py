@@ -714,7 +714,10 @@ class TestScanController:
     def setup_method(self):
         _reset_scan_state()
 
-    def _start_and_wait(self, client, mocker, returncode=0, mode="quick"):
+    # after_snap: snapshot returned by _take_snapshot_db (post-import state).
+    # Defaults to {} (empty — no diff, update skipped).  Pass a non-empty dict
+    # to simulate items being added/removed so the update step is triggered.
+    def _start_and_wait(self, client, mocker, returncode=0, mode="quick", after_snap=None):
         """Start a scan with a mock Popen and wait for the controller to finish."""
         proc = _make_mock_proc(mocker, returncode=returncode)
         popen_mock = mocker.patch(
@@ -722,15 +725,21 @@ class TestScanController:
             return_value=proc,
         )
         mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
-        mocker.patch("beetdeck.routes.scan._take_snapshot_db", return_value={})
+        mocker.patch(
+            "beetdeck.routes.scan._take_snapshot_db",
+            return_value=after_snap if after_snap is not None else {},
+        )
 
         resp = client.post(f"/api/rescan?mode={mode}")
         assert resp.status_code == 200
         state.rescan_thread.join(timeout=5)
         return popen_mock, resp
 
+    # Non-empty diff so the update Popen fires.
+    _AFTER_SNAP_WITH_ITEM = {42: ("New Track", "Artist", 1, "/music/new.mp3")}
+
     def test_import_then_update_sequence_runs(self, client, mocker):
-        popen_mock, _ = self._start_and_wait(client, mocker)
+        popen_mock, _ = self._start_and_wait(client, mocker, after_snap=self._AFTER_SNAP_WITH_ITEM)
         assert popen_mock.call_count == 2
         import_cmd = popen_mock.call_args_list[0][0][0]
         update_cmd = popen_mock.call_args_list[1][0][0]
@@ -833,13 +842,113 @@ class TestScanController:
             side_effect=[import_proc, update_proc],
         )
         mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
-        mocker.patch("beetdeck.routes.scan._take_snapshot_db", return_value={})
+        # Non-empty diff so the update Popen is actually invoked.
+        mocker.patch(
+            "beetdeck.routes.scan._take_snapshot_db",
+            return_value={42: ("Track", "Artist", 1, "/music/new.mp3")},
+        )
 
         client.post("/api/rescan")
         state.rescan_thread.join(timeout=5)
 
         assert state.rescan_phase == "error"
         assert state.rescan_result["returncode"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 6: conditional update (update only when diff is non-empty)
+# ---------------------------------------------------------------------------
+
+
+class TestConditionalUpdate:
+    def setup_method(self):
+        _reset_scan_state()
+
+    def _start_and_wait(self, client, mocker, import_rc=0, update_rc=0, after_snap=None):
+        """Start a scan and block until the controller thread finishes.
+
+        after_snap: the value returned by _take_snapshot_db (post-import DB
+        state).  Empty dict → no diff → update skipped.  Non-empty dict → diff
+        detected → update runs.
+        """
+        import_proc = _make_mock_proc(mocker, returncode=import_rc)
+        update_proc = _make_mock_proc(mocker, returncode=update_rc)
+        popen_mock = mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            side_effect=[import_proc, update_proc],
+        )
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
+        mocker.patch(
+            "beetdeck.routes.scan._take_snapshot_db",
+            return_value=after_snap if after_snap is not None else {},
+        )
+        resp = client.post("/api/rescan")
+        assert resp.status_code == 200
+        state.rescan_thread.join(timeout=5)
+        return popen_mock
+
+    _AFTER_SNAP = {42: ("Track", "Artist", 1, "/music/new.mp3")}
+
+    def test_update_runs_when_items_added(self, client, mocker):
+        popen_mock = self._start_and_wait(client, mocker, after_snap=self._AFTER_SNAP)
+        assert popen_mock.call_count == 2
+        update_cmd = popen_mock.call_args_list[1][0][0]
+        assert "update" in update_cmd
+
+    def test_update_runs_when_items_removed(self, client, mocker):
+        # pre_snap has an item; post_snap is empty → item removed
+        mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            return_value=_make_mock_proc(mocker),
+        )
+        mocker.patch(
+            "beetdeck.routes.scan._take_snapshot",
+            return_value={1: ("Gone", "Artist", 1, "/music/gone.mp3")},
+        )
+        mocker.patch("beetdeck.routes.scan._take_snapshot_db", return_value={})
+        resp = client.post("/api/rescan")
+        assert resp.status_code == 200
+        state.rescan_thread.join(timeout=5)
+        # Verify via state: update ran, scan reached done (returncode=0 from mock)
+        assert state.rescan_phase == "done"
+        assert state.rescan_result["removed"] != [] or state.rescan_result["added"] != []
+
+    def test_update_skipped_when_no_diff(self, client, mocker):
+        # Both snapshots empty → diff is empty → update must not run
+        popen_mock = self._start_and_wait(client, mocker, after_snap={})
+        assert popen_mock.call_count == 1
+        only_cmd = popen_mock.call_args_list[0][0][0]
+        assert "import" in only_cmd
+
+    def test_noop_scan_reaches_done(self, client, mocker):
+        # No diff → update skipped; status must still reach done with rc=0
+        self._start_and_wait(client, mocker, after_snap={})
+        assert state.rescan_phase == "done"
+        assert state.rescan_result["status"] == "done"
+        assert state.rescan_result["returncode"] == 0
+
+    def test_noop_scan_result_has_empty_diff(self, client, mocker):
+        self._start_and_wait(client, mocker, after_snap={})
+        assert state.rescan_result["added"] == []
+        assert state.rescan_result["removed"] == []
+
+    def test_phase_updating_set_only_when_update_runs(self, client, mocker):
+        # No diff: controller never sets phase to "updating", ends at "done".
+        self._start_and_wait(client, mocker, after_snap={})
+        assert state.rescan_phase == "done"
+        # With a diff: update runs, still ends at "done".
+        _reset_scan_state()
+        popen_mock2 = self._start_and_wait(client, mocker, after_snap=self._AFTER_SNAP)
+        assert popen_mock2.call_count == 2
+        assert state.rescan_phase == "done"
+
+    def test_update_failure_propagates_error_when_diff(self, client, mocker):
+        popen_mock = self._start_and_wait(
+            client, mocker, import_rc=0, update_rc=3, after_snap=self._AFTER_SNAP
+        )
+        assert popen_mock.call_count == 2
+        assert state.rescan_phase == "error"
+        assert state.rescan_result["returncode"] == 3
 
 
 # ---------------------------------------------------------------------------
