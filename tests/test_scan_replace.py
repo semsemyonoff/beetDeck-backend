@@ -51,6 +51,17 @@ import textwrap
 
 import pytest
 
+# These are real-subprocess integration tests: they generate audio with ffmpeg
+# and run an actual `beet import`. CI deliberately installs no system packages
+# (see .github/workflows/ci.yml — the unit suite mocks every subprocess), so
+# ffmpeg is absent there; skip the whole module rather than error at fixture
+# setup. The backend container has ffmpeg, so these still run via `dwe`.
+pytestmark = pytest.mark.skipif(
+    shutil.which("ffmpeg") is None,
+    reason="ffmpeg not in PATH (format-replace integration tests need real audio)",
+)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
