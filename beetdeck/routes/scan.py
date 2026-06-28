@@ -18,6 +18,7 @@ from beetdeck import state
 from beetdeck.api import api
 from beetdeck.schemas.common import ErrorResponse
 from beetdeck.schemas.scan import (
+    RescanDismissResponse,
     RescanQuery,
     RescanRunningResponse,
     RescanStartResponse,
@@ -427,11 +428,38 @@ def rescan_status():
     with state.rescan_lock:
         phase = state.rescan_phase
         result = state.rescan_result
+        processed = state.rescan_processed
+        total = state.rescan_total
+        current_item = state.rescan_current_item
+        run_id = state.rescan_run_id
+
+    progress = {
+        "phase": phase,
+        "processed": processed,
+        "total": total,
+        "current_item": current_item,
+        "run_id": run_id,
+    }
+
     if phase == "idle":
-        return jsonify({"status": "idle"})
+        return jsonify({"status": "idle", **progress})
     if phase in ("importing", "updating"):
-        return jsonify({"status": "running"})
-    # phase is "done" or "error" — return the persisted result
+        return jsonify({"status": "running", **progress})
+    # phase is "done" or "error" — return the persisted result with progress fields
     if result is not None:
-        return jsonify(result)
-    return jsonify({"status": "idle"})
+        return jsonify({**result, **progress})
+    return jsonify({"status": "idle", **progress})
+
+
+@bp.route("/api/rescan/dismiss", methods=["POST"])
+@api.validate(
+    resp=Response(HTTP_200=RescanDismissResponse),
+    tags=["scan"],
+)
+def rescan_dismiss():
+    """Clear a persisted finished result so the next status poll returns idle."""
+    with state.rescan_lock:
+        if state.rescan_phase in ("done", "error"):
+            state.rescan_phase = "idle"
+            state.rescan_result = None
+    return jsonify({"status": "ok"})

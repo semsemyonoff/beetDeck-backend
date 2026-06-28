@@ -532,6 +532,178 @@ class TestRescanStatus:
         assert resp1.get_json()["status"] == "done"
         assert resp2.get_json()["status"] == "done"
 
+    def test_running_includes_phase_and_progress_fields(self, client):
+        state.rescan_phase = "importing"
+        state.rescan_processed = 3
+        state.rescan_total = 10
+        state.rescan_current_item = "/music/Artist/Album"
+        state.rescan_run_id = "20240101-120000-000000"
+
+        data = client.get("/api/rescan/status").get_json()
+        assert data["status"] == "running"
+        assert data["phase"] == "importing"
+        assert data["processed"] == 3
+        assert data["total"] == 10
+        assert data["current_item"] == "/music/Artist/Album"
+        assert data["run_id"] == "20240101-120000-000000"
+
+    def test_running_full_total_set(self, client):
+        state.rescan_phase = "importing"
+        state.rescan_total = 7
+
+        data = client.get("/api/rescan/status").get_json()
+        assert data["total"] == 7
+
+    def test_running_quick_total_is_null(self, client):
+        state.rescan_phase = "importing"
+        state.rescan_total = None
+
+        data = client.get("/api/rescan/status").get_json()
+        assert data["total"] is None
+
+    def test_updating_phase_includes_phase_field(self, client):
+        state.rescan_phase = "updating"
+        state.rescan_processed = 5
+        state.rescan_total = 5
+
+        data = client.get("/api/rescan/status").get_json()
+        assert data["status"] == "running"
+        assert data["phase"] == "updating"
+        assert data["processed"] == 5
+
+    def test_done_status_includes_run_id(self, client):
+        state.rescan_phase = "done"
+        state.rescan_result = {"status": "done", "returncode": 0, "added": [], "removed": []}
+        state.rescan_run_id = "test-run-123"
+        state.rescan_processed = 8
+        state.rescan_total = 8
+
+        data = client.get("/api/rescan/status").get_json()
+        assert data["run_id"] == "test-run-123"
+        assert data["phase"] == "done"
+        assert data["processed"] == 8
+        assert data["total"] == 8
+
+    def test_error_phase_persists_with_progress_fields(self, client):
+        state.rescan_phase = "error"
+        state.rescan_result = {"status": "error", "returncode": 1, "added": [], "removed": []}
+        state.rescan_run_id = "err-run-456"
+
+        data = client.get("/api/rescan/status").get_json()
+        assert data["status"] == "error"
+        assert data["phase"] == "error"
+        assert data["run_id"] == "err-run-456"
+
+    def test_idle_response_includes_phase_field(self, client):
+        data = client.get("/api/rescan/status").get_json()
+        assert data["status"] == "idle"
+        assert data["phase"] == "idle"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/rescan/dismiss
+# ---------------------------------------------------------------------------
+
+
+class TestRescanDismiss:
+    def setup_method(self):
+        _reset_scan_state()
+
+    def test_dismiss_done_returns_ok(self, client):
+        state.rescan_phase = "done"
+        state.rescan_result = {"status": "done", "returncode": 0, "added": [], "removed": []}
+
+        resp = client.post("/api/rescan/dismiss")
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "ok"
+
+    def test_dismiss_done_sets_idle(self, client):
+        state.rescan_phase = "done"
+        state.rescan_result = {"status": "done", "returncode": 0, "added": [], "removed": []}
+
+        client.post("/api/rescan/dismiss")
+
+        data = client.get("/api/rescan/status").get_json()
+        assert data["status"] == "idle"
+
+    def test_dismiss_error_sets_idle(self, client):
+        state.rescan_phase = "error"
+        state.rescan_result = {"status": "error", "returncode": 1, "added": [], "removed": []}
+
+        client.post("/api/rescan/dismiss")
+
+        data = client.get("/api/rescan/status").get_json()
+        assert data["status"] == "idle"
+
+    def test_dismiss_when_idle_is_noop(self, client):
+        resp = client.post("/api/rescan/dismiss")
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "ok"
+
+        data = client.get("/api/rescan/status").get_json()
+        assert data["status"] == "idle"
+
+    def test_dismiss_is_idempotent(self, client):
+        state.rescan_phase = "done"
+        state.rescan_result = {"status": "done", "returncode": 0, "added": [], "removed": []}
+
+        resp1 = client.post("/api/rescan/dismiss")
+        resp2 = client.post("/api/rescan/dismiss")
+        assert resp1.status_code == 200
+        assert resp2.status_code == 200
+
+        data = client.get("/api/rescan/status").get_json()
+        assert data["status"] == "idle"
+
+    def test_dismiss_does_not_affect_running_scan(self, client):
+        state.rescan_phase = "importing"
+
+        client.post("/api/rescan/dismiss")
+
+        assert state.rescan_phase == "importing"
+        data = client.get("/api/rescan/status").get_json()
+        assert data["status"] == "running"
+
+    def test_dismiss_clears_result_from_state(self, client):
+        state.rescan_phase = "done"
+        state.rescan_result = {"status": "done", "returncode": 0, "added": [], "removed": []}
+
+        client.post("/api/rescan/dismiss")
+
+        assert state.rescan_phase == "idle"
+        assert state.rescan_result is None
+
+    def test_dismiss_done_repeated_polls_return_idle(self, client):
+        state.rescan_phase = "done"
+        state.rescan_result = {"status": "done", "returncode": 0, "added": [], "removed": []}
+
+        client.post("/api/rescan/dismiss")
+
+        for _ in range(3):
+            data = client.get("/api/rescan/status").get_json()
+            assert data["status"] == "idle"
+
+    def test_new_scan_allowed_after_dismiss(self, client, mocker):
+        state.rescan_phase = "done"
+        state.rescan_result = {"status": "done", "returncode": 0, "added": [], "removed": []}
+
+        client.post("/api/rescan/dismiss")
+
+        mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            return_value=_make_mock_proc(mocker),
+        )
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
+
+        resp = client.post("/api/rescan")
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "started"
+
+    def test_dismiss_documented_in_openapi(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        assert "/api/rescan/dismiss" in spec["paths"]
+        assert "post" in spec["paths"]["/api/rescan/dismiss"]
+
 
 # ---------------------------------------------------------------------------
 # Controller thread integration tests
