@@ -97,6 +97,7 @@ def album_detail(album_id):
                 "has_lrc": bool(lrc_path),
                 "has_lyrics": bool(it["lyrics"]) or bool(lrc_path and _read_lrc_file(lrc_path)),
                 "has_bpm": bool(it["bpm"]),
+                "bpm": it["bpm"] or None,
             }
         )
 

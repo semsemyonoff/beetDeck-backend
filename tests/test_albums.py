@@ -317,6 +317,7 @@ class TestAlbumDetail:
         assert resp.status_code == 200
         track = resp.get_json()["tracks"][0]
         assert track["has_bpm"] is True
+        assert track["bpm"] == 128
 
     def test_has_bpm_false_when_bpm_null(self, client, db_path):
         album_id = insert_album(db_path, album="No BPM Album", albumartist="Artist NB")
@@ -326,6 +327,7 @@ class TestAlbumDetail:
         track = resp.get_json()["tracks"][0]
         assert track["has_bpm"] is False
         assert "has_bpm" in track
+        assert track["bpm"] is None
 
     def test_has_bpm_false_when_bpm_zero(self, client, db_path):
         album_id = insert_album(db_path, album="Zero BPM Album", albumartist="Artist ZB")
@@ -334,6 +336,7 @@ class TestAlbumDetail:
         assert resp.status_code == 200
         track = resp.get_json()["tracks"][0]
         assert track["has_bpm"] is False
+        assert track["bpm"] is None
 
 
 # ---------------------------------------------------------------------------
