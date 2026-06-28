@@ -32,8 +32,10 @@ from spectree import Response
 
 from beetdeck import state
 from beetdeck.api import api
+from beetdeck.item_fields import build_field_catalog
 from beetdeck.schemas.common import ErrorResponse
 from beetdeck.schemas.items import (
+    ItemFieldsResponse,
     ItemsApplyResponse,
     ItemsCandidateBody,
     ItemsConfirmResponse,
@@ -293,6 +295,19 @@ def untagged_items():
             }
         )
     return jsonify(result)
+
+
+@bp.route("/api/items/fields")
+@api.validate(
+    resp=Response(HTTP_200=ItemFieldsResponse, HTTP_500=ErrorResponse),
+    tags=["items"],
+)
+def items_fields():
+    """Return the catalog of all known beets Item fixed fields with editability flags."""
+    try:
+        return jsonify(build_field_catalog())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @bp.route("/api/items/<int:item_id>/metadata", methods=["POST"])

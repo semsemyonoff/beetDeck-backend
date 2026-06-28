@@ -1,8 +1,9 @@
 """Pydantic models for the ``items`` blueprint's OpenAPI spec.
 
-Covers the seven routes in ``routes/items.py`` (untagged-item management):
+Covers the routes in ``routes/items.py`` (untagged-item management):
 
 - ``GET  /api/items/untagged``                       — list loose/untagged items
+- ``GET  /api/items/fields``                         — beets field catalog
 - ``POST /api/items/<id>/metadata``                  — edit a single item
 - ``POST /api/items/metadata-batch``                 — album/per-track batch write
 - ``POST /api/items/identify``                       — start a background autotag task
@@ -53,6 +54,8 @@ from beetdeck.schemas.identify import ApplyResponse, Candidate
 __all__ = [
     "ApplyResponse",
     "Candidate",
+    "ItemField",
+    "ItemFieldsResponse",
     "ItemsApplyResponse",
     "ItemsConfirmResponse",
     "ItemsIdentifyBody",
@@ -71,6 +74,24 @@ __all__ = [
 
 # The apply preview reuses identify's diff shape verbatim.
 ItemsApplyResponse = ApplyResponse
+
+
+# ---------------------------------------------------------------------------
+# Field catalog (GET /api/items/fields)
+# ---------------------------------------------------------------------------
+
+
+class ItemField(BaseModel):
+    """One entry in the beets field catalog."""
+
+    name: str = Field(description="Beets field name.")
+    type: str = Field(description="Python type name (int, float, str, list, bool, bytes).")
+    editable: bool = Field(description="False for read-only/system fields.")
+    album_level: bool = Field(description="True when editing touches album-level metadata.")
+
+
+class ItemFieldsResponse(RootModel[list[ItemField]]):
+    """``GET /api/items/fields`` — a bare top-level JSON array of field descriptors."""
 
 
 # ---------------------------------------------------------------------------

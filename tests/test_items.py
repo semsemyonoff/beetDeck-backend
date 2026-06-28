@@ -4,6 +4,59 @@ import beetdeck.state as state
 from tests.conftest import insert_album, insert_item
 
 # ---------------------------------------------------------------------------
+# GET /api/items/fields
+# ---------------------------------------------------------------------------
+
+
+class TestItemsFields:
+    def test_returns_200_with_list(self, client):
+        resp = client.get("/api/items/fields")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert isinstance(data, list)
+        assert len(data) > 0
+
+    def test_each_entry_has_required_shape(self, client):
+        data = client.get("/api/items/fields").get_json()
+        for entry in data:
+            assert "name" in entry
+            assert "type" in entry
+            assert "editable" in entry
+            assert "album_level" in entry
+            assert isinstance(entry["editable"], bool)
+            assert isinstance(entry["album_level"], bool)
+
+    def test_known_editable_field_present_and_editable(self, client):
+        data = client.get("/api/items/fields").get_json()
+        by_name = {e["name"]: e for e in data}
+        assert "title" in by_name
+        assert by_name["title"]["editable"] is True
+
+    def test_length_is_readonly(self, client):
+        data = client.get("/api/items/fields").get_json()
+        by_name = {e["name"]: e for e in data}
+        assert "length" in by_name
+        assert by_name["length"]["editable"] is False
+
+    def test_mb_trackid_is_readonly(self, client):
+        data = client.get("/api/items/fields").get_json()
+        by_name = {e["name"]: e for e in data}
+        assert "mb_trackid" in by_name
+        assert by_name["mb_trackid"]["editable"] is False
+
+    def test_album_has_album_level_true(self, client):
+        data = client.get("/api/items/fields").get_json()
+        by_name = {e["name"]: e for e in data}
+        assert "album" in by_name
+        assert by_name["album"]["album_level"] is True
+
+    def test_title_has_album_level_false(self, client):
+        data = client.get("/api/items/fields").get_json()
+        by_name = {e["name"]: e for e in data}
+        assert by_name["title"]["album_level"] is False
+
+
+# ---------------------------------------------------------------------------
 # POST /api/items/metadata-batch
 # ---------------------------------------------------------------------------
 
