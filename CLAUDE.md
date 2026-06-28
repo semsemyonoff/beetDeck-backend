@@ -5,16 +5,17 @@
 beetDeck is a web UI for browsing and managing a [beets](https://beets.io) music
 library. This repository is the **backend**: a Flask REST API that serves the
 data and a single-page app. It provides album browsing, cover art management,
-genre editing, lyrics fetching, MusicBrainz identification, and library
-rescanning. The React SPA that consumes this API lives in a **separate
-repository**; its production build is served by Flask from `beetdeck/static/dist/`.
+genre editing, lyrics fetching, BPM computation (beets `autobpm` plugin),
+MusicBrainz identification, and library rescanning. The React SPA that consumes
+this API lives in a **separate repository**; its production build is served by
+Flask from `beetdeck/static/dist/`.
 
 ## Tech Stack
 
 - **Language/framework**: Python 3.10+ (runs on 3.14), Flask, gunicorn (1 worker, 4 threads)
 - **Database**: SQLite (beets `library.db`), read mostly via direct SQL; the beets `Library` object is used for write operations
-- **Key dependencies**: beets 2.11.0, Pillow, pylast (Last.fm), requests, beautifulsoup4, pyacoustid
-- **Audio tooling**: ffmpeg (used by pyacoustid for fingerprinting)
+- **Key dependencies**: beets 2.11.0, Pillow, pylast (Last.fm), requests, beautifulsoup4, pyacoustid, librosa + resampy (BPM computation via the `autobpm` plugin; CPU-bound, ~9s/track)
+- **Audio tooling**: ffmpeg (used by pyacoustid for fingerprinting and by librosa for audio loading during BPM computation)
 - **Dependencies & tooling config**: all declared in `pyproject.toml` (runtime under `[project]`, dev tools under the `dev` extra; pytest and ruff configured in the same file)
 
 ## Project Structure
@@ -35,6 +36,7 @@ beetDeck/
 │   │   ├── cover.py
 │   │   ├── genres.py
 │   │   ├── lyrics.py
+│   │   ├── bpm.py          # TrackBpmComputeResponse (POST .../bpm/compute)
 │   │   ├── identify.py
 │   │   ├── items.py
 │   │   ├── meta.py
@@ -46,6 +48,7 @@ beetDeck/
 │   │   ├── cover.py        # Cover art CRUD
 │   │   ├── genres.py       # Genre fetch/confirm/save
 │   │   ├── lyrics.py       # Lyrics CRUD (single + bulk)
+│   │   ├── bpm.py          # POST /api/album/<id>/track/<id>/bpm/compute
 │   │   ├── identify.py     # Identify/status/apply/confirm
 │   │   ├── items.py        # Untagged item management: metadata edit, group identify
 │   │   ├── meta.py         # GET /api/version (beetDeck + beets versions)
@@ -64,6 +67,7 @@ beetDeck/
 │   ├── test_cover.py
 │   ├── test_genres.py
 │   ├── test_lyrics.py
+│   ├── test_bpm.py         # BPM compute route: success, 404, cross-album guard, compute failure
 │   ├── test_identify.py
 │   ├── test_items.py
 │   ├── test_meta.py
@@ -103,7 +107,7 @@ The application uses module-level globals for shared state across request thread
 - `GET /api/library` — album list
 - `GET /api/search` — search albums/artists
 - `GET /api/artist` — artist albums
-- `GET /api/album/<id>` — album detail with tracks; each track carries `has_lrc` (a sidecar `.lrc` file exists) and `has_lyrics` (embedded lyrics OR a readable non-empty `.lrc` — same definition as `GET .../lyrics`, distinct from `has_lrc`)
+- `GET /api/album/<id>` — album detail with tracks; each track carries `has_lrc` (a sidecar `.lrc` file exists), `has_lyrics` (embedded lyrics OR a readable non-empty `.lrc` — same definition as `GET .../lyrics`, distinct from `has_lrc`), and `has_bpm` (`bool(item.bpm)` — true when a BPM value is stored in the beets DB)
 - `GET /api/album/<id>/track/<id>/tags` — track tags
 - `GET /api/album/<id>/cover` — serve current cover image
 - `POST /api/album/<id>/cover/fetch` — fetch cover from online sources (preview)
@@ -121,6 +125,7 @@ The application uses module-level globals for shared state across request thread
 - `POST /api/album/<id>/lyrics/fetch` — bulk fetch lyrics for all tracks
 - `POST /api/album/<id>/lyrics/confirm` — bulk confirm lyrics for selected tracks (`{item_ids:[…]}`); returns `{written, written_item_ids:[…], retained_lrc_item_ids:[…], failed:[…]}` — `written_item_ids` lists the ids actually written (a missing stash entry / wrong-album id is silently skipped, so it can be shorter than `item_ids` with `failed` empty); `retained_lrc_item_ids` is the subset of written ids whose sidecar `.lrc` removal failed (file still on disk)
 - `POST /api/album/<id>/lyrics/embed` — bulk embed .lrc files for all tracks
+- `POST /api/album/<id>/track/<id>/bpm/compute` — compute and write BPM for a single track via the beets `autobpm` plugin (librosa-based); always recomputes (`force=True`); returns `{"status":"ok","bpm":<int>}`; returns `400 {"error":"BPM computation failed"}` when librosa cannot produce a result (plugin swallows the librosa error internally — failure is detected by value, not exception)
 - `POST /api/album/<id>/ignore` — toggle beetdeck_ignored flag (returns `{"ignored": bool}`)
 - `POST /api/album/<id>/identify` — start background identification
 - `GET /api/album/<id>/identify/status` — poll identification status
@@ -216,6 +221,7 @@ make fmt       # ruff format
   - Genres stored as native list field (`genres`); `_format_genre()` in `beetdeck/utils.py` handles both list and legacy string values
   - Library paths stored relative to DB root; `_resolve_path()` in `beetdeck/utils.py` joins `LIBRARY_ROOT` + relative path (absolute paths pass through unchanged)
   - Lyrics plugin: separate `lyrics_backend`/`lyrics_url`/`lyrics_language` fields (no "Source: URL" suffix in lyrics text)
+  - autobpm plugin (librosa): `auto: no` so it never runs on import; `calculate_bpm` swallows librosa errors internally and never raises, so the BPM route detects failure by value (pre-clears `item.bpm`, requires a non-null value after) rather than by exception
 - 2.11.0 bump notes: no breaking API changes for this app (verified against the modules we import — `autotag.tag_album`, art embedding, `plugins`, `library.Library`, `util.{bytestring_path,move,unique_path}`, `config`). New `subtitle` media-tag field (ID3 `TIT3`) was added to `Item`, so it is included in `_ROLLBACK_FIELDS` (`beetdeck/routes/items.py`)
   - Cover embedding imports `embed_album` from `beetsplug._utils.art` (in `beetdeck/utils.py`); the old `beets.art` shim is deprecated and slated for removal in beets 3.0.0. Cover tests patch `beetsplug._utils.art.embed_album`.
 

@@ -310,6 +310,34 @@ class TestAlbumDetail:
         assert track["has_lyrics"] is False
         assert "has_lyrics" in track
 
+    def test_has_bpm_true_when_bpm_set(self, client, db_path):
+        album_id = insert_album(db_path, album="BPM Album", albumartist="Artist BPM")
+        insert_item(db_path, album_id, title="BPM Track", bpm=128)
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        track = resp.get_json()["tracks"][0]
+        assert track["has_bpm"] is True
+        assert track["bpm"] == 128
+
+    def test_has_bpm_false_when_bpm_null(self, client, db_path):
+        album_id = insert_album(db_path, album="No BPM Album", albumartist="Artist NB")
+        insert_item(db_path, album_id, title="No BPM Track")
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        track = resp.get_json()["tracks"][0]
+        assert track["has_bpm"] is False
+        assert "has_bpm" in track
+        assert track["bpm"] is None
+
+    def test_has_bpm_false_when_bpm_zero(self, client, db_path):
+        album_id = insert_album(db_path, album="Zero BPM Album", albumartist="Artist ZB")
+        insert_item(db_path, album_id, title="Zero BPM Track", bpm=0)
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        track = resp.get_json()["tracks"][0]
+        assert track["has_bpm"] is False
+        assert track["bpm"] is None
+
 
 # ---------------------------------------------------------------------------
 # GET /api/album/<id>/track/<id>/tags
