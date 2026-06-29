@@ -48,6 +48,17 @@ def is_album_level(name: str) -> bool:
     return name in ALBUM_LEVEL_FIELDS
 
 
+def is_known_field(name: str) -> bool:
+    """Return True when ``name`` is a beets Item fixed (DB column) field.
+
+    Unknown names are only writable when they already exist as a flexible attr
+    on the specific item being patched — that membership check belongs to the
+    handler, which has the loaded item. The catalog/dropdown only ever offers
+    known fields, so arbitrary new flexible keys must be rejected at the API.
+    """
+    return name in Item._fields
+
+
 def build_field_catalog() -> list[dict]:
     """Return one entry per beets Item fixed field: {name, type, editable, album_level}."""
     catalog = []
@@ -97,7 +108,7 @@ def coerce_value(name: str, raw):
 
     if type_name == "list":
         if isinstance(raw, list):
-            return [s.strip() for s in raw if str(s).strip()]
+            return [str(s).strip() for s in raw if str(s).strip()]
         return [g.strip() for g in str(raw).split(",") if g.strip()]
 
     if type_name == "bool":

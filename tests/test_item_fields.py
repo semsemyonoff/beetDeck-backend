@@ -231,6 +231,17 @@ class TestCoerceValue:
         result = coerce_value("genres", ["Rock", "Pop"])
         assert result == ["Rock", "Pop"]
 
+    def test_genres_list_with_non_string_elements_coerced(self):
+        # A JSON list may carry non-string scalars (the request schema uses
+        # Any). Coercion must stringify each element rather than raise
+        # AttributeError on int.strip() (which would surface as a 500).
+        result = coerce_value("genres", ["Rock", 1, 2.5, True])
+        assert result == ["Rock", "1", "2.5", "True"]
+
+    def test_genres_list_with_non_string_filters_empty(self):
+        result = coerce_value("genres", ["Rock", "", "  "])
+        assert result == ["Rock"]
+
     def test_genres_strips_whitespace(self):
         result = coerce_value("genres", " Rock , Pop ")
         assert result == ["Rock", "Pop"]

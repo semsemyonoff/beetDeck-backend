@@ -32,7 +32,13 @@ from spectree import Response
 
 from beetdeck import state
 from beetdeck.api import api
-from beetdeck.item_fields import CLEAR, build_field_catalog, coerce_value, is_editable
+from beetdeck.item_fields import (
+    CLEAR,
+    build_field_catalog,
+    coerce_value,
+    is_editable,
+    is_known_field,
+)
 from beetdeck.schemas.common import ErrorResponse
 from beetdeck.schemas.items import (
     ItemFieldsResponse,
@@ -347,6 +353,14 @@ def patch_item_tags(item_id):
             item = lib.get_item(item_id)
             if item is None:
                 return jsonify({"error": "Item not found"}), 404
+
+            # Only known beets fields or flexible attrs already present on this
+            # item are writable. Reject arbitrary new keys so direct API callers
+            # cannot create brand-new flexible attrs (the dropdown offers known
+            # fields only; existing flex attrs stay editable/clearable).
+            for name in fields:
+                if not is_known_field(name) and name not in item:
+                    return jsonify({"error": f"field not editable: {name}"}), 400
 
             for name, raw in fields.items():
                 try:
