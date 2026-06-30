@@ -1,8 +1,9 @@
 """Pydantic models for the ``items`` blueprint's OpenAPI spec.
 
-Covers the seven routes in ``routes/items.py`` (untagged-item management):
+Covers the routes in ``routes/items.py`` (untagged-item management):
 
 - ``GET  /api/items/untagged``                       — list loose/untagged items
+- ``GET  /api/items/fields``                         — beets field catalog
 - ``POST /api/items/<id>/metadata``                  — edit a single item
 - ``POST /api/items/metadata-batch``                 — album/per-track batch write
 - ``POST /api/items/identify``                       — start a background autotag task
@@ -44,6 +45,8 @@ imported from ``schemas.identify``: items identification uses the exact same
 models are shared rather than duplicated.
 """
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 from beetdeck.schemas.identify import ApplyResponse, Candidate
@@ -53,11 +56,15 @@ from beetdeck.schemas.identify import ApplyResponse, Candidate
 __all__ = [
     "ApplyResponse",
     "Candidate",
+    "ItemField",
+    "ItemFieldsResponse",
     "ItemsApplyResponse",
     "ItemsConfirmResponse",
     "ItemsIdentifyBody",
     "ItemsIdentifyResponse",
     "ItemsIdentifyStatusResponse",
+    "ItemTagsPatch",
+    "ItemTagsPatchResponse",
     "MetadataBatchAlbum",
     "MetadataBatchBody",
     "MetadataBatchItem",
@@ -71,6 +78,57 @@ __all__ = [
 
 # The apply preview reuses identify's diff shape verbatim.
 ItemsApplyResponse = ApplyResponse
+
+
+# ---------------------------------------------------------------------------
+# Field catalog (GET /api/items/fields)
+# ---------------------------------------------------------------------------
+
+
+class ItemField(BaseModel):
+    """One entry in the beets field catalog."""
+
+    name: str = Field(description="Beets field name.")
+    type: str = Field(description="Python type name (int, float, str, list, bool, bytes).")
+    editable: bool = Field(description="False for read-only/system fields.")
+    album_level: bool = Field(description="True when editing touches album-level metadata.")
+
+
+class ItemFieldsResponse(RootModel[list[ItemField]]):
+    """``GET /api/items/fields`` — a bare top-level JSON array of field descriptors."""
+
+
+# ---------------------------------------------------------------------------
+# Per-track tag PATCH (PATCH /api/items/<id>/tags)
+# ---------------------------------------------------------------------------
+
+
+class ItemTagsPatch(BaseModel):
+    """JSON body for ``PATCH /api/items/<id>/tags``.
+
+    ``fields`` is a delta of changed/added tag values.  Keys are beets field
+    names; values are raw scalars (string, number, bool, or null).  Unknown or
+    read-only field names are rejected by the handler (→ ``400``), not here, so
+    the dict value type is left open (``Any``).  ``extra="forbid"`` rejects
+    top-level keys other than ``fields`` → ``422``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    fields: dict[str, Any] = Field(description="Delta of field name → new value pairs.")
+
+
+class ItemTagsPatchResponse(BaseModel):
+    """``PATCH /api/items/<id>/tags`` — per-track tag write result.
+
+    ``warnings`` collects non-fatal file-write failures; the DB write has
+    already been committed (partial-success, HTTP 200).
+    """
+
+    status: str = Field(description="Always 'ok' on success.")
+    warnings: list[str] = Field(
+        default_factory=list, description="Non-fatal issues (e.g. file tag write failed)."
+    )
 
 
 # ---------------------------------------------------------------------------
