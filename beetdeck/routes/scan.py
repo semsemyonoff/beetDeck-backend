@@ -5,10 +5,12 @@ Endpoints:
     GET   /api/rescan/status  — poll rescan status
 """
 
-import shlex
+import datetime
+import os
+import re
 import sqlite3
 import subprocess
-import sys
+import threading
 
 from flask import Blueprint, current_app, jsonify, request
 from spectree import Response
@@ -17,12 +19,15 @@ from beetdeck import state
 from beetdeck.api import api
 from beetdeck.schemas.common import ErrorResponse
 from beetdeck.schemas.scan import (
+    RescanDismissResponse,
+    RescanLogQuery,
+    RescanLogResponse,
     RescanQuery,
     RescanRunningResponse,
     RescanStartResponse,
     RescanStatusResponse,
 )
-from beetdeck.utils import _get_ro_conn, _resolve_path, log
+from beetdeck.utils import _decode_path, _get_ro_conn, _resolve_path, log
 
 bp = Blueprint("scan", __name__)
 
@@ -32,8 +37,130 @@ bp = Blueprint("scan", __name__)
 # ---------------------------------------------------------------------------
 
 
+_AUDIO_EXTENSIONS = frozenset(
+    {".mp3", ".flac", ".ogg", ".wav", ".aac", ".m4a", ".wma", ".opus", ".aiff", ".ape"}
+)
+
+# Per-line timestamp framing for the run log. Every subprocess output line is
+# written to the log file prefixed with "[YYYY-MM-DD HH:MM:SS] " so the scan-log
+# UI can show when each line was emitted. The tail-thread parser strips this
+# prefix (via _LOG_TS_PREFIX_RE) before matching beets output, so the framing is
+# invisible to progress parsing. Keep this format in sync with the frontend's
+# LOG_TS_RE (services/frontend/src/src/lib/scan.js).
+_LOG_TS_FMT = "[%Y-%m-%d %H:%M:%S] "
+_LOG_TS_PREFIX_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
+
+
+def _pump_stream_to_log(stream, log_file):
+    """Copy a subprocess's merged stdout/stderr into the run log, stamping each
+    line with a wall-clock timestamp.
+
+    Reads line by line (blocking until the stream hits EOF, i.e. the process
+    closed its stdout) and flushes after every line so the tail thread and the
+    ``/api/rescan/log`` endpoint observe complete, timely output. Replaces the
+    previous direct ``stdout=log_file`` redirect, which gave the OS no place to
+    inject a per-line timestamp.
+    """
+    for raw_line in iter(stream.readline, b""):
+        stamp = datetime.datetime.now().strftime(_LOG_TS_FMT).encode("utf-8")
+        log_file.write(stamp)
+        log_file.write(raw_line)
+        log_file.flush()
+
+
+def _count_album_dirs(import_dir):
+    """Count directories directly containing audio files under import_dir.
+
+    Used by full-mode scans to establish a deterministic total for the
+    progress bar.  Returns 0 when import_dir does not exist or is empty.
+    """
+    count = 0
+    try:
+        for _dirpath, _dirnames, filenames in os.walk(import_dir):
+            if any(os.path.splitext(f)[1].lower() in _AUDIO_EXTENSIONS for f in filenames):
+                count += 1
+    except OSError:
+        pass
+    return count
+
+
+def _run_tail_thread(run_id, log_path, stop_event):
+    """Background tail thread: read new log lines and update progress state.
+
+    Polls the run-log file at ~100 ms intervals, feeds each new line to the
+    progress parser, and applies counter updates to shared state under the
+    lock.  Runs until *stop_event* is set, then does one final drain.
+    """
+    from beetdeck.scan_progress import parse_beets_line
+
+    offset = 0
+
+    def _drain(final=False):
+        nonlocal offset
+        try:
+            with open(log_path, "rb") as f:
+                f.seek(offset)
+                chunk = f.read()
+            if not chunk:
+                return
+            # The log is read mid-write, so a chunk often ends in the middle of
+            # a line. Process only complete lines (up to the last newline) and
+            # carry the trailing partial into the next drain — otherwise a marker
+            # split across two reads is parsed as two non-matching fragments and
+            # the album is never counted. The final drain processes everything,
+            # since the subprocess has exited and no more bytes will arrive.
+            if final:
+                consumed = chunk
+            else:
+                last_nl = chunk.rfind(b"\n")
+                if last_nl == -1:
+                    return
+                consumed = chunk[: last_nl + 1]
+            for line in consumed.decode("utf-8", errors="replace").splitlines():
+                # Strip our own "[timestamp] " framing so the parser sees the raw
+                # beets line it was written against (markers like the bare album
+                # path and "Sending event: …" must match from the start).
+                line = _LOG_TS_PREFIX_RE.sub("", line)
+                result = parse_beets_line(line)
+                if result is None or result.update is None:
+                    continue
+                with state.rescan_lock:
+                    if state.rescan_run_id != run_id:
+                        return
+                    if result.update.increment_processed:
+                        new_val = state.rescan_processed + 1
+                        if state.rescan_total is not None:
+                            new_val = min(new_val, state.rescan_total)
+                        state.rescan_processed = new_val
+                    if result.update.current_item is not None:
+                        state.rescan_current_item = result.update.current_item
+            offset += len(consumed)
+        except (FileNotFoundError, OSError):
+            pass
+
+    while not stop_event.wait(timeout=0.1):
+        _drain()
+    # Final drain to capture any lines written between the last poll and stop
+    _drain(final=True)
+
+
+def _make_run_id():
+    """Generate a unique run identifier based on current timestamp."""
+    return datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+
+
+def _make_log_path(run_id, library_db):
+    """Return the log file path for a run, creating the scan-logs dir on demand."""
+    log_dir = os.path.join(os.path.dirname(library_db), "scan-logs")
+    os.makedirs(log_dir, exist_ok=True)
+    return os.path.join(log_dir, f"{run_id}.log")
+
+
 def _take_snapshot():
-    """Snapshot current items {id: (title, artist, album_id, path)} from the DB."""
+    """Snapshot current items {id: (title, artist, album_id, path)} from the DB.
+
+    Requires Flask app context. Use _take_snapshot_db() from background threads.
+    """
     try:
         conn = _get_ro_conn()
         try:
@@ -43,6 +170,29 @@ def _take_snapshot():
         return {
             r["id"]: (r["title"], r["artist"], r["album_id"], _resolve_path(r["path"]))
             for r in rows
+        }
+    except Exception:
+        return {}
+
+
+def _take_snapshot_db(library_db, library_root):
+    """Snapshot current items without requiring Flask app context (for threads)."""
+    try:
+        conn = sqlite3.connect(f"file:{library_db}?mode=ro", uri=True, timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute("SELECT id, title, artist, album_id, path FROM items").fetchall()
+        finally:
+            conn.close()
+
+        def _resolve(path):
+            p = _decode_path(path)
+            if not p or os.path.isabs(p):
+                return p
+            return os.path.join(library_root, p) if library_root else p
+
+        return {
+            r["id"]: (r["title"], r["artist"], r["album_id"], _resolve(r["path"])) for r in rows
         }
     except Exception:
         return {}
@@ -150,6 +300,126 @@ def _compute_scan_diff(before, after):
     return added, removed
 
 
+def _run_scan_controller(
+    run_id, log_path, inc_flag, import_dir, pre_snap, library_db, library_root, mode
+):
+    """Daemon controller thread: run import → compute diff → run update → finalize.
+
+    Guards every state write with a run_id staleness check so a stale thread
+    (from a superseded test or dismissed scan) never corrupts shared state.
+    """
+    # Pre-count album dirs (full mode only) to establish the progress total
+    total = _count_album_dirs(import_dir) if mode == "full" else None
+
+    with state.rescan_lock:
+        if state.rescan_run_id != run_id:
+            return
+        state.rescan_total = total
+        state.rescan_processed = 0
+        state.rescan_current_item = None
+
+    stop_tail = threading.Event()
+    tail_t = threading.Thread(
+        target=_run_tail_thread,
+        args=(run_id, log_path, stop_tail),
+        daemon=True,
+    )
+    tail_t.start()
+
+    try:
+        with open(log_path, "wb") as log_file:
+            # Phase 1: beet import
+            import_cmd = ["beet", "-v", "import", "-A", "-C", inc_flag, import_dir]
+            log.info("Rescan %s: import %s", run_id, " ".join(import_cmd))
+            import_proc = subprocess.Popen(
+                import_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            with state.rescan_lock:
+                state.rescan_proc = import_proc
+            # Drain the pipe to the log file (timestamping each line); returns
+            # when the process closes stdout, then reap it for the return code.
+            _pump_stream_to_log(import_proc.stdout, log_file)
+            import_proc.wait()
+            import_rc = import_proc.returncode
+
+            # Bail out if state was reset (e.g. test teardown or new scan started)
+            with state.rescan_lock:
+                if state.rescan_run_id != run_id:
+                    return
+                if import_rc != 0:
+                    state.rescan_proc = None
+                    state.rescan_phase = "error"
+                    state.rescan_result = {
+                        "status": "error",
+                        "returncode": import_rc,
+                        "added": [],
+                        "removed": [],
+                    }
+                    log.error("Rescan %s: import failed (rc=%d)", run_id, import_rc)
+                    return
+
+            # Compute diff (no lock needed — pure local computation)
+            post_snap = _take_snapshot_db(library_db, library_root)
+            added, removed = _compute_scan_diff(pre_snap, post_snap)
+
+            # Phase 2: beet update — only when import changed something
+            if added or removed:
+                with state.rescan_lock:
+                    if state.rescan_run_id != run_id:
+                        return
+                    state.rescan_phase = "updating"
+
+                update_cmd = ["beet", "-v", "update", "-M"]
+                log.info("Rescan %s: update", run_id)
+                update_proc = subprocess.Popen(
+                    update_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+                with state.rescan_lock:
+                    state.rescan_proc = update_proc
+                _pump_stream_to_log(update_proc.stdout, log_file)
+                update_proc.wait()
+                update_rc = update_proc.returncode
+                final_phase = "error" if update_rc != 0 else "done"
+            else:
+                update_rc = 0
+                final_phase = "done"
+                log.info("Rescan %s: no changes, skipping update", run_id)
+
+            with state.rescan_lock:
+                if state.rescan_run_id != run_id:
+                    return
+                state.rescan_proc = None
+                state.rescan_phase = final_phase
+                state.rescan_result = {
+                    "status": final_phase,
+                    "returncode": update_rc,
+                    "added": added,
+                    "removed": removed,
+                }
+            log.info("Rescan %s: %s (rc=%d)", run_id, final_phase, update_rc)
+
+    except Exception:
+        log.exception("Rescan %s: controller thread crashed", run_id)
+        with state.rescan_lock:
+            if state.rescan_run_id != run_id:
+                return
+            state.rescan_proc = None
+            state.rescan_phase = "error"
+            state.rescan_result = {
+                "status": "error",
+                "returncode": -1,
+                "added": [],
+                "removed": [],
+            }
+    finally:
+        stop_tail.set()
+        tail_t.join(timeout=5)
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -173,23 +443,34 @@ def rescan():
     library_db = current_app.config["LIBRARY_DB"]
     library_root = current_app.config.get("LIBRARY_ROOT", "")
     with state.rescan_lock:
-        if state.rescan_proc and state.rescan_proc.poll() is None:
+        if state.rescan_phase in ("importing", "updating"):
             return jsonify({"status": "running"}), 409
         try:
             _normalize_absolute_paths(library_db, library_root)
         except Exception:
             log.exception("Rescan preflight: path normalization failed")
             return jsonify({"error": "Failed to normalize library paths before rescan"}), 500
-        state.rescan_snapshot = _take_snapshot()
+        pre_snap = _take_snapshot()
         inc = "-i" if mode == "quick" else "-I"
-        cmd = f"beet -v import -A -C {inc} {shlex.quote(import_dir)} && beet -v update -M"
-        log.info("Starting rescan (%s): %s", mode, cmd)
-        state.rescan_proc = subprocess.Popen(
-            cmd,
-            shell=True,
-            stdout=sys.stderr,
-            stderr=sys.stderr,
-        )
+        run_id = _make_run_id()
+        log_path = _make_log_path(run_id, library_db)
+        state.rescan_snapshot = pre_snap
+        state.rescan_run_id = run_id
+        state.rescan_log_path = log_path
+        state.rescan_phase = "importing"
+        state.rescan_result = None
+        state.rescan_processed = 0
+        state.rescan_total = None
+        state.rescan_current_item = None
+    log.info("Starting rescan (%s) run_id=%s", mode, run_id)
+    t = threading.Thread(
+        target=_run_scan_controller,
+        args=(run_id, log_path, inc, import_dir, pre_snap, library_db, library_root, mode),
+        daemon=True,
+    )
+    with state.rescan_lock:
+        state.rescan_thread = t
+    t.start()
     return jsonify({"status": "started", "mode": mode})
 
 
@@ -200,23 +481,69 @@ def rescan():
 )
 def rescan_status():
     with state.rescan_lock:
-        proc = state.rescan_proc
-        snapshot = state.rescan_snapshot
-    if proc is None:
-        return jsonify({"status": "idle"})
-    if proc.poll() is None:
-        return jsonify({"status": "running"})
-    # Process finished: compute diff, then clear state so future polls return
-    # "idle" and repeated calls don't re-query the entire DB each time.
-    result = {"status": "done", "returncode": proc.returncode}
-    if snapshot is not None:
-        after = _take_snapshot()
-        added, removed = _compute_scan_diff(snapshot, after)
-        result["added"] = added
-        result["removed"] = removed
+        phase = state.rescan_phase
+        result = state.rescan_result
+        processed = state.rescan_processed
+        total = state.rescan_total
+        current_item = state.rescan_current_item
+        run_id = state.rescan_run_id
+
+    progress = {
+        "phase": phase,
+        "processed": processed,
+        "total": total,
+        "current_item": current_item,
+        "run_id": run_id,
+    }
+
+    if phase == "idle":
+        return jsonify({"status": "idle", **progress})
+    if phase in ("importing", "updating"):
+        return jsonify({"status": "running", **progress})
+    # phase is "done" or "error" — return the persisted result with progress fields
+    if result is not None:
+        return jsonify({**result, **progress})
+    return jsonify({"status": "idle", **progress})
+
+
+@bp.route("/api/rescan/dismiss", methods=["POST"])
+@api.validate(
+    resp=Response(HTTP_200=RescanDismissResponse),
+    tags=["scan"],
+)
+def rescan_dismiss():
+    """Clear a persisted finished result so the next status poll returns idle."""
     with state.rescan_lock:
-        # Only clear if no new rescan was started between our two lock acquisitions.
-        if state.rescan_proc is proc:
-            state.rescan_proc = None
-            state.rescan_snapshot = None
-    return jsonify(result)
+        if state.rescan_phase in ("done", "error"):
+            state.rescan_phase = "idle"
+            state.rescan_result = None
+    return jsonify({"status": "ok"})
+
+
+@bp.route("/api/rescan/log")
+@api.validate(
+    query=RescanLogQuery,
+    resp=Response(HTTP_200=RescanLogResponse, HTTP_404=ErrorResponse),
+    tags=["scan"],
+)
+def rescan_log():
+    """Return incremental log content for a run starting at a byte offset."""
+    run_id = request.context.query.run_id
+    offset = request.context.query.offset
+    library_db = current_app.config["LIBRARY_DB"]
+    log_dir = os.path.join(os.path.dirname(library_db), "scan-logs")
+    log_path = os.path.join(log_dir, f"{run_id}.log")
+    # Guard against path traversal (run_id must resolve inside log_dir)
+    if not os.path.abspath(log_path).startswith(os.path.abspath(log_dir) + os.sep):
+        return jsonify({"error": "Unknown run_id"}), 404
+    if not os.path.isfile(log_path):
+        return jsonify({"error": "Unknown run_id"}), 404
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(offset)
+            chunk = f.read()
+        text = chunk.decode("utf-8", errors="replace")
+        new_offset = offset + len(chunk)
+    except OSError:
+        return jsonify({"error": "Unknown run_id"}), 404
+    return jsonify({"text": text, "offset": new_offset})

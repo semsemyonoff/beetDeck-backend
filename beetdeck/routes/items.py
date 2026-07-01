@@ -32,14 +32,24 @@ from spectree import Response
 
 from beetdeck import state
 from beetdeck.api import api
+from beetdeck.item_fields import (
+    CLEAR,
+    build_field_catalog,
+    coerce_value,
+    is_editable,
+    is_known_field,
+)
 from beetdeck.schemas.common import ErrorResponse
 from beetdeck.schemas.items import (
+    ItemFieldsResponse,
     ItemsApplyResponse,
     ItemsCandidateBody,
     ItemsConfirmResponse,
     ItemsIdentifyBody,
     ItemsIdentifyResponse,
     ItemsIdentifyStatusResponse,
+    ItemTagsPatch,
+    ItemTagsPatchResponse,
     MetadataBatchBody,
     MetadataBatchResponse,
     UntaggedItemsResponse,
@@ -293,6 +303,99 @@ def untagged_items():
             }
         )
     return jsonify(result)
+
+
+@bp.route("/api/items/fields")
+@api.validate(
+    resp=Response(HTTP_200=ItemFieldsResponse, HTTP_500=ErrorResponse),
+    tags=["items"],
+)
+def items_fields():
+    """Return the catalog of all known beets Item fixed fields with editability flags."""
+    try:
+        return jsonify(build_field_catalog())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/api/items/<int:item_id>/tags", methods=["PATCH"])
+@api.validate(
+    json=ItemTagsPatch,
+    resp=Response(
+        HTTP_200=ItemTagsPatchResponse,
+        HTTP_400=ErrorResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+    ),
+    tags=["items"],
+)
+def patch_item_tags(item_id):
+    """Write a delta of tag fields for a single item.
+
+    Body: { "fields": { "<name>": <value>, ... } }
+
+    Unknown or read-only field names → 400.  Bad numeric/bool values → 400.
+    Item not found → 404.  DB write commits first; file-write failure →
+    warnings list + HTTP 200 (partial-success, mirrors metadata_batch).
+    """
+    fields = request.context.json.fields
+
+    for name in fields:
+        if not is_editable(name):
+            return jsonify({"error": f"field not editable: {name}"}), 400
+
+    library_db = current_app.config["LIBRARY_DB"]
+    library_dir = current_app.config.get("LIBRARY_ROOT") or None
+    lib = None
+    try:
+        with state.metadata_write_lock:
+            lib = _init_beets(library_db, library_dir)
+            item = lib.get_item(item_id)
+            if item is None:
+                return jsonify({"error": "Item not found"}), 404
+
+            # Only known beets fields or flexible attrs already present on this
+            # item are writable. Reject arbitrary new keys so direct API callers
+            # cannot create brand-new flexible attrs (the dropdown offers known
+            # fields only; existing flex attrs stay editable/clearable).
+            for name in fields:
+                if not is_known_field(name) and name not in item:
+                    return jsonify({"error": f"field not editable: {name}"}), 400
+
+            for name, raw in fields.items():
+                try:
+                    coerced = coerce_value(name, raw)
+                except ValueError as exc:
+                    return jsonify({"error": str(exc)}), 400
+                if coerced is CLEAR:
+                    try:
+                        del item[name]
+                    except KeyError:
+                        # Clearing a field that isn't present (e.g. an absent
+                        # flexible attr) is a no-op, not an error.
+                        pass
+                else:
+                    item[name] = coerced
+
+            item.store()
+
+            warnings = []
+            if not _try_write_item(item):
+                path = getattr(item, "path", "") or ""
+                if isinstance(path, bytes):
+                    path = path.decode("utf-8", errors="replace")
+                resolved = _resolve_path(path) if path else path
+                log.warning("File write failed for item %d: %s", item_id, resolved)
+                warnings.append(f"file write failed: {resolved}")
+
+        return jsonify({"status": "ok", "warnings": warnings})
+
+    except Exception as e:
+        log.exception("patch_item_tags failed for item %d", item_id)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if lib is not None:
+            lib._close()
 
 
 @bp.route("/api/items/<int:item_id>/metadata", methods=["POST"])
