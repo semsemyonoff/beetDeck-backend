@@ -116,7 +116,7 @@ The application uses module-level globals for shared state across request thread
 - `GET /apidoc/openapi.json` — generated OpenAPI 3.x spec (single source of truth)
 - `GET /apidoc/scalar/` — interactive Scalar API documentation viewer (bare `/apidoc/scalar` 308-redirects to it)
 - `GET /` — serves SPA
-- `GET /api/version` — running beetDeck + beets versions (`meta` blueprint; flat `{beetdeck, beets}`)
+- `GET /api/version` — running beetDeck + beets versions (`meta` blueprint; flat `{beetdeck, beets, beetdeck_url, beets_url}`). The `*_url` fields are the GitHub release-notes pages (`.../releases/tag/v<version>`); `beetdeck_url` is `null` for the `0.0.0` dev build (no such release)
 - `GET /api/library` — album list
 - `GET /api/search` — search albums/artists
 - `GET /api/artist` — artist albums
