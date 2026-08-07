@@ -29,6 +29,11 @@ class TrackSummary(BaseModel):
     track: int | None = Field(default=None, description="Track number.")
     disc: int = Field(description="Disc number (defaults to 1 when null).")
     length: str = Field(description="Formatted duration ``m:ss`` ('' when unknown).")
+    length_sec: float | None = Field(
+        default=None,
+        description="Raw duration in seconds; null when unknown or zero.",
+    )
+    filename: str = Field(description="Basename of the track's file ('' when no path).")
     format: str | None = Field(default=None, description="Audio format (e.g. FLAC).")
     bitrate: int | None = Field(default=None, description="Bitrate in bits per second.")
     samplerate: int | None = Field(default=None, description="Sample rate in Hz.")
