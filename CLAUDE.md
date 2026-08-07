@@ -1,270 +1,187 @@
-# beetDeck backend — project documentation
+# beetDeck backend — agent notes
 
-## Project Overview
+Flask REST API over a [beets](https://beets.io) music library: album browsing,
+cover art, genre editing, lyrics, BPM computation, MusicBrainz identification,
+library rescanning. The React SPA that consumes this API lives in a **separate
+repository**; its production build is served by Flask from `beetdeck/static/dist/`.
 
-beetDeck is a web UI for browsing and managing a [beets](https://beets.io) music
-library. This repository is the **backend**: a Flask REST API that serves the
-data and a single-page app. It provides album browsing, cover art management,
-genre editing, lyrics fetching, BPM computation (beets `autobpm` plugin),
-MusicBrainz identification, and library rescanning. The React SPA that consumes
-this API lives in a **separate repository**; its production build is served by
-Flask from `beetdeck/static/dist/`.
+This file records the non-obvious constraints. Everything mechanical — the route
+list, request/response shapes — is generated from code; see **API** below.
 
-## Tech Stack
+## Tech stack
 
-- **Language/framework**: Python 3.10+ (runs on 3.14), Flask, gunicorn (1 worker, 4 threads)
-- **Database**: SQLite (beets `library.db`), read mostly via direct SQL; the beets `Library` object is used for write operations
-- **Key dependencies**: beets 2.12.0, Pillow, pylast (Last.fm), requests, beautifulsoup4, pyacoustid, librosa + resampy (BPM computation via the `autobpm` plugin; CPU-bound, ~9s/track)
-- **Audio tooling**: ffmpeg (used by pyacoustid for fingerprinting and by librosa for audio loading during BPM computation)
-- **Dependencies & tooling config**: all declared in `pyproject.toml` (runtime under `[project]`, dev tools under the `dev` extra; pytest and ruff configured in the same file)
+- Python (`requires-python = ">=3.10"`, runs on 3.14), Flask, gunicorn.
+- SQLite (beets `library.db`): **reads go mostly through direct SQL**, the beets
+  `Library` object is used for writes.
+- beets is pinned to an exact release **tarball** in `pyproject.toml` — that pin
+  is the single source of truth for the version; bump the tag to change it.
+- BPM computation goes through the beets `autobpm` plugin (librosa + resampy).
+  CPU-bound, ~9s/track. ffmpeg is required at runtime (pyacoustid fingerprinting,
+  librosa audio loading).
+- Dependencies and tooling config all live in `pyproject.toml` (runtime under
+  `[project]`, dev tools under the `dev` extra; pytest and ruff configured there).
 
-## Project Structure
+## Layout
 
-```
-beetDeck/
-├── app.py                  # Thin entry point: calls create_app() from beetdeck/
-├── beetdeck/
-│   ├── __init__.py         # Flask app factory (create_app); calls api.register(app)
-│   ├── api.py              # SpecTree singleton + 422 validation-error hook (OpenAPI/Scalar)
-│   ├── state.py            # Shared in-memory state (globals)
-│   ├── scan_progress.py    # Pure parser: beets verbose line → progress update + log level
-│   ├── item_fields.py      # Shared field-classification: READONLY_FIELDS, ALBUM_LEVEL_FIELDS, is_editable(), is_album_level(), build_field_catalog(), coerce_value()
-│   ├── utils.py            # Shared helpers and constants
-│   ├── schemas/            # spectree/pydantic request & response models (one module per blueprint)
-│   │   ├── __init__.py     # re-exports shared models
-│   │   ├── common.py       # ErrorResponse + reusable nested types (AlbumSummary, ArtistGroup)
-│   │   ├── library.py
-│   │   ├── albums.py
-│   │   ├── cover.py
-│   │   ├── genres.py
-│   │   ├── lyrics.py
-│   │   ├── bpm.py          # TrackBpmComputeResponse (POST .../bpm/compute)
-│   │   ├── identify.py
-│   │   ├── items.py
-│   │   ├── meta.py
-│   │   └── scan.py
-│   ├── routes/
-│   │   ├── __init__.py
-│   │   ├── library.py      # GET /, /api/library, /api/search, /api/artist
-│   │   ├── albums.py       # GET /api/album/<id>, /api/album/<id>/track/<id>/tags
-│   │   ├── cover.py        # Cover art CRUD
-│   │   ├── genres.py       # Genre fetch/confirm/save
-│   │   ├── lyrics.py       # Lyrics CRUD (single + bulk)
-│   │   ├── bpm.py          # POST /api/album/<id>/track/<id>/bpm/compute
-│   │   ├── identify.py     # Identify/status/apply/confirm
-│   │   ├── items.py        # Untagged item management: metadata edit, group identify
-│   │   ├── meta.py         # GET /api/version (beetDeck + beets versions)
-│   │   └── scan.py         # Rescan + status
-│   ├── static/
-│   │   ├── logo.svg
-│   │   └── dist/           # SPA build output (generated, gitignored)
-│   └── templates/
-│       └── index.html      # SPA shell; injects hashed JS/CSS from beetdeck/static/dist/ via the Vite manifest
-├── tests/                  # pytest suite (see Testing)
-│   ├── conftest.py         # Fixtures: create_app with temp SQLite DB, schema helpers
-│   ├── test_db_fixture.py
-│   ├── test_utils.py
-│   ├── test_library.py
-│   ├── test_albums.py
-│   ├── test_cover.py
-│   ├── test_genres.py
-│   ├── test_lyrics.py
-│   ├── test_bpm.py         # BPM compute route: success, 404, cross-album guard, compute failure
-│   ├── test_identify.py
-│   ├── test_items.py
-│   ├── test_item_fields.py  # unit tests for beetdeck/item_fields.py
-│   ├── test_meta.py
-│   ├── test_scan.py
-│   ├── test_scan_progress.py  # unit tests for the pure progress parser (beetdeck/scan_progress.py)
-│   ├── test_scan_replace.py   # integration tests for format-replace (mp3→flac, duplicate_action: remove)
-│   ├── test_openapi.py     # spec/Scalar routes + decorated-view-in-spec coverage
-│   ├── test_schemas.py     # shared schema serialization
-│   └── test_error_contract.py  # uniform 422 body across blueprints
-└── pyproject.toml          # Dependencies, pytest, and ruff configuration
-```
+One blueprint per feature, with a matching schema module and test module:
+`beetdeck/routes/<name>.py` ↔ `beetdeck/schemas/<name>.py` ↔ `tests/test_<name>.py`.
+Full tree in [`docs/layout.md`](docs/layout.md). The modules that are not obvious
+from their name:
+
+- `beetdeck/api.py` — the single `SpecTree` singleton and the 422 hook.
+- `beetdeck/state.py` — module-level globals shared across request threads.
+- `beetdeck/scan_progress.py` — pure parser: one beets verbose line → progress
+  update + UI log level. No I/O, no threads, so it is unit-testable in isolation.
+- `beetdeck/item_fields.py` — the source of truth for which beets fields are
+  editable and which are album-level; both the catalog route and the write path
+  validate against it.
+- `beetdeck/templates/index.html` — SPA shell; injects the hashed JS/CSS by
+  reading the Vite manifest at request time.
+- `beetdeck/static/dist/` — SPA build output, gitignored.
 
 > The production image (Dockerfile, build, example beets config) lives in the
 > separate `beetDeck/deploy` repo, which pins this repository as a submodule.
 
-### In-Memory State (beetdeck/state.py)
+## Configuration (`app.config`, set in `create_app`)
 
-The application uses module-level globals for shared state across request threads:
+| key | env | default |
+|---|---|---|
+| `LIBRARY_DB` | `BEETS_LIBRARY_DB` | `/data/beets/library.db` |
+| `IMPORT_DIR` | `BEETS_IMPORT_DIR` | `/music` |
+| `LIBRARY_ROOT` | `BEETS_LIBRARY_ROOT` | falls back to `IMPORT_DIR` |
+| `COVER_CACHE_DIR` | `BEETS_COVER_CACHE_DIR` | `<tmp>/beetdeck-cover-cache` |
+| `MAX_CONTENT_LENGTH` | — | 32 MB (cover upload limit) |
 
-- `rescan_lock` (threading.Lock) — guards all scan state reads/writes
-- `rescan_proc` (subprocess.Popen | None) — active subprocess (import or update); used internally by the controller thread
-- `rescan_snapshot` (dict | None) — item snapshot `{id: (title, artist, album_id, path)}` taken before scan starts; path is resolved via `_resolve_path()` and used by `_compute_scan_diff()` to match by filesystem path rather than ID
-- `rescan_run_id` (str | None) — unique identifier for the current/last run (timestamp with microseconds, e.g. `YYYYMMDD-HHMMSS-ffffff`; the microsecond suffix guarantees uniqueness for runs started in the same second)
-- `rescan_log_path` (str | None) — path to the per-run log file (`/data/beets/scan-logs/<run_id>.log`)
-- `rescan_phase` (str) — lifecycle phase: `idle` | `importing` | `updating` | `done` | `error`
-- `rescan_result` (dict | None) — persisted finish-state (`{status, returncode, added, removed}`); stays set until dismissed via `POST /api/rescan/dismiss`
-- `rescan_thread` (threading.Thread | None) — controller thread reference (used in tests)
-- `rescan_processed` (int) — albums/singletons processed so far in the current run
-- `rescan_total` (int | None) — total expected albums for full scan; `None` for quick/incremental scan (indeterminate progress)
-- `rescan_current_item` (str | None) — most recent item path being processed
-- `identify_tasks` (dict) — background autotag tasks; album tasks keyed by `album_id` (int), items group tasks keyed by `f"items_{uuid}"`, cover previews stored under `f"cover_{album_id}"` keys
-- `identify_lock` (threading.Lock) — guards identify task access
-- `metadata_write_lock` (threading.Lock) — guards the batch metadata write in `POST /api/items/metadata-batch` (one beets Library handle at a time; keeps SQLite writes serialized)
+`LIBRARY_ROOT` defaults to `IMPORT_DIR` because the deployment convention is
+beets `copy: no, move: no` — library dir and import dir are the same tree. It is
+**not** probed from the beets `Library`.
 
-### Key Config (app.config via create_app)
+The `beet` CLI (used by the rescan pipeline) reads its own config from `BEETSDIR`,
+which the deployment provides. Two settings the app depends on:
 
-- `LIBRARY_DB` — path to beets SQLite database (env: `BEETS_LIBRARY_DB`, default: `/data/beets/library.db`)
-- `IMPORT_DIR` — path to music import directory (env: `BEETS_IMPORT_DIR`, default: `/music`)
-- `LIBRARY_ROOT` — beets library directory for resolving relative paths (env: `BEETS_LIBRARY_ROOT`; auto-detected from beets Library at startup)
+- `duplicate_action: remove` — a re-import of a track in another format
+  (mp3 → flac) must replace the old item in one pass. With `skip` the track
+  disappears on the first import and only reappears on the second.
+- the `autobpm` plugin must be enabled with `auto: no` — without it the BPM route
+  returns `500 {"error": "autobpm plugin not loaded"}`; with `auto: yes` every
+  rescan would stall on librosa.
 
-### API Routes
+## Shared in-memory state (`beetdeck/state.py`)
 
-- `GET /apidoc/openapi.json` — generated OpenAPI 3.x spec (single source of truth)
-- `GET /apidoc/scalar/` — interactive Scalar API documentation viewer (bare `/apidoc/scalar` 308-redirects to it)
-- `GET /` — serves SPA
-- `GET /api/version` — running beetDeck + beets versions (`meta` blueprint; flat `{beetdeck, beets, beetdeck_url, beets_url}`). The `*_url` fields are the GitHub release-notes pages (`.../releases/tag/v<version>`); `beetdeck_url` is `null` for the `0.0.0` dev build (no such release)
-- `GET /api/library` — album list
-- `GET /api/search` — search albums/artists
-- `GET /api/artist` — artist albums
-- `GET /api/album/<id>` — album detail with tracks; each track carries `has_lrc` (a sidecar `.lrc` file exists), `has_lyrics` (embedded lyrics OR a readable non-empty `.lrc` — same definition as `GET .../lyrics`, distinct from `has_lrc`), and `has_bpm` (`bool(item.bpm)` — true when a BPM value is stored in the beets DB)
-- `GET /api/album/<id>/track/<id>/tags` — track tags
-- `GET /api/album/<id>/cover` — serve current cover image
-- `POST /api/album/<id>/cover/fetch` — fetch cover from online sources (preview)
-- `GET /api/album/<id>/cover/preview` — serve fetched cover preview
-- `POST /api/album/<id>/cover/confirm` — confirm and save fetched cover
-- `POST /api/album/<id>/cover/upload` — upload cover image
-- `POST /api/album/<id>/genre` — fetch genre from Last.fm (preview)
-- `POST /api/album/<id>/genre/confirm` — confirm and write fetched genre
-- `POST /api/album/<id>/genre/save` — manually save genre
-- `GET /api/album/<id>/track/<id>/lyrics` — get track lyrics
-- `POST /api/album/<id>/track/<id>/lyrics/fetch` — fetch lyrics from online (preview)
-- `POST /api/album/<id>/track/<id>/lyrics/confirm` — confirm and write fetched lyrics
-- `POST /api/album/<id>/track/<id>/lyrics/embed` — embed .lrc file into track
-- `POST /api/album/<id>/track/<id>/lyrics/save` — manually save lyrics
-- `POST /api/album/<id>/lyrics/fetch` — bulk fetch lyrics for all tracks
-- `POST /api/album/<id>/lyrics/confirm` — bulk confirm lyrics for selected tracks (`{item_ids:[…]}`); returns `{written, written_item_ids:[…], retained_lrc_item_ids:[…], failed:[…]}` — `written_item_ids` lists the ids actually written (a missing stash entry / wrong-album id is silently skipped, so it can be shorter than `item_ids` with `failed` empty); `retained_lrc_item_ids` is the subset of written ids whose sidecar `.lrc` removal failed (file still on disk)
-- `POST /api/album/<id>/lyrics/embed` — bulk embed .lrc files for all tracks
-- `POST /api/album/<id>/track/<id>/bpm/compute` — compute and write BPM for a single track via the beets `autobpm` plugin (librosa-based); always recomputes (`force=True`); returns `{"status":"ok","bpm":<int>}`; returns `400 {"error":"BPM computation failed"}` when librosa cannot produce a result (plugin swallows the librosa error internally — failure is detected by value, not exception)
-- `POST /api/album/<id>/ignore` — toggle beetdeck_ignored flag (returns `{"ignored": bool}`)
-- `POST /api/album/<id>/identify` — start background identification
-- `GET /api/album/<id>/identify/status` — poll identification status
-- `POST /api/album/<id>/apply` — preview diff for a candidate
-- `POST /api/album/<id>/confirm` — write chosen candidate tags to files/DB
-- `POST /api/rescan` — start library rescan (`?mode=quick|full`); returns `{status:"started", mode}` immediately; `409 {status:"running"}` if a scan is already running. The `run_id` is not in this response — obtain it by polling `GET /api/rescan/status`
-- `GET /api/rescan/status` — rescan status; fields: `phase` (`idle`|`importing`|`updating`|`done`|`error`), `processed` (int), `total` (int|null — null for quick/incremental scans), `current_item` (str|null), `run_id` (str|null), plus `added`/`removed`/`returncode` when finished; finished result persists until dismissed
-- `GET /api/rescan/log` — incremental log tail; query params: `run_id`, `offset` (byte); returns `{text, offset}` (new end offset for next fetch); 404 on unknown `run_id`; safe when file is mid-write
-- `POST /api/rescan/dismiss` — clear the persisted finished result (idempotent); next `status` returns `idle`
-- `GET /api/items/fields` — catalog of all beets `Item._fields` entries: `[{name, type, editable, album_level}]`; `type` is `model_type.__name__` (`int`/`float`/`str`/`list`/`bool`/`bytes`); read-only/`mb_*`/computed fields have `editable: false`; album-level fields (`album`, `albumartist`, `year`, `genres`) have `album_level: true`
-- `PATCH /api/items/<item_id>/tags` — per-track free tag editor write: `{fields: {name: value}}`; validates each field against `item_fields.is_editable()` → `400 {"error":"field not editable: <name>"}` for blocked fields; coerces by `model_type` (`int`/`float`/`list`/`bool`/`str`); empty value → clears field (`del item[name]`, uniform for fixed and flex attrs); writes under `metadata_write_lock`, `item.store()` + `_try_write_item()`; file-write failure → `warnings` list + HTTP 200 (partial-success contract); `404 {"error":"Item not found"}` for unknown id
-- `GET /api/items/untagged` — list items belonging to albums with NULL/empty albumartist
-- `POST /api/items/<item_id>/metadata` — update artist/album on a single untagged item
-- `POST /api/items/metadata-batch` — album/folder-aware batch write: `{album:{album?,albumartist?,year?,genre?}, items:[{id,title?,artist?,track?,disc?},…]}`; resolves distinct album_ids from items, writes album-level fields via the beets Album object (clears untagged filter), then writes per-item overrides; returns `{status, warnings:[], albums_updated:[]}`; ≥1 item id required when album fields present
-- `POST /api/items/identify` — start background identification for a list of item IDs
-- `GET /api/items/identify/<task_id>/status` — poll items identification status
-- `POST /api/items/identify/<task_id>/apply` — preview tag diff for selected candidate
-- `POST /api/items/identify/<task_id>/confirm` — create album and write tags (DB failure → rollback; partial file write failure → warnings returned)
+The file documents its own fields; two things it does not say:
 
-## Validation Error Contract (422)
+- `identify_tasks` is one dict with four key namespaces: `f"album_{album_id}"`,
+  `f"items_{uuid}"` (untagged-group identify), `f"cover_{album_id}"` (fetched
+  cover previews), `f"lyrics_{item_id}"` (fetched lyrics stash). Album tasks are
+  keyed by a **string**, not the raw int.
+- `metadata_write_lock` serializes the batch write in `POST /api/items/metadata-batch`
+  so only one beets `Library` handle writes at a time — SQLite will not tolerate
+  concurrent writers here.
+- `rescan_snapshot` matches items by **filesystem path**, not by ID, because a
+  re-import assigns new IDs; paths are resolved through `_resolve_path()` first.
 
-Request validation is driven by **spectree** (pydantic v2). The single `SpecTree`
-singleton lives in `beetdeck/api.py`; route handlers are decorated with
-`@api.validate(...)` and the generated spec / Scalar UI are served under `/apidoc`
-(`GET /apidoc/openapi.json`, `GET /apidoc/scalar/`). Request models live in
-`beetdeck/schemas/` (one module per blueprint plus shared `common.py`).
+## API
 
-**Any invalid request — bad query param or bad JSON body, on any endpoint —
-returns HTTP `422` with one uniform body** (consumed by the SPA):
+The OpenAPI spec generated by spectree is the single source of truth:
 
-```json
-{
-  "error": "Validation failed",
-  "detail": [
-    { "loc": ["body", "items", 0, "id"], "msg": "Field required", "type": "missing" }
-  ]
-}
-```
+- `GET /apidoc/openapi.json` — the spec
+- `GET /apidoc/scalar/` — interactive viewer (bare `/apidoc/scalar` 308-redirects)
 
-- `error` — short machine-readable message (always `"Validation failed"` for
-  request-validation failures).
-- `detail` — one entry per offending field: `loc` (path to the field), `msg`
-  (human-readable), `type` (pydantic error code).
+Request/response models live in `beetdeck/schemas/` (one module per blueprint plus
+shared `common.py`). Do not maintain an endpoint table here — read the spec.
 
-This shape is produced by the `_render_validation_error` hook in `beetdeck/api.py`
-(spectree's raw default is a bare JSON list) and is documented in the OpenAPI
-spec via `validation_error_model=ErrorResponse` (the `ErrorResponse` component is
-the 422 response of every validated endpoint).
+**Contracts the spec does not convey:**
 
-> **Not part of this contract:** handler-owned *semantic* errors keep their own
-> `{"error": "..."}` bodies with `detail` absent, e.g. a missing album → `404
-> {"error": "Album not found"}`, an empty-but-typed value → `400 {"error":
-> "Genre cannot be empty"}`. Rule of thumb: wrong *type/shape/unknown field* →
-> `422` (uniform body); bad *value* / missing requirement / not-found → `400`/
-> `404` (handler body). The frontend should branch on status code: treat `422`
-> as a field-level validation error and parse `detail`; treat `400`/`404`/`409`
-> as the existing single-message errors.
+- `POST /api/rescan` does **not** return `run_id`; obtain it by polling
+  `GET /api/rescan/status`.
+- `POST …/bpm/compute` always recomputes (`force=True`). The plugin swallows
+  librosa errors internally and never raises, so failure is detected **by value**
+  (pre-clear `item.bpm`, require a non-null value afterwards) → `400`.
+- `POST /api/album/<id>/lyrics/confirm` silently skips ids with no stashed fetch
+  or from another album, so `written_item_ids` can be shorter than the request
+  with `failed` empty. `retained_lrc_item_ids` is the subset that was written but
+  whose sidecar `.lrc` could not be deleted.
+- `PATCH /api/items/<id>/tags` is a **partial success** contract: a file-write
+  failure returns HTTP 200 with a `warnings` list, not an error. An empty value
+  clears the field (`del item[name]`, uniform for fixed and flex attrs).
+- `POST /api/items/identify/<task_id>/confirm`: a DB failure rolls back; a partial
+  file-write failure returns warnings.
+- On a track, `has_lrc` (a sidecar `.lrc` exists) and `has_lyrics` (embedded
+  lyrics **or** a readable non-empty `.lrc`) are deliberately different flags.
 
-## Architecture Constraints
+## Error contract: 422 vs 400/404
 
-**CRITICAL: the app must run as a single process.** It relies on module-level
-in-memory globals (`rescan_proc`, `identify_tasks`, etc.) in `beetdeck/state.py` for
-state shared across request threads. Running multiple worker processes would give
-each its own memory space, siloing state per-worker and breaking background task
-tracking (identify jobs, scan status). The gunicorn invocation must always use
-`-w 1` with `--threads N`.
+Request validation is spectree/pydantic; every validation failure returns `422`
+with a uniform body (`{error, detail[]}`) produced by `_render_validation_error`
+in `beetdeck/api.py` and enforced by `tests/test_error_contract.py`.
 
-## App Factory Pattern
+Handler-owned *semantic* errors keep their own `{"error": "…"}` body with no
+`detail`. The rule when adding an endpoint: wrong **type/shape/unknown field** →
+`422` (uniform body, framework-produced); bad **value** / missing requirement /
+not found → `400`/`404` (handler body). Clients branch on the status code.
 
-Routes are registered via Flask Blueprints in `create_app()` (`beetdeck/__init__.py`).
-All route modules read config from `current_app.config` rather than module-level
-constants. Tests use `create_app(test_config={"LIBRARY_DB": "<tmp>", ...})` to
-inject a temporary SQLite file.
+## Architecture constraints
 
-The `_init_beets()` helper in `beetdeck/utils.py` accepts an explicit `library_db`
-parameter rather than reading from `current_app.config`, because it is called from
-background threads (identify tasks) that have no Flask app context.
+**CRITICAL: the app must run as a single process.** It relies on the module-level
+globals in `beetdeck/state.py` for state shared across request threads. Multiple
+worker processes would each get their own memory space, siloing state per worker
+and breaking background task tracking (identify jobs, scan status). The gunicorn
+invocation must always be `-w 1` with `--threads N`.
 
-## Dev Commands
+## App factory
 
-```bash
-# Install runtime + dev dependencies into a virtualenv
-python -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]"
+Routes are registered as Flask Blueprints in `create_app()` (`beetdeck/__init__.py`).
+Route modules read config from `current_app.config`, never module-level constants,
+so tests can inject a temp SQLite file via `create_app(test_config={…})`.
 
-make run       # run the Flask dev server on :5000
-make test      # run pytest
-make coverage  # run pytest with coverage report
-make lint      # ruff check
-make fmt       # ruff format
-```
+`_init_beets()` in `beetdeck/utils.py` takes an explicit `library_db` parameter
+instead of reading `current_app.config`, because background threads (identify
+tasks) run without a Flask app context.
 
-## Beets Version
+## Scan controller and progress parser
 
-- **Current**: beets 2.12.0 (pinned as a direct release tarball in `pyproject.toml` — the single source of truth; bump the tag to change it)
-- Key behaviors this app handles:
-  - Genres stored as native list field (`genres`); `_format_genre()` in `beetdeck/utils.py` handles both list and legacy string values
-  - Library paths stored relative to DB root; `_resolve_path()` in `beetdeck/utils.py` joins `LIBRARY_ROOT` + relative path (absolute paths pass through unchanged)
-  - Lyrics plugin: separate `lyrics_backend`/`lyrics_url`/`lyrics_language` fields (no "Source: URL" suffix in lyrics text)
-  - autobpm plugin (librosa): `auto: no` so it never runs on import; `calculate_bpm` swallows librosa errors internally and never raises, so the BPM route detects failure by value (pre-clears `item.bpm`, requires a non-null value after) rather than by exception
-  - `duplicate_action: remove` (set in `workspace/templates/config/backend/config.yaml.tmpl`, rendered via `dwe render config backend`) — ensures a re-import of a track in a different format (e.g. mp3→flac) replaces the old item in one pass rather than requiring two imports (the old `skip` behavior caused a disappear-on-first/reappear-on-second issue)
-- 2.12.0 bump notes: no breaking API changes for this app. The lyrics plugin was reworked (synced lyrics now written to the `SYLT` ID3 frame, the standalone `LyricsSession` was folded into `beetsplug._utils.requests`), but the `Lyrics` result object returned by `lyrics_plugin.find_lyrics(item)` still exposes every attribute we read (`text`, `full_text`, `synced`, `backend`, `url`, `language`, `translation_language`), so `beetdeck/routes/lyrics.py` is unchanged. `art.embed_album` signature is unchanged. Relevant upstream fixes we benefit from: fetchart now catches `OSError` instead of crashing on a locked art file, and lyrics HTTP requests now rate-limit/back off on `429`.
-- 2.11.0 bump notes: no breaking API changes for this app (verified against the modules we import — `autotag.tag_album`, art embedding, `plugins`, `library.Library`, `util.{bytestring_path,move,unique_path}`, `config`). New `subtitle` media-tag field (ID3 `TIT3`) was added to `Item`, so it is included in `_ROLLBACK_FIELDS` (`beetdeck/routes/items.py`)
-  - Cover embedding imports `embed_album` from `beetsplug._utils.art` (in `beetdeck/utils.py`); the old `beets.art` shim is deprecated and slated for removal in beets 3.0.0. Cover tests patch `beetsplug._utils.art.embed_album`.
+`beetdeck/routes/scan.py` uses a **daemon controller thread**:
 
-## Scan Controller and Progress Parser
+- `POST /api/rescan` generates a `run_id`, starts the thread, returns immediately.
+- The thread runs two sequential `Popen`s — `beet import`, then conditionally
+  `beet update -M` (skipped when the post-import diff is empty). Both write
+  stdout+stderr to `/data/beets/scan-logs/<run_id>.log`.
+- A log-tail thread feeds each new line to `scan_progress.py` and applies updates
+  under `rescan_lock`. All state access in handlers goes through that lock too.
 
-The rescan pipeline (`beetdeck/routes/scan.py`) uses a **daemon controller thread** model:
+Progress modes: a full scan (`-I`) pre-counts album directories under the import
+dir via `os.walk` → real percentage; a quick scan (`-i`, incremental) has no
+denominator → `total = None` and the UI shows an indeterminate bar.
 
-- `POST /api/rescan` generates a `run_id`, starts the controller thread, and returns immediately.
-- The controller thread runs two sequential `Popen`s: `beet import` then (conditionally) `beet update -M`. Both write stdout+stderr to `/data/beets/scan-logs/<run_id>.log`. Update is skipped when the post-import diff is empty (optimization).
-- A **log-tail thread** (started by the controller) reads new lines from the log file, feeds each to the progress parser, and applies updates to `state` under `rescan_lock`. It stops when the controller finishes.
-- All `state` reads/writes in route handlers go through `rescan_lock`.
+Keeping the parser pure is deliberate — it isolates fragile beets-output parsing
+from the threading, and `tests/test_scan_progress.py` covers it over fixed samples.
 
-**Progress parser** (`beetdeck/scan_progress.py`): a **pure function** that maps a single beets verbose output line to an optional progress update (`phase`, `processed`, `current_item`) and a UI log level (`info|added|removed|warn|skip|summary`). Keeping it pure (no I/O, no threads) makes it fully unit-testable over fixed sample output and isolates fragile beets-format parsing from the controller. Tests live in `tests/test_scan_progress.py`.
+## Beets integration
 
-**Progress modes:**
-- Full scan (`-I`): pre-counts album directories containing audio under `/music` via `os.walk` → `total`; parser increments `processed` per album started → real percentage.
-- Quick scan (`-i`, incremental): denominator unknown → `total = None`; UI shows indeterminate bar + "processed N".
+Behaviours this app works around:
 
-**Log file location:** `/data/beets/scan-logs/<run_id>.log` (directory created on demand; log retention/rotation is out of scope for this iteration).
+- Genres are a native list field (`genres`); `_format_genre()` in
+  `beetdeck/utils.py` handles both list and legacy string values.
+- Library paths are stored **relative** to the DB root; `_resolve_path()` joins
+  `LIBRARY_ROOT` + relative path (absolute paths pass through unchanged).
+- The lyrics plugin exposes separate `lyrics_backend` / `lyrics_url` /
+  `lyrics_language` fields — no "Source: URL" suffix in the lyrics text.
+- Cover embedding imports `embed_album` from the private
+  `beetsplug._utils.art` (the old `beets.art` shim is slated for removal in beets
+  3.0.0). Cover tests patch `beetsplug._utils.art.embed_album`.
+
+Per-release upgrade notes: [`docs/beets-upgrades.md`](docs/beets-upgrades.md).
 
 ## Testing
 
-- **Framework**: pytest + pytest-cov + pytest-mock; ruff for lint/format
-- **Test structure**: `tests/` at project root, files mirror `beetdeck/routes/`
-- **Config**: `pyproject.toml`
-- **Fixtures**: `tests/conftest.py` — Flask app fixture via `create_app(test_config=...)` with a temp SQLite file seeded with beets schema tables
-- **Coverage target**: 80%+ for modular code
+- pytest + pytest-cov + pytest-mock; ruff for lint/format; config in `pyproject.toml`.
+- `tests/` mirrors `beetdeck/routes/`, plus unit tests for the pure modules
+  (`test_scan_progress.py`, `test_item_fields.py`, `test_utils.py`) and contract
+  tests (`test_error_contract.py`, `test_openapi.py`, `test_schemas.py`).
+- `tests/conftest.py` builds the app via `create_app(test_config=…)` against a
+  temp SQLite file seeded with the beets schema.
+- Coverage is reported but **not gated** (`fail_under = 0`); CI runs plain pytest.
+  Aim for 80%+ on new modular code as a convention, not a check.
+
+This repository's own toolchain (`.venv` + `make test/lint/fmt/coverage`) is
+described in `README.md` → *Local development*.
