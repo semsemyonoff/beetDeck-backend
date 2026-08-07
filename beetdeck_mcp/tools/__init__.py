@@ -26,6 +26,7 @@ TOOL_MODULES: tuple[str, ...] = (
     "apply",
     "genres",
     "identify",
+    "library",
     "media",
     "musicbrainz",
     "read",
