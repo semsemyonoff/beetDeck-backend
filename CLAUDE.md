@@ -25,8 +25,9 @@ list, request/response shapes — is generated from code; see **API** below.
 
 One blueprint per feature, with a matching schema module and test module:
 `beetdeck/routes/<name>.py` ↔ `beetdeck/schemas/<name>.py` ↔ `tests/test_<name>.py`.
-Full tree in [`docs/layout.md`](docs/layout.md). The modules that are not obvious
-from their name:
+The MCP server is a second top-level package, `beetdeck_mcp/` — see *MCP server*
+below. Full tree in [`docs/layout.md`](docs/layout.md). The modules that are not
+obvious from their name:
 
 - `beetdeck/api.py` — the single `SpecTree` singleton and the 422 hook.
 - `beetdeck/state.py` — module-level globals shared across request threads.
@@ -176,12 +177,105 @@ Behaviours this app works around:
 
 Per-release upgrade notes: [`docs/beets-upgrades.md`](docs/beets-upgrades.md).
 
+## MCP server (`beetdeck_mcp`)
+
+A second top-level package in this repo, shipped in the same image and installed by
+the same `pip install -e ".[dev]"`, but run as a **separate process**
+(`python -m beetdeck_mcp`) that reaches the Flask app over HTTP at
+`BEETDECK_API_URL`. It exposes the library to an AI agent over MCP
+(streamable-http). Its dependencies (`mcp`, `httpx`) are in `[project] dependencies`
+rather than an extra because the image's venv sync installs exactly `-e ".[dev]"`.
+
+**It must never import Flask request state.** `beetdeck.state`, `current_app`, and the
+in-memory identify tasks belong to the other process — reading them here would see a
+different, empty memory space. The only supported coupling is the REST API. This is
+also what makes the tests possible: they drive the real app in-process through
+`httpx.Client(transport=httpx.WSGITransport(app=app))`, so the MCP↔REST contract is
+exercised for real instead of against mocks. Everything in the package is
+**synchronous** for the same reason — an async client cannot use a WSGI transport.
+
+### Two-phase writes and the per-kind guarantee
+
+Every mutating capability is split: a `preview_*` tool returns the diff plus a
+single-use `preview_token`, and `apply_change(preview_token)` is the **only** tool
+that writes. How strongly a token is defended against a concurrent change is **not
+uniform** — `beetdeck_mcp/preview.py` owns the table and returns the wording with
+every minted token:
+
+| kind | guarantee | mechanism |
+|---|---|---|
+| `identify`, `items_identify` | enforced by the backend | `match_generation` precondition, compared inside `state.identify_lock` |
+| `tags`, `genres` | best-effort, TOCTOU-racy | old values re-read immediately before the write; refuses on drift |
+| `cover`, `lyrics` | TTL only (5 min, vs 15 for the rest) | the backend stash has no identity and no read path, so a competing fetch cannot be detected at all — a concurrent fetch in the SPA wins silently |
+
+The asymmetry is deliberate, not an oversight: identification is the expensive
+failure (candidates are addressed by **positional index** into rebuildable in-memory
+state, and a wrong apply rewrites tags across a whole album), so it is the one kind
+that got a real backend precondition.
+
+### `match_generation`
+
+Identify tasks carry a monotonic `match_generation` (`state.next_match_generation()`),
+exposed on the status responses of `…/identify/status` and the untagged-items
+equivalent alongside `matches_available`. Both confirm endpoints accept an optional
+`expected_generation` and compare it **inside `state.identify_lock`**, so a stale
+confirm is rejected atomically.
+
+This exists because the status endpoint could not otherwise express consumption:
+`_get_task_json` strips every `_`-prefixed key, and `confirm_match` pops `_matches`
+but restores `status: "done"` under the same `task_id` — an already-consumed task was
+indistinguishable from a confirmable one over HTTP.
+
+### Genres commit through `save`, not `confirm`
+
+`POST …/genre/confirm` performs a **second, independent Last.fm lookup** before
+writing, so it can commit a different value than the preview showed. `apply_change`
+therefore sends `POST …/genre/save` with the explicit previewed string. The previewed
+old value is read from `GET /api/album/<id>` (which falls back to the legacy singular
+`genre` column) and not from the lookup's `old_genre` (which reads only the native
+`genres` list) — otherwise the drift check would refuse every album tagged before
+beets 2.10.
+
+### What `BEETDECK_MCP_READONLY` does and does not disable
+
+It disables `apply_change` **alone**. Every `preview_*` tool still runs, and previews
+have real backend side effects: identification starts a background autotag job, and
+cover/lyrics previews fetch remote data and overwrite the backend stash. Read-only
+means "nothing is written to the library", not "nothing happens". The read-only escape
+hatch `beetdeck_api_call` is `GET`-only and `/api/`-prefixed always, in both modes —
+a write escape would bypass the preview→apply contract that is the server's point.
+
+### MusicBrainz rate gate
+
+`beetdeck_mcp/musicbrainz.py` gates outgoing calls to ≤1/second process-wide
+(`threading.Lock` + monotonic timestamp) and requires a descriptive user agent.
+⚠️ The budget is **per source IP** and the backend's own autotag queries MusicBrainz
+too, so an agent session running alongside a rescan can still exceed it. This is a
+known limitation, not something the gate can fix from one process.
+
+### Refuse-to-start invariants
+
+`load_config()` raises `ConfigError` (exit 2, no server) when `BEETDECK_MCP_TOKEN` or
+`MUSICBRAINZ_USER_AGENT` is empty — an empty token table would publish an
+unauthenticated write surface, and MusicBrainz rejects anonymous clients. Neither
+degrades to a default. `BEETDECK_MCP_HOST`/`_PORT` are the **in-container** bind only;
+the published host port is a separate compose variable so `dwe test` can remap it.
+Without `BEETDECK_MCP_ALLOWED_HOSTS` the SDK's DNS-rebinding guard answers `421
+Misdirected Request` behind any real hostname.
+
+`GET /health` is registered as a custom route **after** the MCP endpoints are wrapped
+in `RequireAuthMiddleware`, so it stays reachable without a token — the container
+healthcheck depends on that ordering.
+
 ## Testing
 
 - pytest + pytest-cov + pytest-mock; ruff for lint/format; config in `pyproject.toml`.
 - `tests/` mirrors `beetdeck/routes/`, plus unit tests for the pure modules
   (`test_scan_progress.py`, `test_item_fields.py`, `test_utils.py`) and contract
   tests (`test_error_contract.py`, `test_openapi.py`, `test_schemas.py`).
+- `tests/test_mcp_*.py` covers `beetdeck_mcp/` against the real Flask app over an
+  in-process WSGI transport; only MusicBrainz is mocked. Fixtures live in the same
+  `tests/conftest.py` — pytest auto-loads only files literally named `conftest.py`.
 - `tests/conftest.py` builds the app via `create_app(test_config=…)` against a
   temp SQLite file seeded with the beets schema.
 - Coverage is reported but **not gated** (`fail_under = 0`); CI runs plain pytest.

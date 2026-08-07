@@ -37,6 +37,18 @@ beetDeck/
 │   │   └── dist/           # SPA build output (generated, gitignored)
 │   └── templates/
 │       └── index.html      # SPA shell; injects hashed JS/CSS via the Vite manifest
+├── beetdeck_mcp/           # MCP server — a separate process, same install (see CLAUDE.md)
+│   ├── __main__.py         # `python -m beetdeck_mcp`; refuses to start on bad config
+│   ├── config.py           # env → validated Config; ConfigError is startup-fatal
+│   ├── server.py           # MCPServer wiring: auth, transport security, /health
+│   ├── auth.py             # static bearer-token verifier
+│   ├── client.py           # httpx client for the REST API + result normalization
+│   ├── preview.py          # preview-token store; owns the per-kind freshness guarantee
+│   ├── musicbrainz.py      # ws/2 client with a process-wide 1 req/s gate
+│   ├── resources.py        # MCP resources: live OpenAPI spec + workflow guide
+│   └── tools/              # one module per tool group; apply.py is the only writer
+│       ├── read.py  identify.py  musicbrainz.py  tags.py
+│       └── media.py  genres.py  library.py  raw.py  apply.py
 ├── tests/                  # pytest suite; conftest.py builds the app on a temp SQLite DB
 │   ├── conftest.py  fixtures/
 │   ├── test_albums.py  test_bpm.py  test_cover.py  test_genres.py
@@ -44,6 +56,8 @@ beetDeck/
 │   ├── test_meta.py  test_scan.py            # route suites, mirroring beetdeck/routes/
 │   ├── test_item_fields.py  test_scan_progress.py  test_utils.py
 │   │                                          # unit tests for the pure modules
+│   ├── test_mcp_*.py                          # beetdeck_mcp, driven against the real
+│   │                                          #   app over an in-process WSGI transport
 │   ├── test_scan_replace.py                   # format-replace integration (mp3→flac)
 │   ├── test_db_fixture.py                     # the fixture itself
 │   └── test_error_contract.py  test_openapi.py  test_schemas.py
