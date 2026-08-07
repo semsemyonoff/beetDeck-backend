@@ -13,12 +13,28 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING
 
+from beetdeck_mcp.client import BeetdeckClient
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from mcp.server import MCPServer
 
     from beetdeck_mcp.config import Config
 
-TOOL_MODULES: tuple[str, ...] = ()
+TOOL_MODULES: tuple[str, ...] = ("read",)
+
+#: One pooled REST client per configuration, shared by every tool module — the
+#: modules are registered together and live as long as the process, so a client
+#: each would mean a connection pool each for the same backend.
+_CLIENTS: dict["Config", BeetdeckClient] = {}
+
+
+def client_for(config: "Config") -> BeetdeckClient:
+    """The REST client every tool module should use for `config`."""
+    client = _CLIENTS.get(config)
+    if client is None:
+        client = BeetdeckClient(config)
+        _CLIENTS[config] = client
+    return client
 
 
 def register_all(server: "MCPServer", config: "Config") -> None:
