@@ -62,6 +62,7 @@ def _apply_backend_precondition(client: BeetdeckClient, preview: Preview) -> App
 
 _HANDLERS: Mapping[str, Callable[[BeetdeckClient, Preview], ApplyResult]] = {
     "identify": _apply_backend_precondition,
+    "items_identify": _apply_backend_precondition,
 }
 
 
