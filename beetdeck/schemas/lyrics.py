@@ -97,6 +97,12 @@ class TrackLyricsReadResponse(BaseModel):
         description="Whether a sidecar .lrc file currently exists (file-existence flag, "
         "independent of has_lyrics). Lets clients track sidecar state after writes.",
     )
+    instrumental: bool = Field(
+        default=False,
+        description="Whether a lyrics source reported this track as instrumental "
+        "(beets `lyrics_instrumental`). Normally pairs with has_lyrics=false, and "
+        "means 'there is nothing to fetch' rather than 'nothing was tried'.",
+    )
 
 
 class TrackLyricsFetchResponse(BaseModel):
@@ -107,7 +113,13 @@ class TrackLyricsFetchResponse(BaseModel):
     """
 
     status: str = Field(description="Always 'ok' on success.")
-    found: bool = Field(description="Whether lyrics were found online.")
+    found: bool = Field(description="Whether lyrics text was found online.")
+    new_instrumental: bool = Field(
+        default=False,
+        description="Whether the source positively reported the track as instrumental. "
+        "Pairs with found=false and empty new_lyrics, but is a hit rather than a miss — "
+        "confirming it stores the flag instead of lyrics text.",
+    )
     new_lyrics: str | None = Field(
         default=None, description="Fetched lyrics text (present only when found)."
     )
@@ -198,7 +210,12 @@ class AlbumLyricsFetchTrack(BaseModel):
     current_source: str | None = Field(
         default=None, description="Source of current lyrics ('embedded'/'lrc_file'/null)."
     )
-    found: bool = Field(description="Whether lyrics were found online for this track.")
+    found: bool = Field(description="Whether lyrics text was found online for this track.")
+    new_instrumental: bool = Field(
+        default=False,
+        description="Whether the source positively reported the track as instrumental "
+        "(see TrackLyricsFetchResponse.new_instrumental).",
+    )
     new_lyrics: str = Field(description="Fetched lyrics text ('' when not found).")
     new_synced: bool = Field(description="Whether the fetched lyrics are time-synced.")
     new_backend: str = Field(description="Backend the lyrics were fetched from ('' when none).")

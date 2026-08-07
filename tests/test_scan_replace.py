@@ -5,7 +5,7 @@ These tests run a real ``beet import`` subprocess — nothing is mocked.
 Requirements
 ------------
 - ffmpeg must be available in PATH (satisfied in the backend container).
-- beets 2.12.0 (pinned in pyproject.toml).
+- beets 2.13.1 (pinned in pyproject.toml).
 
 Test design
 -----------

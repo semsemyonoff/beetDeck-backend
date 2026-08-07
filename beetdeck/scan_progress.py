@@ -1,4 +1,4 @@
-"""Pure parser for beets 2.12.0 verbose log output.
+"""Pure parser for beets 2.13.1 verbose log output.
 
 Parses a single beets log line into a UI log level and an optional progress
 update.  This module is intentionally free of I/O and threading so that it
@@ -43,7 +43,7 @@ Phase 2 — ``beet -v update -M`` (separate Popen, same log file)::
     ``error reading /path: …``                       — ERROR (mapped to warn — no
                                                        distinct error level in the UI)
 
-Version pinned to: beets 2.12.0
+Version pinned to: beets 2.13.1
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ import re
 from typing import NamedTuple
 
 # beets version this parser is pinned to
-BEETS_VERSION = "2.12.0"
+BEETS_VERSION = "2.13.1"
 
 # UI log level constants (match the prototype's SCAN_LOG shape)
 LOG_LEVEL_INFO = "info"
@@ -82,7 +82,7 @@ class ParseResult(NamedTuple):
 
 
 def parse_beets_line(line: str) -> ParseResult | None:
-    """Parse a single beets 2.12.0 verbose log line.
+    """Parse a single beets 2.13.1 verbose log line.
 
     Returns ``None`` for empty or whitespace-only input.  The ``update``
     field is non-``None`` only when the line signals a progress change:

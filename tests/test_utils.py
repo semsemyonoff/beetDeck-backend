@@ -502,6 +502,10 @@ def test_init_beets_overrides_beets_directory(tmp_path):
     from beetdeck.utils import _init_beets
 
     db = tmp_path / "library.db"
+    # The only test that builds a real Library. Since beets 2.13.0 every
+    # migration copies the DB first, so a fresh file would drop one .bak per
+    # migration into tmp_path before it has a single row worth saving.
+    beets.config["create_backup_before_migrations"] = False
     lib = _init_beets(str(db), "/music/custom")
     try:
         configured = beets.config["directory"].as_str()
