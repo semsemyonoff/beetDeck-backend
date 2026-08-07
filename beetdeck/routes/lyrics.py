@@ -50,7 +50,13 @@ def track_lyrics(album_id, item_id):
         conn = _get_ro_conn()
         try:
             row = conn.execute(
-                "SELECT lyrics, path FROM items WHERE id = ? AND album_id = ?",
+                """
+                SELECT i.lyrics, i.path,
+                       (SELECT value FROM item_attributes
+                        WHERE entity_id = i.id AND key = 'lyrics_instrumental')
+                       AS instrumental
+                FROM items i WHERE i.id = ? AND i.album_id = ?
+                """,
                 (item_id, album_id),
             ).fetchone()
         finally:
@@ -66,6 +72,11 @@ def track_lyrics(album_id, item_id):
     lrc_path = _find_lrc_file(item_path)
     lrc_text = _read_lrc_file(lrc_path) if lrc_path else None
     has_lrc = bool(lrc_path)
+    # beets 2.13.0+ records an instrumental track as empty lyrics plus this flag
+    # (the 2.13.0 migration inserts the literal '1'; a write through
+    # types.BOOLEAN lands as 1 in a TEXT-affinity column). Without it an
+    # instrumental track is indistinguishable from one nobody has looked up.
+    instrumental = str(row["instrumental"] or "") in ("1", "True")
 
     if lyrics_text:
         return jsonify(
@@ -74,6 +85,7 @@ def track_lyrics(album_id, item_id):
                 "lyrics": lyrics_text,
                 "source": "embedded",
                 "has_lrc": has_lrc,
+                "instrumental": instrumental,
             }
         )
     elif lrc_text:
@@ -84,10 +96,19 @@ def track_lyrics(album_id, item_id):
                 "source": "lrc_file",
                 "lrc_path": lrc_path,
                 "has_lrc": has_lrc,
+                "instrumental": instrumental,
             }
         )
     else:
-        return jsonify({"has_lyrics": False, "lyrics": "", "source": None, "has_lrc": has_lrc})
+        return jsonify(
+            {
+                "has_lyrics": False,
+                "lyrics": "",
+                "source": None,
+                "has_lrc": has_lrc,
+                "instrumental": instrumental,
+            }
+        )
 
 
 @bp.route("/api/album/<int:album_id>/track/<int:item_id>/lyrics/fetch", methods=["POST"])
@@ -130,13 +151,19 @@ def fetch_track_lyrics(album_id, item_id):
         current_source = "embedded" if old_lyrics else ("lrc_file" if lrc_text else None)
 
         result = lyrics_plugin.find_lyrics(item)
+        # beets 2.13.0+ blanks .text for an instrumental match and raises a flag
+        # instead, so testing text alone would report a positive answer from the
+        # source as a miss. `found` stays "there is text to show", and the
+        # instrumental verdict rides alongside it — it is still worth storing.
+        instrumental = bool(result) and getattr(result, "instrumental", False)
 
-        if not result or not result.text:
+        if not result or (not result.text and not instrumental):
             log.info("No lyrics found for item_id=%d", item_id)
             return jsonify(
                 {
                     "status": "ok",
                     "found": False,
+                    "new_instrumental": False,
                     "current_lyrics": current_lyrics,
                     "current_source": current_source,
                 }
@@ -147,12 +174,18 @@ def fetch_track_lyrics(album_id, item_id):
                 "_lyrics_obj": result,
             }
 
-        log.info("Lyrics found for item_id=%d from %s", item_id, result.backend or "unknown")
+        log.info(
+            "%s for item_id=%d from %s",
+            "Instrumental reported" if instrumental else "Lyrics found",
+            item_id,
+            result.backend or "unknown",
+        )
 
         return jsonify(
             {
                 "status": "ok",
-                "found": True,
+                "found": not instrumental,
+                "new_instrumental": instrumental,
                 "new_lyrics": result.full_text,
                 "new_synced": result.synced,
                 "new_backend": result.backend or "unknown",
@@ -197,7 +230,12 @@ def confirm_track_lyrics(album_id, item_id):
 
         new_lyrics = task["_lyrics_obj"]
 
-        for key in ("backend", "url", "language", "translation_language"):
+        # "instrumental" is stored the same way as the other lyrics_* flex
+        # attrs, and deliberately keeps our delete-on-falsy rule rather than
+        # upstream's `is not None`: GET .../tags surfaces every flex attr
+        # verbatim, so writing lyrics_instrumental=0 would put a permanent noise
+        # row in the tag editor of every track we ever fetch lyrics for.
+        for key in ("backend", "url", "language", "translation_language", "instrumental"):
             item_key = f"lyrics_{key}"
             value = getattr(new_lyrics, key, None)
             if value:
@@ -205,6 +243,9 @@ def confirm_track_lyrics(album_id, item_id):
             elif item_key in item:
                 del item[item_key]
 
+        # Empty for an instrumental match — which is the point: it also clears
+        # the legacy "[Instrumental]" marker from the file tag on write, so a
+        # later `beet update` cannot resurrect it.
         item.lyrics = new_lyrics.full_text
         item.store()
 
@@ -365,6 +406,11 @@ def save_track_lyrics(album_id, item_id):
             return jsonify({"error": "Track not found"}), 404
 
         item.lyrics = lyrics_text
+        # A manual edit is the user overruling whatever a source said, so beets'
+        # instrumental verdict no longer holds — including when the save is
+        # empty, which is how the client clears lyrics.
+        if "lyrics_instrumental" in item:
+            del item["lyrics_instrumental"]
         item.store()
 
         if _try_write_item(item):
@@ -458,13 +504,18 @@ def fetch_album_lyrics(album_id):
                 "current_lyrics": current_lyrics,
                 "current_source": current_source,
                 "found": False,
+                "new_instrumental": False,
                 "new_lyrics": "",
                 "new_synced": False,
                 "new_backend": "",
             }
 
-            if found_lyrics and found_lyrics.text:
-                entry["found"] = True
+            # Same instrumental handling as the single-track fetch above.
+            instrumental = bool(found_lyrics) and getattr(found_lyrics, "instrumental", False)
+
+            if found_lyrics and (found_lyrics.text or instrumental):
+                entry["found"] = not instrumental
+                entry["new_instrumental"] = instrumental
                 entry["new_lyrics"] = found_lyrics.full_text
                 entry["new_synced"] = found_lyrics.synced
                 entry["new_backend"] = found_lyrics.backend or "unknown"
@@ -475,7 +526,8 @@ def fetch_album_lyrics(album_id):
                     }
 
                 log.info(
-                    "Lyrics found for %s - %s from %s",
+                    "%s for %s - %s from %s",
+                    "Instrumental reported" if instrumental else "Lyrics found",
                     item.artist,
                     item.title,
                     found_lyrics.backend or "unknown",
@@ -533,7 +585,8 @@ def confirm_album_lyrics(album_id):
 
             new_lyrics = task["_lyrics_obj"]
 
-            for key in ("backend", "url", "language", "translation_language"):
+            # Same flex-attr contract as the single-track confirm above.
+            for key in ("backend", "url", "language", "translation_language", "instrumental"):
                 item_key = f"lyrics_{key}"
                 value = getattr(new_lyrics, key, None)
                 if value:

@@ -108,6 +108,10 @@ shared `common.py`). Do not maintain an endpoint table here — read the spec.
   file-write failure returns warnings.
 - On a track, `has_lrc` (a sidecar `.lrc` exists) and `has_lyrics` (embedded
   lyrics **or** a readable non-empty `.lrc`) are deliberately different flags.
+- An instrumental track is a **third lyrics state**, not a miss: the fetch
+  endpoints return `found: false` together with `new_instrumental: true` and
+  still stash the result, so confirming it stores beets' `lyrics_instrumental`
+  flag (and clears the file tag) instead of lyrics text.
 
 ## Error contract: 422 vs 400/404
 

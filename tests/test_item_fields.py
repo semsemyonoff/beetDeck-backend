@@ -158,7 +158,7 @@ class TestBuildFieldCatalog:
         assert entry["type"] == "list"
 
     def test_genre_not_in_catalog(self):
-        # 'genre' is not a real Item._fields entry in beets 2.12.0
+        # 'genre' is not a real Item._fields entry in beets 2.13.1
         assert "genre" not in self.by_name
 
     def test_comp_bool_typed(self):
