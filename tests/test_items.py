@@ -1626,6 +1626,28 @@ class TestItemsMatchGeneration:
         assert resp.status_code == 400
         assert resp.get_json()["error"] == "Invalid candidate index"
 
+    def test_a_confirm_already_in_flight_is_a_409_not_a_400(self, client, mocker):
+        """The generation is only bumped when the first confirm finishes, so
+        without the `confirming` arm the loser of the race is told "no results"
+        instead of "stale". Same reasoning as the album confirm."""
+        task_id, data = _run_items_identify(client, mocker, _mock_items_match(mocker))
+        state.identify_tasks[f"items_{task_id}"]["status"] = "confirming"
+
+        resp = client.post(
+            f"/api/items/identify/{task_id}/confirm",
+            json={"candidate_index": 0, "expected_generation": data["match_generation"]},
+        )
+        assert resp.status_code == 409
+        assert "changed since the preview" in resp.get_json()["error"]
+
+    def test_a_confirm_in_flight_without_a_precondition_still_returns_400(self, client, mocker):
+        task_id, _ = _run_items_identify(client, mocker, _mock_items_match(mocker))
+        state.identify_tasks[f"items_{task_id}"]["status"] = "confirming"
+
+        resp = client.post(f"/api/items/identify/{task_id}/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "No identification results"
+
     def test_purged_task_with_precondition_returns_409(self, client, mocker):
         """A completed items task is purged by the next run — that is staleness."""
         first_id, data = _run_items_identify(client, mocker, _mock_items_match(mocker))

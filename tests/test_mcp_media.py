@@ -22,7 +22,7 @@ from beetdeck_mcp.client import BeetdeckClient
 from beetdeck_mcp.preview import PreviewStore
 from beetdeck_mcp.tools.apply import TOOL_NAMES as APPLY_TOOL_NAMES
 from beetdeck_mcp.tools.apply import build_tools as build_apply_tools
-from beetdeck_mcp.tools.media import TOOL_NAMES, build_tools
+from beetdeck_mcp.tools.media import EXCERPT_CHARS, TOOL_NAMES, _excerpt, build_tools
 from tests.conftest import insert_album, insert_item
 
 
@@ -108,6 +108,30 @@ def saved_cover(mocker):
 class TestBuildTools:
     def test_exposes_exactly_the_declared_tool_names(self, tools):
         assert set(tools) == set(TOOL_NAMES) | set(APPLY_TOOL_NAMES)
+
+
+class TestExcerpt:
+    """`EXCERPT_CHARS` is what keeps a whole album's lyrics out of the agent's
+    context; every other test here uses short fixtures, so nothing else would
+    notice the truncation going away."""
+
+    def test_text_at_the_limit_is_returned_whole(self):
+        text = "a" * EXCERPT_CHARS
+        assert _excerpt(text) == text
+
+    def test_longer_text_is_cut_and_marked(self):
+        excerpt = _excerpt("b" * (EXCERPT_CHARS + 1))
+        assert len(excerpt) == EXCERPT_CHARS + 1  # the ellipsis is one char
+        assert excerpt.endswith("…")
+        assert excerpt[:-1] == "b" * EXCERPT_CHARS
+
+    def test_line_breaks_and_runs_of_space_collapse_onto_one_line(self):
+        assert _excerpt("first line\n\n  second   line ") == "first line second line"
+
+    def test_trailing_space_is_not_left_before_the_ellipsis(self):
+        # A cut landing on a space would otherwise read as "word …".
+        text = ("word " * 200).strip()
+        assert " …" not in _excerpt(text)
 
 
 class TestPreviewCover:

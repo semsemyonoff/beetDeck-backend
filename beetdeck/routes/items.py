@@ -824,7 +824,12 @@ def items_confirm(task_id):
         # "gone" is a staleness answer, not "no results". Absent field ⇒
         # unchanged behaviour (the SPA does not send it).
         if expected_generation is not None and (
-            task is None or task.get("match_generation") != expected_generation
+            task is None
+            or task.get("match_generation") != expected_generation
+            # A confirm already in flight has not bumped the generation yet, so
+            # without this arm the loser of the race is told "no results"
+            # instead of "stale". Same reasoning as in routes/identify.py.
+            or task.get("status") == "confirming"
         ):
             return jsonify({"error": STALE_GENERATION_ERROR}), 409
         if not task or task.get("status") != "done":

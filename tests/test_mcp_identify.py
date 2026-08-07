@@ -231,6 +231,29 @@ class TestIdentifyAlbum:
         assert "could not reach the beetDeck API" in result["error"]
         assert "candidates" not in result
 
+    def test_a_backend_that_dies_mid_poll_is_an_error_not_an_empty_result(
+        self, make_tools, mcp_config, album
+    ):
+        """The start request succeeds and the status read does not.
+
+        `dead_client` fails on the very first call, so it never reaches the poll
+        loop's own failure branch — the realistic case is the container
+        restarting while the tool is already waiting on a long identification.
+        """
+
+        def handler(request):
+            if request.url.path.endswith("/identify"):
+                return httpx.Response(200, json={"status": "started"})
+            raise httpx.ConnectError("connection refused", request=request)
+
+        flaky = BeetdeckClient(mcp_config, transport=httpx.MockTransport(handler))
+
+        result = make_tools(flaky)["identify_album"](album)
+
+        assert "could not reach the beetDeck API" in result["error"]
+        assert "candidates" not in result
+        assert "status" not in result
+
 
 # ---------------------------------------------------------------------------
 # preview_match
@@ -301,6 +324,30 @@ class TestPreviewMatch:
     def test_reports_an_unreachable_backend(self, make_tools, mcp_config, album):
         result = make_tools(dead_client(mcp_config))["preview_match"](album)
         assert "could not reach the beetDeck API" in result["error"]
+
+    def test_a_confirmable_task_without_a_generation_mints_nothing(
+        self, make_tools, mcp_config, store, album
+    ):
+        """The precondition is the whole guarantee of this kind.
+
+        A status response that says `done` + `matches_available` but carries no
+        usable `match_generation` must refuse rather than mint a token that
+        would silently degrade to no defence at all.
+        """
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                json={"status": "done", "matches_available": True, "match_generation": None},
+            )
+
+        tools = make_tools(BeetdeckClient(mcp_config, transport=httpx.MockTransport(handler)))
+
+        result = tools["preview_match"](album)
+
+        assert "carries no match_generation" in result["error"]
+        assert "preview_token" not in result
+        assert len(store) == 0
 
 
 # ---------------------------------------------------------------------------

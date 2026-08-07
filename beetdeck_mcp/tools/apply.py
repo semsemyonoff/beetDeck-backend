@@ -36,6 +36,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 TOOL_NAMES = ("apply_change",)
 
+#: `cover`/`lyrics` confirms embed into every track of the album one file at a
+#: time, so the write scales with the album the way the fetch does — the 30 s
+#: client default would abort a long one mid-embed. See `media.FETCH_TIMEOUT`.
+EMBED_TIMEOUT = 300.0
+
 READONLY_REFUSAL = (
     "BEETDECK_MCP_READONLY is set on this server — apply_change is disabled and nothing was "
     "written. Previews still work, so you can report what would change; the preview token "
@@ -107,6 +112,7 @@ def _apply_ttl_only(client: BeetdeckClient, preview: Preview) -> ApplyResult:
         preview.method,
         preview.endpoint,
         json=preview.request_json(),
+        timeout=EMBED_TIMEOUT,
         requested_item_ids=preview.requested_item_ids,
     )
 
@@ -160,6 +166,11 @@ def build_tools(
             ).as_dict()
 
         result = handler(client, preview)
+        if result.status == "failed":
+            # The token stays spent — it is single-use either way — but a retry
+            # must not be told the change "has already been applied" when the
+            # handler refused on drift or never reached the backend.
+            store.mark_failed(preview.token)
         return {**result.as_dict(), "kind": preview.kind, "target": preview.target}
 
     return (apply_change,)

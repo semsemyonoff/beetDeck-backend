@@ -82,21 +82,22 @@ Request models live in `beetdeck/schemas/` (one module per blueprint plus a shar
 ## MCP server
 
 `beetdeck_mcp/` exposes the library to an MCP client (streamable-http) — album
-browsing, MusicBrainz identification, cover art, lyrics, genres, tag edits. It is
-a **separate process** from Flask, shipped in the same install and image, and it
-talks to this backend over HTTP. Every mutating capability is two-phase: a
-`preview_*` tool returns a diff plus a single-use token, and `apply_change` is the
-only tool that writes. Design notes and the per-kind freshness guarantees are in
-`CLAUDE.md` → *MCP server*.
+browsing, MusicBrainz identification, cover art, lyrics, genres, tag edits, plus
+library rescans, per-track BPM computation, the album ignore flag and a `GET`-only
+`/api/` escape hatch. It is a **separate process** from Flask, shipped in the same
+install and image, and it talks to this backend over HTTP. Every mutating
+capability is two-phase: a `preview_*` tool returns a diff plus a single-use token,
+and `apply_change` is the only tool that writes. Design notes and the per-kind
+freshness guarantees are in `CLAUDE.md` → *MCP server*.
 
 | env | default | notes |
 |---|---|---|
 | `BEETDECK_API_URL` | `http://backend:5000` | this backend's base URL |
 | `BEETDECK_MCP_TOKEN` | — | comma-separated bearer tokens; **empty ⇒ refuses to start** |
 | `MUSICBRAINZ_USER_AGENT` | — | `app/version (contact)`; **empty ⇒ refuses to start** |
-| `BEETDECK_MCP_READONLY` | `0` | disables `apply_change` only; previews still run |
+| `BEETDECK_MCP_READONLY` | `0` | disables `apply_change` only — previews still run, and `rescan_library` / `compute_bpm` / `toggle_album_ignored` still write |
 | `BEETDECK_MCP_HOST` / `_PORT` | `0.0.0.0` / `5100` | bind address of this process |
-| `BEETDECK_MCP_ALLOWED_HOSTS` | — | DNS-rebinding allowlist; needed behind a hostname |
+| `BEETDECK_MCP_ALLOWED_HOSTS` | — | DNS-rebinding allowlist; needed behind a hostname. **Empty ⇒ the check is off entirely**, not narrowed to localhost |
 
 With the backend already running on `:5000`:
 

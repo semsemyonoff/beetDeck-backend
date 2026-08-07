@@ -239,6 +239,33 @@ class TestGetAlbum:
         assert track["filename"] == "missing.mp3"
         assert track["has_lrc"] is False
 
+    def test_one_unreadable_track_does_not_abort_the_whole_album(self, mcp_config):
+        """The tool's own promise: a bad track carries `raw_tags_error` and the
+        rest of the album still comes back."""
+        album = {
+            "id": 1,
+            "album": "Kid A",
+            "albumartist": "Radiohead",
+            "tracks": [{"id": 10, "title": "Idioteque"}, {"id": 11, "title": "Optimistic"}],
+        }
+
+        def handler(request):
+            if request.url.path.endswith("/track/11/tags"):
+                return httpx.Response(404, json={"error": "Track not found"})
+            if request.url.path.endswith("/tags"):
+                return httpx.Response(200, json={"title": "Idioteque"})
+            return httpx.Response(200, json=album)
+
+        client = BeetdeckClient(mcp_config, transport=httpx.MockTransport(handler))
+        tools = {tool.__name__: tool for tool in build_tools(client)}
+
+        result = tools["get_album"](1, include_raw_tags=True)
+
+        good, bad = result["tracks"]
+        assert good["raw_tags"]["title"] == "Idioteque"
+        assert "raw_tags" not in bad
+        assert "Track not found" in bad["raw_tags_error"]
+
     def test_an_album_with_no_tracks_still_carries_an_empty_tracklist(self, tools, db_path):
         album_id = insert_album(db_path, album="Empty", albumartist="Nobody")
         assert tools["get_album"](album_id)["tracks"] == []

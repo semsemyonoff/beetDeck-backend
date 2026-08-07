@@ -357,7 +357,13 @@ def confirm_match(album_id):
         # detected afterwards. Absent field ⇒ unchanged behaviour (the SPA does
         # not send it).
         if expected_generation is not None and (
-            task is None or task.get("match_generation") != expected_generation
+            task is None
+            or task.get("match_generation") != expected_generation
+            # A confirm already in flight has not bumped the generation yet
+            # (`_consume_matches` does that when it finishes), so without this
+            # arm the loser of the race falls through to the 400 below and a
+            # precondition holder is told "no results" instead of "stale".
+            or task.get("status") == "confirming"
         ):
             return jsonify({"error": STALE_GENERATION_ERROR}), 409
         if not task or task.get("status") not in ("done",):

@@ -7,6 +7,7 @@ import pytest
 from starlette.testclient import TestClient
 
 import beetdeck.utils as beetdeck_utils
+import beetdeck_mcp.tools as tools_pkg
 from beetdeck import create_app, state
 from beetdeck_mcp.client import BeetdeckClient
 from beetdeck_mcp.config import load_config
@@ -243,6 +244,22 @@ MCP_TEST_ENV = {
     "MUSICBRAINZ_USER_AGENT": "beetdeck-tests/0.0 (tests@example.invalid)",
     "BEETDECK_API_URL": "http://backend.test",
 }
+
+
+@pytest.fixture(autouse=True)
+def reset_tool_client_caches():
+    """Drop the per-config client caches between tests.
+
+    `Config` is frozen and hashable and `mcp_config` rebuilds an *equal* instance
+    every test, so `tools.client_for` would otherwise hand every later test the
+    first test's client — one bound to the unreachable `http://backend.test`
+    rather than to that test's in-process app, and never closed.
+    """
+    yield
+    for cache in (tools_pkg._CLIENTS, tools_pkg._MB_CLIENTS):
+        for cached in cache.values():
+            cached.close()
+        cache.clear()
 
 
 @pytest.fixture()

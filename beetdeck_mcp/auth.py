@@ -32,13 +32,20 @@ class StaticTokenVerifier:
             raise ValueError("StaticTokenVerifier requires at least one token")
         # The client id is positional, never the token itself: it ends up in
         # logs and in the auth context handed to tools.
+        #
+        # Compared as bytes: `hmac.compare_digest` raises `TypeError` on a `str`
+        # holding a code point above U+007F, and the bearer value comes straight
+        # off the wire (headers decode as latin-1), so a non-ASCII byte in the
+        # header — or in `BEETDECK_MCP_TOKEN` — would be a 500 instead of a 401.
         self._tokens = tuple(
-            (f"beetdeck-mcp-{index}", token) for index, token in enumerate(tokens, 1)
+            (f"beetdeck-mcp-{index}", token.encode("utf-8"))
+            for index, token in enumerate(tokens, 1)
         )
 
     async def verify_token(self, token: str) -> AccessToken | None:
+        candidate = token.encode("utf-8")
         for client_id, known in self._tokens:
-            if hmac.compare_digest(token, known):
+            if hmac.compare_digest(candidate, known):
                 return AccessToken(token=token, client_id=client_id, scopes=[MCP_SCOPE])
         return None
 

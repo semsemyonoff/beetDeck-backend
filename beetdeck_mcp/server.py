@@ -10,7 +10,7 @@ from starlette.responses import JSONResponse
 
 from beetdeck_mcp import resources
 from beetdeck_mcp.auth import StaticTokenVerifier, build_auth_settings
-from beetdeck_mcp.config import Config, load_config
+from beetdeck_mcp.config import Config
 from beetdeck_mcp.tools import register_all
 
 SERVER_NAME = "beetdeck"
@@ -27,7 +27,17 @@ preview tool states its own guarantee.
 
 
 def build_transport_security(config: Config) -> TransportSecuritySettings | None:
-    """DNS-rebinding allowlist, or `None` to keep the SDK's localhost default.
+    """DNS-rebinding allowlist, or `None` when none is configured.
+
+    `None` disables the SDK's protection outright — `TransportSecurityMiddleware`
+    falls back to `enable_dns_rebinding_protection=False`, it does not narrow to
+    localhost. Since this process binds `0.0.0.0` and its port is published, an
+    empty `BEETDECK_MCP_ALLOWED_HOSTS` means no `Host`/`Origin` check at all.
+
+    Each configured entry is registered both bare and as the SDK's `host:*`
+    port wildcard: the `Host` header carries the port the client connected to, so
+    a bare `beetdeck.example` would answer `421` to a client reaching the server
+    on any non-default port. An entry that already names a port is left alone.
 
     Origins are derived from the hosts rather than configured separately: the
     only browser origin that can legitimately reach this server is one of the
@@ -35,18 +45,25 @@ def build_transport_security(config: Config) -> TransportSecuritySettings | None
     """
     if not config.allowed_hosts:
         return None
+    hosts: list[str] = []
+    for host in config.allowed_hosts:
+        hosts.append(host)
+        if ":" not in host:
+            hosts.append(f"{host}:*")
     return TransportSecuritySettings(
-        allowed_hosts=list(config.allowed_hosts),
-        allowed_origins=[
-            f"{scheme}://{host}" for host in config.allowed_hosts for scheme in ("http", "https")
-        ],
+        allowed_hosts=hosts,
+        allowed_origins=[f"{scheme}://{host}" for host in hosts for scheme in ("http", "https")],
     )
 
 
-def create_server(config: Config | None = None) -> MCPServer:
-    """Build the MCP server with auth, `/health` and every registered tool."""
-    config = load_config() if config is None else config
+def create_server(config: Config) -> MCPServer:
+    """Build the MCP server with auth, `/health` and every registered tool.
 
+    `config` is required rather than loaded here as a fallback: `__main__.main`
+    loads it precisely so a `ConfigError` becomes exit 2 with a readable message,
+    and a second load inside server construction would bypass that handling and
+    could diverge from the one the process reported.
+    """
     server = MCPServer(
         name=SERVER_NAME,
         instructions=INSTRUCTIONS,

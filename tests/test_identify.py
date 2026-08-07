@@ -645,6 +645,34 @@ class TestConfirmPrecondition:
         assert resp.status_code == 400
         assert resp.get_json()["error"] == "Invalid candidate index"
 
+    def test_a_confirm_already_in_flight_is_a_409_not_a_400(self, client, mocker):
+        """The loser of a genuine race gets the staleness answer.
+
+        A confirm marks the task `confirming` inside the lock but only bumps the
+        generation when it finishes, so between those two points the precondition
+        still matches — without the `confirming` arm the competing request falls
+        through to "No identification results", which the MCP layer reports as a
+        plain failure instead of "identify again".
+        """
+        gen = _run_identify(client, mocker, _mock_match(mocker))["match_generation"]
+        state.identify_tasks["album_1"]["status"] = "confirming"
+
+        resp = client.post(
+            "/api/album/1/confirm",
+            json={"candidate_index": 0, "expected_generation": gen},
+        )
+        assert resp.status_code == 409
+        assert "changed since the preview" in resp.get_json()["error"]
+
+    def test_a_confirm_in_flight_without_a_precondition_still_returns_400(self, client, mocker):
+        """Unchanged behaviour for the SPA, which sends no precondition."""
+        _run_identify(client, mocker, _mock_match(mocker))
+        state.identify_tasks["album_1"]["status"] = "confirming"
+
+        resp = client.post("/api/album/1/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "No identification results"
+
     def test_missing_task_with_precondition_returns_409(self, client):
         resp = client.post(
             "/api/album/9/confirm",

@@ -88,6 +88,11 @@ BURNED_HISTORY = 256
 
 UNKNOWN_TOKEN = "unknown_token"
 ALREADY_APPLIED = "already_applied"
+#: The token was spent on an apply that came back `failed`. Distinct from
+#: `ALREADY_APPLIED` because that wording asserts a write that did not happen —
+#: a refused drift check or an unreachable backend would otherwise tell the
+#: agent its change had landed.
+APPLY_FAILED = "apply_failed"
 EXPIRED = "expired"
 DRIFT = "drift"
 STALE_GENERATION = "stale_generation"
@@ -190,7 +195,14 @@ def _comparable(value: Any) -> Any:
         return ""
     if isinstance(value, (list, tuple)):
         return tuple(_comparable(entry) for entry in value)
-    return value
+    # Rendered, not raw: the tag endpoints answer with beets' typed values
+    # (`track` is an int, `year` an int, `bpm` a float) while an agent expresses
+    # every new value as a string, so a raw comparison calls `{"track": "5"}` on
+    # a track already at 5 a change. Rendering agrees with the backend's own
+    # coercion (`item_fields.coerce_value`) for every scalar type — except a
+    # bool spelled `"true"` against beets' stored `1`, which this side has no
+    # field schema to resolve and which costs only a redundant write.
+    return str(value)
 
 
 def values_equal(left: Any, right: Any) -> bool:
@@ -356,12 +368,28 @@ class PreviewStore:
 
         Raises `PreviewError` with `ALREADY_APPLIED`, `EXPIRED` or
         `UNKNOWN_TOKEN`, each carrying its own instruction.
+
+        The burn is recorded as `ALREADY_APPLIED` *before* the write is
+        attempted, which is the safe default: a process that dies mid-write must
+        not tell the next caller that nothing happened. `mark_failed` corrects it
+        once the apply is known to have failed.
         """
         with self._lock:
             preview = self._live(token, self.clock())
             del self._records[token]
             self._burn(token, ALREADY_APPLIED)
             return preview
+
+    def mark_failed(self, token: str) -> None:
+        """Re-label a burned token as spent on a *failed* apply.
+
+        Called by `apply_change` once the handler has answered `failed`. Without
+        it, retrying the token answers "has already been applied" — asserting a
+        write that a drift refusal or an unreachable backend never made.
+        """
+        with self._lock:
+            if self._burned.get(token) == ALREADY_APPLIED:
+                self._burn(token, APPLY_FAILED)
 
     def purge_expired(self) -> int:
         """Drop expired records; returns how many went. Mint does this too."""
@@ -400,6 +428,13 @@ class PreviewStore:
                 ALREADY_APPLIED,
                 f"preview token {token} has already been applied — each token commits "
                 "exactly once; re-run the preview if you want to repeat the change",
+            )
+        if reason == APPLY_FAILED:
+            return PreviewError(
+                APPLY_FAILED,
+                f"preview token {token} was already spent on an apply that failed — the "
+                "failure said what went wrong and tokens commit exactly once either way; "
+                "re-run the preview and decide again on the current state",
             )
         if reason == EXPIRED:
             return PreviewError(

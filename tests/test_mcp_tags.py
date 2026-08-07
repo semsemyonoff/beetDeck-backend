@@ -188,6 +188,26 @@ class TestPreviewTagsEdit:
         assert "title" in result["error"]
         assert len(store) == 0
 
+    def test_a_numeric_field_already_at_its_value_is_not_a_change(self, tools, store, db_path):
+        """`fields` values are strings; the read endpoint answers with beets'
+        typed values, so `{"track": "3"}` on a track already at 3 would
+        otherwise diff as `old: 3, new: "3"` and rewrite the file for nothing."""
+        album_id = insert_album(db_path, album="Kid A", albumartist="Radiohead")
+        item_id = insert_item(db_path, album_id, title="Idioteque", track=3, year=2000)
+
+        result = tools["preview_tags_edit"](album_id, item_id, {"track": "3", "year": "2000"})
+
+        assert "nothing to change" in result["error"]
+        assert len(store) == 0
+
+    def test_a_real_numeric_change_is_still_previewed(self, tools, db_path):
+        album_id = insert_album(db_path, album="Kid A", albumartist="Radiohead")
+        item_id = insert_item(db_path, album_id, title="Idioteque", track=3)
+
+        result = tools["preview_tags_edit"](album_id, item_id, {"track": "4"})
+
+        assert result["changes"]["fields"]["track"] == {"old": 3, "new": "4"}
+
 
 class TestPreviewTagsEditRefusals:
     @pytest.mark.parametrize("name", ["length", "bpm", "mb_trackid", "rg_track_gain"])
@@ -370,6 +390,31 @@ class TestApplyTags:
         again = tools["apply_change"](token["preview_token"])
         assert again["status"] == "failed"
         assert "already been applied" in again["detail"][0]
+
+    def test_retrying_after_a_failed_apply_does_not_claim_the_write_landed(
+        self, tools, track, db_path, writable
+    ):
+        """A refused apply burns the token, but not as "already applied".
+
+        The re-read failure below wrote nothing; telling the agent on retry that
+        the change "has already been applied" would assert a write that never
+        happened.
+        """
+        album_id, item_id = track
+        token = tools["preview_tags_edit"](album_id, item_id, {"title": "New Title"})
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        assert tools["apply_change"](token["preview_token"])["status"] == "failed"
+
+        again = tools["apply_change"](token["preview_token"])
+        assert again["status"] == "failed"
+        assert "already been applied" not in again["detail"][0]
+        assert "an apply that failed" in again["detail"][0]
 
     def test_a_readonly_server_writes_nothing_and_keeps_the_token(
         self, make_tools, track, beetdeck_client, writable, store

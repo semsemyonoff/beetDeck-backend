@@ -50,6 +50,13 @@ TOOL_NAMES = ("preview_cover", "preview_lyrics")
 #: would be several thousand tokens of context for a judgement that needs a line.
 EXCERPT_CHARS = 160
 
+#: Both fetch endpoints do one remote lookup per track, sequentially — the lyrics
+#: handler loops `find_lyrics(item)` over the whole album, the cover handler walks
+#: the art sources. The 30 s client default aborts a normal-length album while the
+#: backend keeps going and stashes the result, leaving the agent no token for work
+#: that did happen. Same reasoning as `library.BPM_TIMEOUT`.
+FETCH_TIMEOUT = 300.0
+
 RACE_NOTE = (
     "The backend keeps this fetch in an anonymous stash that cannot be read back, so a "
     "competing fetch (the web UI, another agent) overwrites it and wins without either side "
@@ -116,7 +123,7 @@ def build_tools(
         back, so a cover fetched afterwards from the web UI replaces it and would
         be what `apply_change` writes. Apply promptly, or re-run this preview.
         """
-        response = client.post(f"/api/album/{album_id}/cover/fetch")
+        response = client.post(f"/api/album/{album_id}/cover/fetch", timeout=FETCH_TIMEOUT)
         if not response.ok:
             return failure(response)
 
@@ -168,14 +175,16 @@ def build_tools(
         what `apply_change` writes. Apply promptly, or re-run this preview.
         """
         if item_id is None:
-            response = client.post(f"/api/album/{album_id}/lyrics/fetch")
+            response = client.post(f"/api/album/{album_id}/lyrics/fetch", timeout=FETCH_TIMEOUT)
             if not response.ok:
                 return failure(response)
             rows = [row for row in response.data.get("tracks") or [] if isinstance(row, dict)]
             target = f"album {album_id}"
             subject = f"album {album_id}"
         else:
-            response = client.post(f"/api/album/{album_id}/track/{item_id}/lyrics/fetch")
+            response = client.post(
+                f"/api/album/{album_id}/track/{item_id}/lyrics/fetch", timeout=FETCH_TIMEOUT
+            )
             if not response.ok:
                 return failure(response)
             # The single-track fetch answers about the track it was asked for and

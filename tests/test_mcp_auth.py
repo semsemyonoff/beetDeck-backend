@@ -19,7 +19,8 @@ from beetdeck_mcp.config import (
     ConfigError,
     load_config,
 )
-from beetdeck_mcp.server import build_transport_security, create_http_app
+from beetdeck_mcp.preview import default_store
+from beetdeck_mcp.server import build_transport_security, create_http_app, create_server
 from tests.conftest import MCP_TEST_ENV, MCP_TEST_TOKEN, MCP_TEST_TOKEN_ALT
 
 MCP_HEADERS = {
@@ -146,6 +147,18 @@ class TestStaticTokenVerifier:
         verifier = StaticTokenVerifier(("first", "second"))
         assert asyncio.run(verifier.verify_token(token)) is None
 
+    @pytest.mark.parametrize("token", ["pässwort", "токен", "🎵"])
+    def test_rejects_a_non_ascii_bearer_value_instead_of_raising(self, token):
+        # `hmac.compare_digest` raises TypeError on a `str` above U+007F, which
+        # would turn a bad header into a 500 rather than a 401.
+        verifier = StaticTokenVerifier(("first",))
+        assert asyncio.run(verifier.verify_token(token)) is None
+
+    def test_accepts_a_non_ascii_configured_token(self):
+        verifier = StaticTokenVerifier(("пароль",))
+        access = asyncio.run(verifier.verify_token("пароль"))
+        assert access is not None and access.client_id == "beetdeck-mcp-1"
+
     def test_requires_at_least_one_token(self):
         with pytest.raises(ValueError):
             StaticTokenVerifier(())
@@ -195,11 +208,34 @@ class TestTransportSecurity:
     def test_derives_origins_from_the_allowed_hosts(self):
         config = load_config({**MCP_TEST_ENV, "BEETDECK_MCP_ALLOWED_HOSTS": "mcp.example.org"})
         settings = build_transport_security(config)
-        assert settings.allowed_hosts == ["mcp.example.org"]
+        assert settings.allowed_hosts == ["mcp.example.org", "mcp.example.org:*"]
         assert settings.allowed_origins == [
             "http://mcp.example.org",
             "https://mcp.example.org",
+            "http://mcp.example.org:*",
+            "https://mcp.example.org:*",
         ]
+
+    def test_a_bare_hostname_also_admits_the_port_the_client_connected_to(self):
+        # The Host header carries the port, so a bare entry alone would answer
+        # 421 to every client reaching a non-default port.
+        config = load_config({**MCP_TEST_ENV, "BEETDECK_MCP_ALLOWED_HOSTS": "mcp.example.org"})
+        with TestClient(create_http_app(config)) as http_client:
+            resp = http_client.post(
+                "/mcp",
+                json=INITIALIZE,
+                headers={
+                    **MCP_HEADERS,
+                    "Authorization": f"Bearer {MCP_TEST_TOKEN}",
+                    "Host": "mcp.example.org:5100",
+                },
+            )
+        assert resp.status_code != 421
+
+    def test_an_entry_that_already_names_a_port_is_left_alone(self):
+        config = load_config({**MCP_TEST_ENV, "BEETDECK_MCP_ALLOWED_HOSTS": "mcp.example.org:5100"})
+        settings = build_transport_security(config)
+        assert settings.allowed_hosts == ["mcp.example.org:5100"]
 
     def test_a_host_outside_the_allowlist_is_misdirected(self):
         config = load_config({**MCP_TEST_ENV, "BEETDECK_MCP_ALLOWED_HOSTS": "mcp.example.org"})
@@ -302,3 +338,58 @@ class TestToolRegistration:
         assert resp.status_code == 200
         listed = {tool["name"] for tool in _rpc_result(resp)["result"]["tools"]}
         assert {tool.name for tool in asyncio.run(mcp_server.list_tools())} == listed
+
+
+class TestReadonlyWiring:
+    """`BEETDECK_MCP_READONLY` reaching the tool the server actually registers.
+
+    Every other read-only test builds `apply_change` directly with
+    `readonly=True`; none of them would notice `apply.register` dropping or
+    inverting `readonly=config.readonly`, which is the one line that makes the
+    setting mean anything to a deployed server.
+    """
+
+    def _minted(self, store):
+        return store.mint(
+            "tags",
+            target="item 1",
+            method="PATCH",
+            endpoint="/api/items/1/tags",
+            params={"fields": {"title": "New"}},
+            old_values={"title": "Old"},
+            reread_endpoint="/api/album/1/track/1/tags",
+        )
+
+    def _call(self, server, token):
+        result = asyncio.run(server.call_tool("apply_change", {"preview_token": token}))
+        return json.loads(result.content[0].text)
+
+    def test_a_readonly_config_refuses_through_the_registered_tool(
+        self, beetdeck_client, monkeypatch
+    ):
+        config = load_config({**MCP_TEST_ENV, "BEETDECK_MCP_READONLY": "1"})
+        monkeypatch.setitem(tools_pkg._CLIENTS, config, beetdeck_client)
+        store = default_store()
+        preview = self._minted(store)
+
+        payload = self._call(create_server(config), preview.token)
+
+        assert payload["status"] == "failed"
+        assert "BEETDECK_MCP_READONLY" in payload["detail"][0]
+        # The refusal is not a burn: the token outlives it, as its wording says.
+        assert store.peek(preview.token).token == preview.token
+        store.take(preview.token)
+
+    def test_the_default_config_leaves_the_registered_tool_writing(
+        self, beetdeck_client, mcp_config, monkeypatch
+    ):
+        monkeypatch.setitem(tools_pkg._CLIENTS, mcp_config, beetdeck_client)
+        store = default_store()
+        preview = self._minted(store)
+
+        payload = self._call(create_server(mcp_config), preview.token)
+
+        # The item does not exist in this fixture's library, so the re-read
+        # 404s — but it got as far as the re-read, which read-only never does.
+        assert "BEETDECK_MCP_READONLY" not in payload["detail"][0]
+        assert "could not be re-read" in payload["detail"][0]

@@ -125,6 +125,10 @@ Handler-owned *semantic* errors keep their own `{"error": "…"}` body with no
 `422` (uniform body, framework-produced); bad **value** / missing requirement /
 not found → `400`/`404` (handler body). Clients branch on the status code.
 
+`409` is the third handler-owned class — an optimistic-concurrency refusal, same
+`{"error": …}` body: `POST …/confirm` with a mismatched (or in-flight)
+`expected_generation`, and `POST …/identify` when a run is already in flight.
+
 ## Architecture constraints
 
 **CRITICAL: the app must run as a single process.** It relies on the module-level
@@ -219,7 +223,10 @@ Identify tasks carry a monotonic `match_generation` (`state.next_match_generatio
 exposed on the status responses of `…/identify/status` and the untagged-items
 equivalent alongside `matches_available`. Both confirm endpoints accept an optional
 `expected_generation` and compare it **inside `state.identify_lock`**, so a stale
-confirm is rejected atomically.
+confirm is rejected atomically. A task already in `confirming` state counts as a
+mismatch: the generation is only bumped when the first confirm *finishes*, so
+without that arm the loser of a genuine race would fall through to `400 No
+identification results` instead of the `409` its precondition earned.
 
 This exists because the status endpoint could not otherwise express consumption:
 `_get_task_json` strips every `_`-prefixed key, and `confirm_match` pops `_matches`
@@ -238,12 +245,14 @@ beets 2.10.
 
 ### What `BEETDECK_MCP_READONLY` does and does not disable
 
-It disables `apply_change` **alone**. Every `preview_*` tool still runs, and previews
-have real backend side effects: identification starts a background autotag job, and
-cover/lyrics previews fetch remote data and overwrite the backend stash. Read-only
-means "nothing is written to the library", not "nothing happens". The read-only escape
+It disables `apply_change` **alone** — the gate is the preview→apply contract, not
+"writes". Three tools sit outside that contract and keep writing in read-only mode:
+`rescan_library` (re-imports files into the library), `compute_bpm` (writes a BPM tag
+into the audio file) and `toggle_album_ignored` (flips an album flag). Previews have
+real backend side effects too: identification starts a background autotag job, and
+cover/lyrics previews fetch remote data and overwrite the backend stash. The escape
 hatch `beetdeck_api_call` is `GET`-only and `/api/`-prefixed always, in both modes —
-a write escape would bypass the preview→apply contract that is the server's point.
+a write escape would bypass the contract that is the server's point.
 
 ### MusicBrainz rate gate
 
@@ -266,6 +275,11 @@ Misdirected Request` behind any real hostname.
 `GET /health` is registered as a custom route **after** the MCP endpoints are wrapped
 in `RequireAuthMiddleware`, so it stays reachable without a token — the container
 healthcheck depends on that ordering.
+
+`BEETDECK_MCP_ALLOWED_HOSTS` is compared against the `Host` header, **which carries
+the port**, so `build_transport_security` registers each entry both bare and as the
+SDK's `host:*` wildcard (and derives the `Origin` allowlist from both). An empty
+allowlist does not narrow to localhost — the SDK disables the check entirely.
 
 ## Testing
 

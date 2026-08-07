@@ -7,12 +7,15 @@ precondition against the **real** confirm endpoint in-process — the backend is
 what enforces that one, so a mock would prove nothing.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from beetdeck import state
 from beetdeck_mcp.client import WRITE_KINDS, ApplyResult
 from beetdeck_mcp.preview import (
     ALREADY_APPLIED,
+    APPLY_FAILED,
     BACKEND_PRECONDITION,
     DEFAULT_TTL,
     DRIFT,
@@ -31,6 +34,7 @@ from beetdeck_mcp.preview import (
     freshness_for,
     precondition_failed,
     ttl_for,
+    values_equal,
 )
 from tests.conftest import insert_album
 
@@ -298,6 +302,62 @@ class TestTake:
         assert "already been applied" in str(excinfo.value)
         assert excinfo.value.stale is False
 
+    def test_a_failed_apply_does_not_claim_the_change_landed(self, store):
+        """`mark_failed` corrects the pre-emptive `ALREADY_APPLIED` burn.
+
+        `take` burns before the write is attempted (a process that dies
+        mid-write must not answer "nothing happened"), so without this the
+        retry after a drift refusal or an unreachable backend would assert a
+        write that was never made.
+        """
+        preview = mint_tags(store)
+        store.take(preview.token)
+        store.mark_failed(preview.token)
+
+        with pytest.raises(PreviewError) as excinfo:
+            store.take(preview.token)
+        assert excinfo.value.reason == APPLY_FAILED
+        assert "already been applied" not in str(excinfo.value)
+        assert "an apply that failed" in str(excinfo.value)
+
+    def test_marking_a_token_that_was_never_taken_changes_nothing(self, store):
+        preview = mint_tags(store)
+        store.mark_failed(preview.token)
+        assert store.take(preview.token) == preview
+
+    def test_an_expired_token_is_not_relabelled_as_a_failed_apply(self, store, clock):
+        preview = mint_tags(store)
+        clock.advance(DEFAULT_TTL + 1)
+        with pytest.raises(PreviewError):
+            store.take(preview.token)
+        store.mark_failed(preview.token)
+        with pytest.raises(PreviewError) as excinfo:
+            store.take(preview.token)
+        assert excinfo.value.reason == EXPIRED
+
+    def test_one_token_commits_once_under_concurrent_applies(self, store):
+        """The lookup, the delete and the burn are one critical section.
+
+        The SDK dispatches sync tool callables on a worker thread pool, so two
+        `apply_change` calls with the same token genuinely race; a `peek`-then-
+        `take` refactor would let both commit and write twice.
+        """
+        preview = mint_tags(store)
+        taken, refused = [], []
+
+        def race():
+            try:
+                taken.append(store.take(preview.token))
+            except PreviewError as error:
+                refused.append(error)
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            list(pool.map(lambda _: race(), range(16)))
+
+        assert len(taken) == 1
+        assert len(refused) == 15
+        assert {error.reason for error in refused} == {ALREADY_APPLIED}
+
     def test_an_unknown_token_is_not_reported_as_already_applied(self, store):
         with pytest.raises(PreviewError) as excinfo:
             store.take("identify-nope")
@@ -428,6 +488,20 @@ class TestOldValueDrift:
         """An empty value clears the field, so `None` and `""` are one state."""
         preview = mint_tags(store, old_values={"comments": None})
         check_old_values(preview, {"comments": ""})
+
+    @pytest.mark.parametrize(
+        ("stored", "requested"),
+        [(5, "5"), (2024, "2024"), (128.5, "128.5"), (0, "0")],
+    )
+    def test_a_typed_value_matches_its_string_form(self, store, stored, requested):
+        """The tag endpoints answer with beets' typed values while an agent
+        expresses every new value as a string, so `{"track": "5"}` on a track
+        already at 5 must not read as a change."""
+        assert values_equal(stored, requested)
+
+    @pytest.mark.parametrize(("stored", "requested"), [(5, "6"), (2024, "2025"), (0, "")])
+    def test_different_typed_values_still_read_as_a_change(self, store, stored, requested):
+        assert not values_equal(stored, requested)
 
     def test_list_values_compare_element_wise(self, store):
         preview = mint_tags(store, old_values={"genres": ["Rock", "Pop"]})
