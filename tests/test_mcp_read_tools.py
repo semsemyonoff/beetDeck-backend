@@ -95,9 +95,10 @@ class TestSearchLibrary:
             insert_album(db_path, album=f"Live {index}", albumartist=f"Band {index}")
         result = tools["search_library"]("live", limit=1)
         assert len(result["albums"]) == 1
-        assert result["notes"] == [
-            "albums: showing 1 of 3 — raise `limit` or call again with offset=1"
-        ]
+        # No `offset=` hint: `search_library` has no such argument, and an agent
+        # following the note would get a schema-validation failure.
+        assert result["notes"] == ["albums: showing 1 of 3 — raise `limit` or narrow the query"]
+        assert "offset" not in result["notes"][0]
 
     @pytest.mark.parametrize("limit", [0, -1])
     def test_rejects_a_nonsensical_limit(self, tools, limit):

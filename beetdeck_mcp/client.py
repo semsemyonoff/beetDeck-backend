@@ -263,6 +263,11 @@ class BeetdeckClient:
             return ApiResponse(
                 None, error=f"{method} {path} timed out after {timeout or self.timeout}s: {exc}"
             )
+        except httpx.InvalidURL as exc:
+            # Not an `HTTPError` subclass, so it needs its own arm — a control
+            # character in an agent-supplied path (a trailing newline is enough)
+            # would otherwise escape as a raise and break the never-raise contract.
+            return ApiResponse(None, error=f"{method} {path!r} is not a usable request path: {exc}")
         except httpx.HTTPError as exc:
             return ApiResponse(
                 None, error=f"{method} {path} could not reach the beetDeck API: {exc}"

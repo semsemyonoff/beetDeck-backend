@@ -49,9 +49,13 @@ def _bad_window(limit: int, offset: int) -> dict[str, Any] | None:
 
 
 def _window(
-    rows: Sequence[Any], limit: int, offset: int, label: str
+    rows: Sequence[Any], limit: int, offset: int, label: str, *, pageable: bool = True
 ) -> tuple[list[Any], str | None]:
-    """One page of `rows`, plus a note when anything was left out."""
+    """One page of `rows`, plus a note when anything was left out.
+
+    `pageable=False` for a caller that exposes no `offset` argument, so the note
+    does not send the agent into a tool call that fails schema validation.
+    """
     page = list(rows[offset : offset + limit])
     if len(page) == len(rows):
         return page, None
@@ -59,7 +63,11 @@ def _window(
     if offset:
         note += f" (offset {offset})"
     if offset + len(page) < len(rows):
-        note += f" — raise `limit` or call again with offset={offset + len(page)}"
+        note += (
+            f" — raise `limit` or call again with offset={offset + len(page)}"
+            if pageable
+            else " — raise `limit` or narrow the query"
+        )
     return page, note
 
 
@@ -91,7 +99,7 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
         notes: list[str] = []
         for group in ("artists", "albums", "tracks"):
             rows = response.data.get(group) or []
-            page, note = _window(rows, limit, 0, group)
+            page, note = _window(rows, limit, 0, group, pageable=False)
             result[group] = [compact(row) if isinstance(row, dict) else row for row in page]
             if note is not None:
                 notes.append(note)

@@ -332,6 +332,16 @@ class TestErrors:
         assert response.status_code is None
         assert "timed out" in response.message
 
+    def test_an_unbuildable_path_comes_back_as_data(self):
+        """`httpx.InvalidURL` does not inherit from `HTTPError`; `.strip()` on the
+        mbid removes surrounding whitespace but not an embedded control byte."""
+        response = make_client(lambda request: httpx.Response(200, json={})).get_release(
+            "bad\x00mbid"
+        )
+
+        assert response.status_code is None
+        assert "is not a usable MusicBrainz path" in response.message
+
 
 # ---------------------------------------------------------------------------
 # Trimming

@@ -269,8 +269,9 @@ known limitation, not something the gate can fix from one process.
 unauthenticated write surface, and MusicBrainz rejects anonymous clients. Neither
 degrades to a default. `BEETDECK_MCP_HOST`/`_PORT` are the **in-container** bind only;
 the published host port is a separate compose variable so `dwe test` can remap it.
-Without `BEETDECK_MCP_ALLOWED_HOSTS` the SDK's DNS-rebinding guard answers `421
-Misdirected Request` behind any real hostname.
+The allowlist is *not* a refuse-to-start invariant: an empty
+`BEETDECK_MCP_ALLOWED_HOSTS` starts the server with no `Host`/`Origin` check at all
+(see below), so the bearer token is the only gate.
 
 `GET /health` is registered as a custom route **after** the MCP endpoints are wrapped
 in `RequireAuthMiddleware`, so it stays reachable without a token — the container

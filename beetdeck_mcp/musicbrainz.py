@@ -187,6 +187,10 @@ class MusicBrainzClient:
             response = self._client.get(path, params=query)
         except httpx.TimeoutException as exc:
             return MbResponse(None, error=f"MusicBrainz request {path} timed out: {exc}")
+        except httpx.InvalidURL as exc:
+            # `InvalidURL` does not inherit from `HTTPError`; an mbid carrying a
+            # control character would otherwise raise out of a never-raise method.
+            return MbResponse(None, error=f"{path!r} is not a usable MusicBrainz path: {exc}")
         except httpx.HTTPError as exc:
             return MbResponse(None, error=f"MusicBrainz is unreachable ({path}): {exc}")
 

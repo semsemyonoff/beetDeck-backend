@@ -120,6 +120,15 @@ class TestTransportFailures:
         assert result.status == "failed"
         assert "timed out after 0.5s" in result.detail[0]
 
+    def test_an_unbuildable_path_is_data_not_a_raise(self, mcp_config):
+        """`httpx.InvalidURL` is not an `HTTPError`, and a trailing newline on an
+        agent-supplied path is enough to trigger it."""
+        with _stub_client(mcp_config, _responder(200, {})) as client:
+            response = client.get("/api/albums\n")
+        assert response.status_code is None
+        assert "is not a usable request path" in response.error
+        assert normalize("tags", response).status == "failed"
+
     def test_a_transport_failure_on_a_write_is_never_reported_as_partial(self, mcp_config):
         def handler(request):
             raise httpx.ConnectError("down", request=request)
