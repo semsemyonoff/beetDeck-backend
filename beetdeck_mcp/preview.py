@@ -140,6 +140,12 @@ class Preview:
     params: dict[str, Any] = field(default_factory=dict)
     expected_generation: int | None = None
     old_values: dict[str, Any] | None = None
+    #: Where `apply_change` re-reads `old_values` from, immediately before the
+    #: write. Carried on the record rather than rebuilt at apply time: the read
+    #: path is not derivable from the write path (a tag edit is written per item
+    #: but only readable under its album), and a handler that guessed it wrong
+    #: would compare against the wrong row and pass.
+    reread_endpoint: str | None = None
     #: Passed to `client.write` for the lyrics short-write row (see client.py).
     requested_item_ids: tuple[int, ...] | None = None
     #: The diff the agent was shown; carried so an apply can echo what it did.
@@ -187,6 +193,16 @@ def _comparable(value: Any) -> Any:
     return value
 
 
+def values_equal(left: Any, right: Any) -> bool:
+    """Whether two field values mean the same thing.
+
+    The one comparison rule shared by the preview producers (which decide what
+    counts as a change) and the drift check below (which decides what counts as
+    someone else's change) — two rules would eventually disagree about `""`.
+    """
+    return _comparable(left) == _comparable(right)
+
+
 def check_old_values(preview: Preview, current: Mapping[str, Any]) -> None:
     """Re-read strategy: refuse the apply if anything moved since the preview.
 
@@ -203,7 +219,7 @@ def check_old_values(preview: Preview, current: Mapping[str, Any]) -> None:
     drifted = [
         f"{name}: previewed {old!r}, now {current.get(name)!r}"
         for name, old in preview.old_values.items()
-        if _comparable(current.get(name)) != _comparable(old)
+        if not values_equal(current.get(name), old)
     ]
     if drifted:
         raise PreviewError(
@@ -263,6 +279,7 @@ class PreviewStore:
         params: Mapping[str, Any] | None = None,
         expected_generation: int | None = None,
         old_values: Mapping[str, Any] | None = None,
+        reread_endpoint: str | None = None,
         requested_item_ids: Sequence[int] | None = None,
         summary: Mapping[str, Any] | None = None,
     ) -> Preview:
@@ -280,18 +297,26 @@ class PreviewStore:
                     f"{kind!r} previews must carry expected_generation — without it the "
                     "backend cannot reject a stale confirm"
                 )
-            if old_values is not None:
+            if old_values is not None or reread_endpoint is not None:
                 raise ValueError(f"{kind!r} previews do not carry old_values")
         elif strategy == REREAD_OLD_VALUES:
+            # Claiming the *other* strategy is reported before anything missing:
+            # it says the caller has the wrong model of the kind, which is the
+            # more useful complaint.
+            if expected_generation is not None:
+                raise ValueError(f"{kind!r} previews carry no backend precondition")
             if old_values is None:
                 raise ValueError(
                     f"{kind!r} previews must carry old_values — they are what apply_change "
                     "re-reads and compares before writing"
                 )
-            if expected_generation is not None:
-                raise ValueError(f"{kind!r} previews carry no backend precondition")
+            if not reread_endpoint:
+                raise ValueError(
+                    f"{kind!r} previews must carry reread_endpoint — without it apply_change "
+                    "has nowhere to re-read the previewed values from"
+                )
         else:
-            if expected_generation is not None or old_values is not None:
+            if expected_generation is not None or old_values is not None or reread_endpoint:
                 raise ValueError(
                     f"{kind!r} previews are defended by their TTL alone; they carry neither "
                     "expected_generation nor old_values"
@@ -310,6 +335,7 @@ class PreviewStore:
             params=deepcopy(dict(params or {})),
             expected_generation=expected_generation,
             old_values=None if old_values is None else deepcopy(dict(old_values)),
+            reread_endpoint=reread_endpoint,
             requested_item_ids=None if requested_item_ids is None else tuple(requested_item_ids),
             summary=deepcopy(dict(summary or {})),
             created_at=now,

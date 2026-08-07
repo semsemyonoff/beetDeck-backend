@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from beetdeck_mcp.client import ApplyResult, BeetdeckClient
 from beetdeck_mcp.preview import Preview, PreviewError, PreviewStore, default_store
+from beetdeck_mcp.preview import check_old_values as _check_old_values
 from beetdeck_mcp.preview import precondition_failed as _precondition_failed
 from beetdeck_mcp.tools import client_for
 
@@ -60,9 +61,42 @@ def _apply_backend_precondition(client: BeetdeckClient, preview: Preview) -> App
     return result
 
 
+def _apply_after_reread(client: BeetdeckClient, preview: Preview) -> ApplyResult:
+    """Commit a kind whose freshness only this process can check (`tags`).
+
+    The previewed fields are read again from `preview.reread_endpoint` and
+    compared before the write. A read that fails is a refusal, not a write: the
+    guarantee the token was minted with is the one thing that must not quietly
+    degrade to "wrote it anyway".
+    """
+    current = client.get(preview.reread_endpoint or "")
+    if not current.ok:
+        return ApplyResult(
+            "failed",
+            (
+                f"the current values of {preview.target} could not be re-read before writing "
+                f"({current.message}) — nothing was written, so the previewed values could "
+                "not be confirmed; try again",
+            ),
+        )
+
+    try:
+        _check_old_values(preview, current.data)
+    except PreviewError as refusal:
+        return refusal.as_result()
+
+    return client.write(
+        preview.kind,
+        preview.method,
+        preview.endpoint,
+        json=preview.request_json(),
+    )
+
+
 _HANDLERS: Mapping[str, Callable[[BeetdeckClient, Preview], ApplyResult]] = {
     "identify": _apply_backend_precondition,
     "items_identify": _apply_backend_precondition,
+    "tags": _apply_after_reread,
 }
 
 

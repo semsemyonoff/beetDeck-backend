@@ -70,7 +70,7 @@ def mint_identify(store, *, album_id=1, generation=7, index=0):
     )
 
 
-def mint_tags(store, *, item_id=5, old_values=None):
+def mint_tags(store, *, item_id=5, album_id=1, old_values=None):
     return store.mint(
         "tags",
         target=f"item {item_id}",
@@ -78,6 +78,7 @@ def mint_tags(store, *, item_id=5, old_values=None):
         endpoint=f"/api/items/{item_id}/tags",
         params={"fields": {"title": "New Title"}},
         old_values={"title": "Old Title"} if old_values is None else old_values,
+        reread_endpoint=f"/api/album/{album_id}/track/{item_id}/tags",
     )
 
 
@@ -166,6 +167,7 @@ class TestMint:
             endpoint="/api/items/1/tags",
             params={"fields": fields},
             old_values={"title": "Old"},
+            reread_endpoint="/api/album/1/track/1/tags",
         )
         fields["title"] = "Mutated"
         assert preview.params["fields"]["title"] == "New"
@@ -177,6 +179,38 @@ class TestMint:
     def test_tags_without_old_values_are_refused(self, store):
         with pytest.raises(ValueError, match="must carry old_values"):
             store.mint("tags", target="item 1", method="PATCH", endpoint="/api/items/1/tags")
+
+    def test_tags_without_somewhere_to_re_read_from_are_refused(self, store):
+        """Old values with no read path is the same downgrade as no old values."""
+        with pytest.raises(ValueError, match="must carry reread_endpoint"):
+            store.mint(
+                "tags",
+                target="item 1",
+                method="PATCH",
+                endpoint="/api/items/1/tags",
+                old_values={"title": "Old"},
+            )
+
+    def test_a_backend_enforced_kind_may_not_claim_a_re_read(self, store):
+        with pytest.raises(ValueError, match="do not carry old_values"):
+            store.mint(
+                "identify",
+                target="album 1",
+                method="POST",
+                endpoint="/api/album/1/confirm",
+                expected_generation=1,
+                reread_endpoint="/api/album/1",
+            )
+
+    def test_a_ttl_only_kind_may_not_claim_a_re_read(self, store):
+        with pytest.raises(ValueError, match="defended by their TTL alone"):
+            store.mint(
+                "cover",
+                target="album 1",
+                method="POST",
+                endpoint="/api/album/1/cover/confirm",
+                reread_endpoint="/api/album/1",
+            )
 
     def test_a_ttl_only_kind_may_not_claim_a_stronger_defence(self, store):
         with pytest.raises(ValueError, match="defended by their TTL alone"):
@@ -221,6 +255,7 @@ class TestMint:
             endpoint="/api/album/4/genre/save",
             params={"genre": "Ambient"},
             old_values={"genre": "Rock"},
+            reread_endpoint="/api/album/4",
             summary={"genre": {"old": "Rock", "new": "Ambient"}},
         )
         described = store.describe(preview)

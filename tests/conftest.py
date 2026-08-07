@@ -87,18 +87,26 @@ CREATE TABLE IF NOT EXISTS items (
     original_day INTEGER
 );
 
+-- The flexible-attribute tables mirror beets' own DDL
+-- (`dbcore.Database._make_attribute_table`) rather than declaring a plain
+-- composite primary key: beets updates a flex attr with a bare INSERT and
+-- relies on `ON CONFLICT REPLACE` to overwrite it. Without that clause a test
+-- that writes through the real beets Library raises IntegrityError on any
+-- attribute the item already carries — a failure the app never has.
 CREATE TABLE IF NOT EXISTS album_attributes (
-    entity_id INTEGER REFERENCES albums(id),
+    id INTEGER PRIMARY KEY,
+    entity_id INTEGER,
     key TEXT,
     value TEXT,
-    PRIMARY KEY (entity_id, key)
+    UNIQUE(entity_id, key) ON CONFLICT REPLACE
 );
 
 CREATE TABLE IF NOT EXISTS item_attributes (
-    entity_id INTEGER REFERENCES items(id),
+    id INTEGER PRIMARY KEY,
+    entity_id INTEGER,
     key TEXT,
     value TEXT,
-    PRIMARY KEY (entity_id, key)
+    UNIQUE(entity_id, key) ON CONFLICT REPLACE
 );
 """
 
