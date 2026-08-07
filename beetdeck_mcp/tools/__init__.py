@@ -22,7 +22,15 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
     from beetdeck_mcp.config import Config
 
-TOOL_MODULES: tuple[str, ...] = ("apply", "identify", "media", "musicbrainz", "read", "tags")
+TOOL_MODULES: tuple[str, ...] = (
+    "apply",
+    "genres",
+    "identify",
+    "media",
+    "musicbrainz",
+    "read",
+    "tags",
+)
 
 #: One pooled REST client per configuration, shared by every tool module — the
 #: modules are registered together and live as long as the process, so a client

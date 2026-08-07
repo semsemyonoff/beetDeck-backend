@@ -62,7 +62,7 @@ def _apply_backend_precondition(client: BeetdeckClient, preview: Preview) -> App
 
 
 def _apply_after_reread(client: BeetdeckClient, preview: Preview) -> ApplyResult:
-    """Commit a kind whose freshness only this process can check (`tags`).
+    """Commit a kind whose freshness only this process can check (`tags`, `genres`).
 
     The previewed fields are read again from `preview.reread_endpoint` and
     compared before the write. A read that fails is a refusal, not a write: the
@@ -115,6 +115,7 @@ _HANDLERS: Mapping[str, Callable[[BeetdeckClient, Preview], ApplyResult]] = {
     "identify": _apply_backend_precondition,
     "items_identify": _apply_backend_precondition,
     "tags": _apply_after_reread,
+    "genres": _apply_after_reread,
     "cover": _apply_ttl_only,
     "lyrics": _apply_ttl_only,
 }
