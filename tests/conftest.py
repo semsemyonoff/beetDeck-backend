@@ -8,6 +8,7 @@ from starlette.testclient import TestClient
 
 import beetdeck.utils as beetdeck_utils
 from beetdeck import create_app, state
+from beetdeck_mcp.client import BeetdeckClient
 from beetdeck_mcp.config import load_config
 from beetdeck_mcp.server import create_http_app, create_server
 
@@ -253,6 +254,13 @@ def api_client(mcp_config, api_transport):
     """Blocking httpx client bound to the in-process Flask app."""
     with httpx.Client(transport=api_transport, base_url=mcp_config.api_url) as http_client:
         yield http_client
+
+
+@pytest.fixture()
+def beetdeck_client(mcp_config, api_transport):
+    """The MCP REST client wired to the in-process Flask app."""
+    with BeetdeckClient(mcp_config, transport=api_transport) as rest_client:
+        yield rest_client
 
 
 @pytest.fixture()
