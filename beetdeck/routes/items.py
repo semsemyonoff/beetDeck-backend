@@ -44,6 +44,7 @@ from beetdeck.schemas.items import (
     ItemFieldsResponse,
     ItemsApplyResponse,
     ItemsCandidateBody,
+    ItemsConfirmBody,
     ItemsConfirmResponse,
     ItemsIdentifyBody,
     ItemsIdentifyResponse,
@@ -57,6 +58,8 @@ from beetdeck.schemas.items import (
     UpdateMetadataResponse,
 )
 from beetdeck.utils import (
+    STALE_GENERATION_ERROR,
+    _consume_matches,
     _get_ro_conn,
     _get_task_json,
     _init_beets,
@@ -251,6 +254,7 @@ def _run_items_identify(task_key, item_ids, search_artist, search_album, library
             task["_lib"] = lib
             lib = None
             task["candidates"] = candidates
+            task["match_generation"] = state.next_match_generation()
             task["status"] = "done"
 
     except Exception as e:
@@ -683,6 +687,8 @@ def items_identify():
         "status": "running",
         "candidates": [],
         "error": None,
+        # Set when the background thread builds _matches; None while running.
+        "match_generation": None,
     }
     with state.identify_lock:
         # Remove any previously completed items tasks; close open _lib handles to
@@ -790,25 +796,37 @@ def items_apply(task_id):
 
 @bp.route("/api/items/identify/<task_id>/confirm", methods=["POST"])
 @api.validate(
-    json=ItemsCandidateBody,
+    json=ItemsConfirmBody,
     resp=Response(
         HTTP_200=ItemsConfirmResponse,
         HTTP_400=ErrorResponse,
         HTTP_404=ErrorResponse,
+        HTTP_409=ErrorResponse,
         HTTP_500=ErrorResponse,
     ),
     tags=["items"],
 )
 def items_confirm(task_id):
     """Create a new album from items and write matched tags to files."""
-    # candidate_index validated as int by ItemsCandidateBody (wrong type → 422);
+    # candidate_index validated as int by ItemsConfirmBody (wrong type → 422);
     # an out-of-range index still reaches the handler's own 400 below.
     candidate_index = request.context.json.candidate_index
+    expected_generation = request.context.json.expected_generation
 
     task_key = f"items_{task_id}"
     lib = None
     with state.identify_lock:
         task = state.identify_tasks.get(task_key)
+        # Checked before the status/index checks and inside the same critical
+        # section that marks the task "confirming", so a re-identify or a
+        # competing confirm is rejected atomically. A missing task counts as a
+        # mismatch: items tasks are purged by the next items-identify run, and
+        # "gone" is a staleness answer, not "no results". Absent field ⇒
+        # unchanged behaviour (the SPA does not send it).
+        if expected_generation is not None and (
+            task is None or task.get("match_generation") != expected_generation
+        ):
+            return jsonify({"error": STALE_GENERATION_ERROR}), 409
         if not task or task.get("status") != "done":
             return jsonify({"error": "No identification results"}), 400
         matches = task.get("_matches", [])
@@ -990,7 +1008,7 @@ def items_confirm(task_id):
             # apply_metadata + store() on the same objects would silently skip
             # writing fields that were already flushed before the failure).
             with state.identify_lock:
-                task.pop("_matches", None)
+                _consume_matches(task)
                 task["status"] = "done"
             err_resp = {"error": f"Failed to apply metadata: {e}"}
             if rollback_failures:
@@ -1011,7 +1029,7 @@ def items_confirm(task_id):
                 log.info("Wrote tags for item %d: %s", item.id, item.title)
 
         with state.identify_lock:
-            task.pop("_matches", None)
+            _consume_matches(task)
             task["status"] = "done"
         log.info(
             "Items identify confirm done task=%s album_id=%d warnings=%d",
@@ -1027,7 +1045,7 @@ def items_confirm(task_id):
 
     except Exception as e:
         with state.identify_lock:
-            task.pop("_matches", None)
+            _consume_matches(task)
             task["status"] = "done"
         log.exception("Confirm failed for items task %s", task_id)
         return jsonify({"error": str(e)}), 500

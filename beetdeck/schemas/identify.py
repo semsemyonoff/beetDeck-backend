@@ -25,7 +25,8 @@ Request shapes (verified against the handlers):
   ``data.get("candidate_index", 0)``) with ``extra="forbid"``. A wrong-typed value
   now raises pydantic → ``422`` (this replaces the handlers' manual
   "candidate_index must be an integer" ``400`` check); an out-of-range index still
-  reaches the handler and yields its own ``400``.
+  reaches the handler and yields its own ``400``. ``confirm`` additionally accepts
+  an optional ``expected_generation`` precondition (``ConfirmBody``).
 
 Response validation is active (spectree's default), but with ``force_resp_serialize``
 left ``False`` the handlers' raw ``jsonify(...)`` bytes pass through unchanged; the
@@ -72,6 +73,27 @@ class CandidateBody(BaseModel):
     candidate_index: int = Field(
         default=0,
         description="Index into the task's candidate list (0 = best match).",
+    )
+
+
+class ConfirmBody(CandidateBody):
+    """JSON body for ``POST /api/album/<id>/confirm``.
+
+    Adds an optional precondition on top of ``CandidateBody``: when
+    ``expected_generation`` is sent, the handler compares it against the task's
+    current ``match_generation`` (from the status response) inside
+    ``state.identify_lock`` and rejects a mismatch with ``409``. Omitting it
+    keeps the pre-existing behaviour — the SPA does not send it. The field is
+    deliberately not on ``CandidateBody`` so ``.../apply``, which cannot act on
+    a precondition, still ``422``s it as an unknown field.
+    """
+
+    expected_generation: int | None = Field(
+        default=None,
+        description=(
+            "Precondition: the ``match_generation`` seen in the status response. "
+            "A mismatch (re-identify, or an already-consumed task) yields 409."
+        ),
     )
 
 
@@ -155,6 +177,22 @@ class IdentifyStatusResponse(BaseModel):
     current_artist: str | None = Field(default=None, description="Album artist being processed.")
     current_album: str | None = Field(default=None, description="Album title being processed.")
     error: str | None = Field(default=None, description="Error message when status is 'error'.")
+    match_generation: int | None = Field(
+        default=None,
+        description=(
+            "Identity of the current candidate set; changes on every re-identify and "
+            "when the candidates are consumed by a confirm. Send it back as "
+            "``expected_generation`` to make a confirm conditional. ``null`` until "
+            "candidates exist."
+        ),
+    )
+    matches_available: bool = Field(
+        default=False,
+        description=(
+            "Whether candidates are still confirmable. A confirmed task keeps "
+            "``status: 'done'`` under the same ``task_id`` but drops its candidates."
+        ),
+    )
 
 
 class FieldDiff(BaseModel):

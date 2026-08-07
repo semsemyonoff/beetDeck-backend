@@ -1479,3 +1479,208 @@ class TestItemTagsPatch:
         assert "400" in op["responses"]
         assert "404" in op["responses"]
         assert "application/json" in op["requestBody"]["content"]
+
+
+# ---------------------------------------------------------------------------
+# match_generation / expected_generation precondition (items identify)
+# ---------------------------------------------------------------------------
+
+
+def _mock_items_match(mocker, write_ok=True):
+    """An AlbumMatch stand-in that survives _serialize_candidate and confirm."""
+    item = mocker.MagicMock()
+    item.id = 1
+    item.album_id = 10
+    item.track = 1
+    item.title = "Old Title"
+    item.path = b"/music/track.mp3"
+    item.try_write.return_value = write_ok
+
+    track = mocker.MagicMock()
+    track.title = "New Title"
+    track.index = 1
+    track.artist = "Artist"
+    track.length = 100
+
+    match = mocker.MagicMock()
+    match.distance = 0.1
+    match.info.artist = "Artist"
+    match.info.album = "Album"
+    match.info.year = 2000
+    match.info.label = "Label"
+    match.info.media = "CD"
+    match.info.data_source = "MusicBrainz"
+    match.info.album_id = "mbid-1"
+    match.info.tracks = [track]
+    match.mapping = {item: track}
+    return match
+
+
+def _run_items_identify(client, mocker, match, item_ids=(1,)):
+    """Drive POST /api/items/identify with mocked beets; return (task_id, status)."""
+    import time
+
+    item = next(iter(match.mapping))
+    mock_album = mocker.MagicMock()
+    mock_album.id = 99
+
+    mock_lib = mocker.MagicMock()
+    mock_lib.get_item.return_value = item
+    mock_lib.add_album.return_value = mock_album
+
+    mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+    mock_proposal = mocker.MagicMock()
+    mock_proposal.candidates = [match]
+    mocker.patch(
+        "beets.autotag.tag_album",
+        return_value=("Artist", "Album", mock_proposal),
+    )
+
+    resp = client.post("/api/items/identify", json={"item_ids": list(item_ids)})
+    assert resp.status_code == 200
+    task_id = resp.get_json()["task_id"]
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        data = client.get(f"/api/items/identify/{task_id}/status").get_json()
+        if data["status"] in ("done", "error"):
+            assert data["status"] == "done", data
+            return task_id, data
+        time.sleep(0.02)
+    raise AssertionError("items identify did not finish in time")
+
+
+class TestItemsMatchGeneration:
+    def setup_method(self):
+        _reset_state()
+
+    def test_status_reports_generation_and_matches_available(self, client, mocker):
+        _, data = _run_items_identify(client, mocker, _mock_items_match(mocker))
+        assert isinstance(data["match_generation"], int)
+        assert data["matches_available"] is True
+
+    def test_running_task_has_no_generation_and_no_matches(self, client):
+        state.identify_tasks["items_r1"] = {
+            "task_id": "r1",
+            "status": "running",
+            "candidates": [],
+            "match_generation": None,
+        }
+        data = client.get("/api/items/identify/r1/status").get_json()
+        assert data["match_generation"] is None
+        assert data["matches_available"] is False
+
+    def test_confirm_succeeds_with_matching_generation(self, client, mocker):
+        task_id, data = _run_items_identify(client, mocker, _mock_items_match(mocker))
+
+        resp = client.post(
+            f"/api/items/identify/{task_id}/confirm",
+            json={"candidate_index": 0, "expected_generation": data["match_generation"]},
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "ok"
+
+    def test_consumed_task_reports_matches_unavailable(self, client, mocker):
+        task_id, data = _run_items_identify(client, mocker, _mock_items_match(mocker))
+        gen = data["match_generation"]
+
+        assert (
+            client.post(
+                f"/api/items/identify/{task_id}/confirm",
+                json={"candidate_index": 0, "expected_generation": gen},
+            ).status_code
+            == 200
+        )
+
+        after = client.get(f"/api/items/identify/{task_id}/status").get_json()
+        assert after["status"] == "done"
+        assert after["matches_available"] is False
+        assert after["match_generation"] != gen
+
+    def test_second_confirm_rejected_by_precondition_not_index(self, client, mocker):
+        task_id, data = _run_items_identify(client, mocker, _mock_items_match(mocker))
+        gen = data["match_generation"]
+
+        assert (
+            client.post(
+                f"/api/items/identify/{task_id}/confirm",
+                json={"candidate_index": 0, "expected_generation": gen},
+            ).status_code
+            == 200
+        )
+
+        resp = client.post(
+            f"/api/items/identify/{task_id}/confirm",
+            json={"candidate_index": 0, "expected_generation": gen},
+        )
+        assert resp.status_code == 409
+        assert "changed since the preview" in resp.get_json()["error"]
+
+    def test_second_confirm_without_precondition_falls_through_to_400(self, client, mocker):
+        """The behaviour the precondition exists to replace, pinned as-is."""
+        task_id, _ = _run_items_identify(client, mocker, _mock_items_match(mocker))
+        url = f"/api/items/identify/{task_id}/confirm"
+        assert client.post(url, json={"candidate_index": 0}).status_code == 200
+
+        resp = client.post(url, json={"candidate_index": 0})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "Invalid candidate index"
+
+    def test_purged_task_with_precondition_returns_409(self, client, mocker):
+        """A completed items task is purged by the next run — that is staleness."""
+        first_id, data = _run_items_identify(client, mocker, _mock_items_match(mocker))
+        gen = data["match_generation"]
+
+        second_id, _ = _run_items_identify(client, mocker, _mock_items_match(mocker))
+        assert second_id != first_id
+        assert f"items_{first_id}" not in state.identify_tasks
+
+        resp = client.post(
+            f"/api/items/identify/{first_id}/confirm",
+            json={"candidate_index": 0, "expected_generation": gen},
+        )
+        assert resp.status_code == 409
+        assert "changed since the preview" in resp.get_json()["error"]
+        # The live task is untouched by the rejected confirm.
+        assert state.identify_tasks[f"items_{second_id}"]["status"] == "done"
+
+    def test_purged_task_without_precondition_still_returns_400(self, client, mocker):
+        first_id, _ = _run_items_identify(client, mocker, _mock_items_match(mocker))
+        _run_items_identify(client, mocker, _mock_items_match(mocker))
+
+        resp = client.post(f"/api/items/identify/{first_id}/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "No identification results"
+
+    def test_stale_generation_on_live_task_returns_409(self, client, mocker):
+        task_id, data = _run_items_identify(client, mocker, _mock_items_match(mocker))
+
+        resp = client.post(
+            f"/api/items/identify/{task_id}/confirm",
+            json={"candidate_index": 0, "expected_generation": data["match_generation"] + 1},
+        )
+        assert resp.status_code == 409
+        assert state.identify_tasks[f"items_{task_id}"]["_matches"]
+
+    def test_apply_rejects_expected_generation_as_unknown_field(self, client):
+        resp = client.post(
+            "/api/items/identify/t1/apply",
+            json={"candidate_index": 0, "expected_generation": 1},
+        )
+        assert resp.status_code == 422
+
+    def test_confirm_documents_409_and_precondition_in_spec(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        op = spec["paths"]["/api/items/identify/{task_id}/confirm"]["post"]
+        assert "409" in op["responses"]
+        ref = op["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+        model = spec["components"]["schemas"][ref.rsplit("/", 1)[-1]]
+        assert "expected_generation" in model["properties"]
+
+    def test_status_documents_generation_fields_in_spec(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        op = spec["paths"]["/api/items/identify/{task_id}/status"]["get"]
+        ref = op["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+        model = spec["components"]["schemas"][ref.rsplit("/", 1)[-1]]
+        assert "match_generation" in model["properties"]
+        assert "matches_available" in model["properties"]

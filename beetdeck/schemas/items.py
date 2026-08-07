@@ -74,6 +74,7 @@ __all__ = [
     "UpdateMetadataBody",
     "UpdateMetadataResponse",
     "ItemsCandidateBody",
+    "ItemsConfirmBody",
 ]
 
 # The apply preview reuses identify's diff shape verbatim.
@@ -245,6 +246,27 @@ class ItemsCandidateBody(BaseModel):
     )
 
 
+class ItemsConfirmBody(ItemsCandidateBody):
+    """JSON body for ``POST /api/items/identify/<task_id>/confirm``.
+
+    Adds an optional precondition on top of ``ItemsCandidateBody``: when
+    ``expected_generation`` is sent, the handler compares it against the task's
+    current ``match_generation`` (from the status response) inside
+    ``state.identify_lock`` and rejects a mismatch with ``409`` — which also
+    covers the case where the task was purged by a later items-identify run.
+    Omitting it keeps the pre-existing behaviour. Deliberately not on
+    ``ItemsCandidateBody`` so ``.../apply`` still ``422``s it as unknown.
+    """
+
+    expected_generation: int | None = Field(
+        default=None,
+        description=(
+            "Precondition: the ``match_generation`` seen in the status response. "
+            "A mismatch (re-identify, purge, or an already-consumed task) yields 409."
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------
@@ -321,6 +343,22 @@ class ItemsIdentifyStatusResponse(BaseModel):
         default_factory=list, description="Identified candidates (populated when done)."
     )
     error: str | None = Field(default=None, description="Error message when status is 'error'.")
+    match_generation: int | None = Field(
+        default=None,
+        description=(
+            "Identity of the current candidate set; changes on every re-identify and "
+            "when the candidates are consumed by a confirm. Send it back as "
+            "``expected_generation`` to make a confirm conditional. ``null`` until "
+            "candidates exist."
+        ),
+    )
+    matches_available: bool = Field(
+        default=False,
+        description=(
+            "Whether candidates are still confirmable. A confirmed task keeps "
+            "``status: 'done'`` under the same ``task_id`` but drops its candidates."
+        ),
+    )
 
 
 class ItemsConfirmResponse(BaseModel):
