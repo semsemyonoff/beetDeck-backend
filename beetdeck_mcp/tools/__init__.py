@@ -12,21 +12,33 @@ from __future__ import annotations
 
 import importlib
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
-from beetdeck_mcp.client import ApiResponse, BeetdeckClient
+from beetdeck_mcp.client import BeetdeckClient
+from beetdeck_mcp.musicbrainz import MusicBrainzClient
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from mcp.server import MCPServer
 
     from beetdeck_mcp.config import Config
 
-TOOL_MODULES: tuple[str, ...] = ("apply", "identify", "read")
+TOOL_MODULES: tuple[str, ...] = ("apply", "identify", "musicbrainz", "read")
 
 #: One pooled REST client per configuration, shared by every tool module — the
 #: modules are registered together and live as long as the process, so a client
 #: each would mean a connection pool each for the same backend.
 _CLIENTS: dict["Config", BeetdeckClient] = {}
+
+#: Same reasoning for MusicBrainz, plus a harder requirement: the ≤1 req/s gate
+#: lives on the client, so a second instance would double the request rate.
+_MB_CLIENTS: dict["Config", MusicBrainzClient] = {}
+
+
+class FailedResponse(Protocol):
+    """What `failure()` needs — `client.ApiResponse` and `musicbrainz.MbResponse`."""
+
+    @property
+    def message(self) -> str: ...  # pragma: no cover - structural typing only
 
 
 def compact(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -44,7 +56,7 @@ def compact(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def failure(response: ApiResponse) -> dict[str, Any]:
+def failure(response: FailedResponse) -> dict[str, Any]:
     """A failed round trip as a tool result.
 
     Deliberately carries no result key: an unreachable backend must not read as
@@ -59,6 +71,15 @@ def client_for(config: "Config") -> BeetdeckClient:
     if client is None:
         client = BeetdeckClient(config)
         _CLIENTS[config] = client
+    return client
+
+
+def musicbrainz_client_for(config: "Config") -> MusicBrainzClient:
+    """The MusicBrainz client every tool module should use for `config`."""
+    client = _MB_CLIENTS.get(config)
+    if client is None:
+        client = MusicBrainzClient(config.musicbrainz_user_agent)
+        _MB_CLIENTS[config] = client
     return client
 
 
