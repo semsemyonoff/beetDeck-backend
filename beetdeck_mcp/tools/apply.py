@@ -93,10 +93,30 @@ def _apply_after_reread(client: BeetdeckClient, preview: Preview) -> ApplyResult
     )
 
 
+def _apply_ttl_only(client: BeetdeckClient, preview: Preview) -> ApplyResult:
+    """Commit a kind nothing but the clock defends (`cover`, `lyrics`).
+
+    There is no check to make: the backend's fetch stash has no identity and no
+    read endpoint, so a competing fetch cannot be detected from here at all. The
+    honest implementation is to send the request and let the normalizer report
+    what came back — including the ids the lyrics confirm silently skipped, which
+    is why `requested_item_ids` is threaded through.
+    """
+    return client.write(
+        preview.kind,
+        preview.method,
+        preview.endpoint,
+        json=preview.request_json(),
+        requested_item_ids=preview.requested_item_ids,
+    )
+
+
 _HANDLERS: Mapping[str, Callable[[BeetdeckClient, Preview], ApplyResult]] = {
     "identify": _apply_backend_precondition,
     "items_identify": _apply_backend_precondition,
     "tags": _apply_after_reread,
+    "cover": _apply_ttl_only,
+    "lyrics": _apply_ttl_only,
 }
 
 

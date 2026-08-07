@@ -397,9 +397,15 @@ class TestApplyChange:
         assert result["status"] == "failed"
         assert "no such preview token" in result["detail"][0]
 
-    def test_a_kind_with_no_handler_is_refused_explicitly(self, tools, store, album):
+    def test_a_kind_with_no_handler_is_refused_explicitly(self, tools, store, album, mocker):
         """Preview kinds arrive one task at a time; an unhandled one must say
-        what it is rather than fail obscurely."""
+        what it is rather than fail obscurely.
+
+        The handler table is emptied rather than picking whichever kind happens
+        to be unimplemented today — that choice would expire as the remaining
+        kinds land, and the behaviour under test is the lookup, not the gap.
+        """
+        mocker.patch.dict("beetdeck_mcp.tools.apply._HANDLERS", {}, clear=True)
         token = store.mint(
             "cover",
             target=f"album {album}",
