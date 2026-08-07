@@ -17,11 +17,11 @@ library would be worse than one that says what went wrong.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
-from beetdeck_mcp.client import ApiResponse, BeetdeckClient
-from beetdeck_mcp.tools import client_for
+from beetdeck_mcp.client import BeetdeckClient
+from beetdeck_mcp.tools import client_for, compact, failure
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from mcp.server import MCPServer
@@ -37,24 +37,6 @@ DEFAULT_ALBUM_LIMIT = 100
 DEFAULT_ITEM_LIMIT = 200
 
 AlbumFilter = Literal["all", "untagged", "ignored"]
-
-
-def _compact(row: Mapping[str, Any]) -> dict[str, Any]:
-    """Drop absent values — `None`, `""` and empty containers.
-
-    Booleans stay: `tagged: false` is a fact about the album, not an absence.
-    """
-    return {
-        key: value
-        for key, value in row.items()
-        if value is not None
-        and value != ""
-        and not (isinstance(value, (list, dict, tuple)) and not value)
-    }
-
-
-def _failure(response: ApiResponse) -> dict[str, Any]:
-    return {"error": response.message}
 
 
 def _bad_window(limit: int, offset: int) -> dict[str, Any] | None:
@@ -103,14 +85,14 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
 
         response = client.get("/api/search", params={"q": query})
         if not response.ok:
-            return _failure(response)
+            return failure(response)
 
         result: dict[str, Any] = {"query": query}
         notes: list[str] = []
         for group in ("artists", "albums", "tracks"):
             rows = response.data.get(group) or []
             page, note = _window(rows, limit, 0, group)
-            result[group] = [_compact(row) if isinstance(row, dict) else row for row in page]
+            result[group] = [compact(row) if isinstance(row, dict) else row for row in page]
             if note is not None:
                 notes.append(note)
         if notes:
@@ -141,7 +123,7 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
 
         response = client.get("/api/library")
         if not response.ok:
-            return _failure(response)
+            return failure(response)
         groups = response.payload if isinstance(response.payload, list) else []
 
         rows: list[dict[str, Any]] = []
@@ -155,7 +137,7 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
                 if filter == "ignored" and not ignored:
                     continue
                 rows.append(
-                    _compact(
+                    compact(
                         {
                             "id": album.get("id"),
                             "artist": artist,
@@ -194,12 +176,10 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
         """
         response = client.get(f"/api/album/{album_id}")
         if not response.ok:
-            return _failure(response)
+            return failure(response)
 
         tracks = [
-            _compact(track)
-            for track in response.data.get("tracks") or []
-            if isinstance(track, dict)
+            compact(track) for track in response.data.get("tracks") or [] if isinstance(track, dict)
         ]
         if include_raw_tags:
             for track in tracks:
@@ -209,7 +189,7 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
                 else:
                     track["raw_tags_error"] = tags.message
 
-        album = _compact(response.data)
+        album = compact(response.data)
         # Kept even when empty: an album with no tracks is a finding, not an
         # absence, and it is exactly what a broken import looks like.
         album["tracks"] = tracks
@@ -228,14 +208,14 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
 
         response = client.get("/api/items/untagged")
         if not response.ok:
-            return _failure(response)
+            return failure(response)
         items = response.payload if isinstance(response.payload, list) else []
 
         page, note = _window(items, limit, offset, "items")
         result: dict[str, Any] = {
             "total": len(items),
             "offset": offset,
-            "items": [_compact(item) if isinstance(item, dict) else item for item in page],
+            "items": [compact(item) if isinstance(item, dict) else item for item in page],
         }
         if note is not None:
             result["notes"] = [note]

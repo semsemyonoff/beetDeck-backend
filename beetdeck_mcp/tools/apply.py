@@ -1,0 +1,114 @@
+"""`apply_change` — the only tool in this server that writes.
+
+Every mutating capability mints a preview token; this is where a token is spent.
+Concentrating the writes in one tool is what makes `BEETDECK_MCP_READONLY`
+meaningful: a single check disables every write while leaving the whole preview
+surface working, so an agent can still sweep the library and report what it
+*would* change.
+
+Committing a token is three steps, and each one belongs to a different owner:
+
+1. the store burns the token (single use, TTL) — `preview.py`;
+2. the kind's handler applies its freshness strategy and sends the request —
+   here;
+3. the client maps the response onto `ok`/`partial`/`failed` — `client.py`.
+
+`_HANDLERS` is keyed by preview kind; later tool tasks add their kind here, so a
+kind that can be previewed but not committed is visible as a missing entry rather
+than as a mystery at apply time.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, Any
+
+from beetdeck_mcp.client import ApplyResult, BeetdeckClient
+from beetdeck_mcp.preview import Preview, PreviewError, PreviewStore, default_store
+from beetdeck_mcp.preview import precondition_failed as _precondition_failed
+from beetdeck_mcp.tools import client_for
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from mcp.server import MCPServer
+
+    from beetdeck_mcp.config import Config
+
+TOOL_NAMES = ("apply_change",)
+
+READONLY_REFUSAL = (
+    "BEETDECK_MCP_READONLY is set on this server — apply_change is disabled and nothing was "
+    "written. Previews still work, so you can report what would change; the preview token "
+    "remains valid until it expires."
+)
+
+
+def _apply_backend_precondition(client: BeetdeckClient, preview: Preview) -> ApplyResult:
+    """Commit a kind whose freshness the backend enforces (the identify kinds).
+
+    `request_json()` adds `expected_generation`, which the confirm handler
+    compares inside `state.identify_lock` — so a re-identify or a competing
+    confirm is rejected there, atomically, and comes back as a `409`.
+    """
+    result = client.write(
+        preview.kind,
+        preview.method,
+        preview.endpoint,
+        json=preview.request_json(),
+    )
+    if result.stale:
+        return _precondition_failed(preview, result).as_result()
+    return result
+
+
+_HANDLERS: Mapping[str, Callable[[BeetdeckClient, Preview], ApplyResult]] = {
+    "identify": _apply_backend_precondition,
+}
+
+
+def build_tools(
+    client: BeetdeckClient,
+    store: PreviewStore,
+    *,
+    readonly: bool = False,
+) -> tuple[Callable[..., dict[str, Any]], ...]:
+    """`apply_change` bound to `client`, `store` and the read-only flag."""
+
+    def apply_change(preview_token: str) -> dict[str, Any]:
+        """Commit a previewed change. This is the only tool that writes.
+
+        Pass the `preview_token` returned by a `preview_*` tool. Tokens are
+        single-use and time-limited, and a refusal always says which it was:
+        expired, already applied, the previewed values changed, or identification
+        was re-run. In every one of those cases **nothing was written** — re-run
+        the preview and decide again on the current state.
+
+        The result is `{status, detail}` where `status` is `ok`, `partial` (the
+        database was written but not every file) or `failed`.
+        """
+        if readonly:
+            return ApplyResult("failed", (READONLY_REFUSAL,)).as_dict()
+
+        try:
+            preview = store.take(preview_token)
+        except PreviewError as refusal:
+            return refusal.as_result().as_dict()
+
+        handler = _HANDLERS.get(preview.kind)
+        if handler is None:
+            return ApplyResult(
+                "failed",
+                (
+                    f"apply_change cannot commit a {preview.kind!r} preview — this server "
+                    "build has no handler for that kind; nothing was written",
+                ),
+            ).as_dict()
+
+        result = handler(client, preview)
+        return {**result.as_dict(), "kind": preview.kind, "target": preview.target}
+
+    return (apply_change,)
+
+
+def register(server: "MCPServer", config: "Config") -> None:
+    for tool in build_tools(client_for(config), default_store(), readonly=config.readonly):
+        server.add_tool(tool)

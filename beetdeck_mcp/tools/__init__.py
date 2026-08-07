@@ -11,21 +11,46 @@ Each listed module must expose `register(server, config) -> None` and a
 from __future__ import annotations
 
 import importlib
-from typing import TYPE_CHECKING
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
-from beetdeck_mcp.client import BeetdeckClient
+from beetdeck_mcp.client import ApiResponse, BeetdeckClient
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from mcp.server import MCPServer
 
     from beetdeck_mcp.config import Config
 
-TOOL_MODULES: tuple[str, ...] = ("read",)
+TOOL_MODULES: tuple[str, ...] = ("apply", "identify", "read")
 
 #: One pooled REST client per configuration, shared by every tool module — the
 #: modules are registered together and live as long as the process, so a client
 #: each would mean a connection pool each for the same backend.
 _CLIENTS: dict["Config", BeetdeckClient] = {}
+
+
+def compact(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop absent values — `None`, `""` and empty containers.
+
+    Every payload lands in an agent's context window, so absent fields are not
+    worth their tokens. Booleans stay: `tagged: false` is a fact, not an absence.
+    """
+    return {
+        key: value
+        for key, value in row.items()
+        if value is not None
+        and value != ""
+        and not (isinstance(value, (list, dict, tuple)) and not value)
+    }
+
+
+def failure(response: ApiResponse) -> dict[str, Any]:
+    """A failed round trip as a tool result.
+
+    Deliberately carries no result key: an unreachable backend must not read as
+    an empty library.
+    """
+    return {"error": response.message}
 
 
 def client_for(config: "Config") -> BeetdeckClient:
