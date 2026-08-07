@@ -8,6 +8,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from beetdeck_mcp import resources
 from beetdeck_mcp.auth import StaticTokenVerifier, build_auth_settings
 from beetdeck_mcp.config import Config, load_config
 from beetdeck_mcp.tools import register_all
@@ -61,6 +62,10 @@ def create_server(config: Config | None = None) -> MCPServer:
         return JSONResponse({"status": "ok", "readonly": config.readonly})
 
     register_all(server, config)
+    # Resources are registered here rather than through `register_all`: that loop
+    # is the tool registry (one module per tool group, each with `TOOL_NAMES`),
+    # and resources are a different capability with a different contract.
+    resources.register(server, config)
     return server
 
 
