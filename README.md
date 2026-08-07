@@ -14,14 +14,17 @@ repo is source for the backend only.
 
 ## Requirements
 
-- Python 3.12+ (the production image uses 3.14)
-- beets 2.10.0
+- Python 3.10+ (the production image uses 3.14)
+- ffmpeg (audio fingerprinting and BPM computation)
+- beets — pinned to an exact release tarball in `pyproject.toml`; that pin is the
+  single source of truth for the version
 
 ## Architecture
 
-- **Flask + gunicorn** (1 worker, 4 threads). Single worker is required because
-  in-memory state (identification tasks, cover previews) must be shared across
-  request threads. Routes are organized as Flask Blueprints under `beetdeck/routes/`.
+- **Flask + gunicorn** (1 worker, 4 threads). A single worker is required because
+  in-memory state (identification tasks, cover previews, scan progress) is shared
+  across request threads — see *Architecture constraints* in `CLAUDE.md`. Routes
+  are organized as Flask Blueprints under `beetdeck/routes/`.
 - **beets integration**: uses the beets Python API directly (not the CLI) for
   identification, genre lookup, cover art, and lyrics. The CLI is only used for
   `beet import` (rescan) and `beet update` (prune stale entries). Genres are
@@ -32,7 +35,8 @@ repo is source for the backend only.
   time to inject the hashed JS/CSS into `beetdeck/templates/index.html`.
 
 The app reads `BEETS_LIBRARY_DB`, `BEETS_IMPORT_DIR`, `BEETS_LIBRARY_ROOT`, and
-`BEETSDIR` from the environment — see the table in `CLAUDE.md` for defaults.
+`BEETS_COVER_CACHE_DIR` from the environment; the `beet` CLI reads `BEETSDIR`.
+Defaults are tabulated in `CLAUDE.md` → *Configuration*.
 
 ## Local development
 
@@ -58,13 +62,10 @@ make coverage
 ```
 
 The frontend SPA lives in its own repository and is served by Flask in
-production from `beetdeck/static/dist/` (the Vite manifest is read at request time to
-inject the hashed JS/CSS into `beetdeck/templates/index.html`). To exercise the full
-UI locally, run the frontend's Vite dev server from its repository (HMR) and point
-it at this backend's API.
-
-Producing the production image (which builds the SPA and bakes it in) is the job
-of the `beetDeck/deploy` repository; see its README.
+production from `beetdeck/static/dist/`. To exercise the full UI locally, run the
+frontend's Vite dev server from its repository (HMR) and point it at this
+backend's API. Producing the production image (which builds the SPA and bakes it
+in) is the job of the `beetDeck/deploy` repository; see its README.
 
 ## API reference
 
@@ -76,6 +77,11 @@ single source of truth — there is no hand-maintained endpoint table here.
 - **OpenAPI spec (JSON):** `GET /apidoc/openapi.json`
 
 Request models live in `beetdeck/schemas/` (one module per blueprint plus a shared
-`common.py`); the `SpecTree` singleton lives in `beetdeck/api.py`. For the uniform
-`422` validation-error contract returned on invalid input, see the **Validation
-Error Contract** section in `CLAUDE.md`.
+`common.py`); the `SpecTree` singleton lives in `beetdeck/api.py`.
+
+## Further documentation
+
+- `CLAUDE.md` — notes for AI agents: invariants, contracts the spec cannot express,
+  and the reasoning behind the threading and app-factory design.
+- `docs/layout.md` — annotated repository tree.
+- `docs/beets-upgrades.md` — per-release notes from bumping the beets pin.
