@@ -139,15 +139,19 @@ _ROLLBACK_FIELDS = (
     "discogs_albumid",
     "discogs_artistid",
     "discogs_labelid",
-    # Classical/extended track fields
-    "arranger",
+    # Classical/extended track fields. These four are the multi-valued forms
+    # beets renamed the singulars to (the multi_{arranger,composer,lyricist,
+    # remixer}_field migrations); the singulars are no longer Item fields at
+    # all, so snapshotting them restored nothing and made rollback stamp a NULL
+    # flex attribute onto every item.
+    "arrangers",
     "bpm",
-    "composer",
+    "composers",
     "composer_sort",
     "initial_key",
     "length",
-    "lyricist",
-    "remixer",
+    "lyricists",
+    "remixers",
     "subtitle",
     "trackdisambig",
     "work",

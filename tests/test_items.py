@@ -831,6 +831,45 @@ class TestItemsApply:
 # ---------------------------------------------------------------------------
 
 
+class TestRollbackFieldsCoverage:
+    """Pins _ROLLBACK_FIELDS to the beets field set it is supposed to mirror.
+
+    The list drifted silently once already: beets renamed arranger/composer/
+    lyricist/remixer to their plural multi-valued forms and the snapshot kept
+    the dead singulars, so an identify rollback could not restore those four
+    fields at all. Checked against the installed beets rather than a literal, so
+    the next upstream rename fails here instead of rotting.
+    """
+
+    # Written by apply_metadata() as flexible attributes — they are deliberately
+    # snapshotted even though beets does not declare them as Item fields.
+    FLEX_ONLY = {"data_source", "data_url", "track_alt"}
+
+    def test_covers_every_media_tag_field(self):
+        from beets.library import Item
+
+        from beetdeck.routes.items import _ROLLBACK_FIELDS
+
+        # from_scratch imports call item.clear(), which zeroes every media tag
+        # field before the update — anything missing here cannot be rolled back.
+        assert set(Item._media_tag_fields) <= set(_ROLLBACK_FIELDS)
+
+    def test_has_no_entries_beets_no_longer_knows(self):
+        from beets.library import Item
+
+        from beetdeck.routes.items import _ROLLBACK_FIELDS
+
+        # Rollback does setattr() over the whole snapshot, so a name beets has
+        # dropped is not merely useless: it stamps a NULL flex attribute onto
+        # every rolled-back item.
+        assert set(_ROLLBACK_FIELDS) - set(Item._fields) == self.FLEX_ONLY
+
+    def test_has_no_duplicates(self):
+        from beetdeck.routes.items import _ROLLBACK_FIELDS
+
+        assert len(_ROLLBACK_FIELDS) == len(set(_ROLLBACK_FIELDS))
+
+
 class TestItemsConfirm:
     def setup_method(self):
         _reset_state()
