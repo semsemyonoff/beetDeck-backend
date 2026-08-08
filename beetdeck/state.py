@@ -11,6 +11,19 @@ import threading
 identify_tasks: dict = {}
 identify_lock = threading.Lock()
 
+# Monotonic counter behind the ``match_generation`` field of identify tasks.
+# Process-wide (not per task) so a generation value is never reused after a task
+# dict is replaced by a re-identify.
+_match_generation = 0
+
+
+def next_match_generation():
+    """Return a fresh match generation. Caller must hold ``identify_lock``."""
+    global _match_generation
+    _match_generation += 1
+    return _match_generation
+
+
 # Rescan state
 rescan_lock = threading.Lock()
 rescan_proc = None  # subprocess.Popen | None — current subprocess (internal, used by controller)

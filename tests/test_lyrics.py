@@ -1,5 +1,7 @@
 """Tests for lyrics blueprint routes."""
 
+import sqlite3
+
 from beetdeck import state
 from tests.conftest import insert_album, insert_item  # noqa: F401
 
@@ -17,8 +19,14 @@ def _make_lyrics_obj(
     url=None,
     language=None,
     translation_language=None,
+    instrumental=False,
 ):
-    """Create a mock lyrics result object."""
+    """Create a mock lyrics result object.
+
+    ``instrumental`` must be set explicitly rather than left to MagicMock's
+    auto-attribute: an auto-created child mock is truthy, which would make every
+    fetch look like an instrumental hit.
+    """
     obj = mocker.MagicMock()
     obj.text = text
     obj.full_text = full_text if full_text is not None else text
@@ -27,6 +35,7 @@ def _make_lyrics_obj(
     obj.url = url
     obj.language = language
     obj.translation_language = translation_language
+    obj.instrumental = instrumental
     return obj
 
 
@@ -103,6 +112,36 @@ class TestTrackLyrics:
         assert data["source"] == "embedded"
         assert data["lyrics"] == "Embedded lyrics"
 
+    def test_instrumental_false_without_the_flex_attr(self, client, db_path):
+        album_id = insert_album(db_path)
+        item_id = insert_item(db_path, album_id, lyrics=None, path=b"/music/test/track.mp3")
+        resp = client.get(f"/api/album/{album_id}/track/{item_id}/lyrics")
+        assert resp.get_json()["instrumental"] is False
+
+    def test_reports_instrumental_from_flex_attr(self, client, db_path):
+        """beets 2.13.0+ stores an instrumental verdict as empty lyrics + a flag.
+
+        Without surfacing the flag the response is identical to a track nobody
+        has ever looked up.
+        """
+        album_id = insert_album(db_path)
+        item_id = insert_item(db_path, album_id, lyrics="", path=b"/music/test/track.mp3")
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "INSERT INTO item_attributes (entity_id, key, value) "
+            "VALUES (?, 'lyrics_instrumental', '1')",
+            (item_id,),
+        )
+        conn.commit()
+        conn.close()
+
+        resp = client.get(f"/api/album/{album_id}/track/{item_id}/lyrics")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["instrumental"] is True
+        assert data["has_lyrics"] is False
+        assert data["lyrics"] == ""
+
 
 # ---------------------------------------------------------------------------
 # POST /api/album/<id>/track/<id>/lyrics/fetch
@@ -158,6 +197,43 @@ class TestFetchTrackLyrics:
         data = resp.get_json()
         assert data["status"] == "ok"
         assert data["found"] is False
+        assert data["new_instrumental"] is False
+
+    def test_instrumental_match_is_a_hit_not_a_miss(self, client, mocker):
+        """An instrumental verdict is a positive answer with no text.
+
+        beets 2.13.0+ blanks .text and raises .instrumental, so the old
+        text-truthiness check would have reported it as "no lyrics found". The
+        object still has to be stashed, otherwise confirm cannot persist the flag.
+        """
+        mock_item = mocker.MagicMock()
+        mock_item.album_id = 1
+        mock_item.artist = "Artist"
+        mock_item.title = "Song"
+        mock_item.lyrics = ""
+        mock_item.path = b"/music/track.mp3"
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+
+        lyrics_obj = _make_lyrics_obj(
+            mocker, text="", full_text="", instrumental=True, backend="lrclib"
+        )
+        mock_plugin = mocker.MagicMock()
+        mock_plugin.name = "lyrics"
+        mock_plugin.find_lyrics.return_value = lyrics_obj
+
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beets.plugins.find_plugins", return_value=[mock_plugin])
+
+        state.identify_tasks.clear()
+        resp = client.post("/api/album/1/track/1/lyrics/fetch")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["found"] is False
+        assert data["new_instrumental"] is True
+        assert data["new_lyrics"] == ""
+        assert data["new_backend"] == "lrclib"
+        assert state.identify_tasks["lyrics_1"]["_lyrics_obj"] is lyrics_obj
 
     def test_returns_lyrics_preview_when_found(self, client, mocker):
         mock_item = mocker.MagicMock()
@@ -183,6 +259,7 @@ class TestFetchTrackLyrics:
         data = resp.get_json()
         assert data["status"] == "ok"
         assert data["found"] is True
+        assert data["new_instrumental"] is False
         assert data["new_lyrics"] == "Verse 1\nVerse 2"
         assert data["new_backend"] == "genius"
 
@@ -352,6 +429,44 @@ class TestConfirmTrackLyrics:
         assert resp.status_code == 200
         assert resp.get_json()["has_lrc"] is True
 
+    def test_writes_instrumental_flag_and_clears_lyrics(self, client, mocker):
+        """Confirming an instrumental verdict stores the flag, not marker text.
+
+        Writing empty lyrics also strips a legacy "[Instrumental]" from the file
+        tag, so a later `beet update` cannot read it back into the library.
+        """
+        lyrics_obj = _make_lyrics_obj(mocker, text="", full_text="", instrumental=True)
+        state.identify_tasks["lyrics_1"] = {"_lyrics_obj": lyrics_obj}
+
+        mock_item = mocker.MagicMock()
+        mock_item.album_id = 1
+        mock_item.path = b"/music/track.mp3"
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/album/1/track/1/lyrics/confirm")
+        assert resp.status_code == 200
+        mock_item.__setitem__.assert_any_call("lyrics_instrumental", True)
+        assert mock_item.lyrics == ""
+
+    def test_clears_stale_instrumental_flag(self, client, mocker):
+        """A later real-lyrics hit must retire the flag the migration set."""
+        lyrics_obj = _make_lyrics_obj(mocker, text="Verse", full_text="Verse")
+        state.identify_tasks["lyrics_1"] = {"_lyrics_obj": lyrics_obj}
+
+        mock_item = mocker.MagicMock()
+        mock_item.album_id = 1
+        mock_item.path = b"/music/track.mp3"
+        mock_item.__contains__.return_value = True
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/album/1/track/1/lyrics/confirm")
+        assert resp.status_code == 200
+        mock_item.__delitem__.assert_any_call("lyrics_instrumental")
+
     def test_returns_500_when_write_fails(self, client, mocker):
         lyrics_obj = _make_lyrics_obj(mocker)
         state.identify_tasks["lyrics_1"] = {"_lyrics_obj": lyrics_obj}
@@ -509,6 +624,20 @@ class TestSaveTrackLyrics:
         assert mock_item.lyrics == "My lyrics"
         mock_item.store.assert_called_once()
         mock_item.try_write.assert_called_once()
+
+    def test_clears_instrumental_flag_on_manual_save(self, client, mocker):
+        """A manual edit overrules the source's instrumental verdict."""
+        mock_item = mocker.MagicMock()
+        mock_item.album_id = 1
+        mock_item.path = b"/music/track.mp3"
+        mock_item.__contains__.return_value = True
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/album/1/track/1/lyrics/save", json={"lyrics": "Real words"})
+        assert resp.status_code == 200
+        mock_item.__delitem__.assert_any_call("lyrics_instrumental")
 
     def test_saves_empty_lyrics(self, client, mocker):
         mock_item = mocker.MagicMock()
@@ -678,7 +807,43 @@ class TestFetchAlbumLyrics:
         assert len(data["tracks"]) == 1
         track = data["tracks"][0]
         assert track["found"] is True
+        assert track["new_instrumental"] is False
         assert track["new_lyrics"] == "Full"
+        assert "lyrics_1" in state.identify_tasks
+
+    def test_marks_instrumental_track_in_album_fetch(self, client, mocker):
+        mock_item = mocker.MagicMock()
+        mock_item.id = 1
+        mock_item.track = 1
+        mock_item.disc = 1
+        mock_item.title = "Interlude"
+        mock_item.artist = "Artist"
+        mock_item.lyrics = ""
+        mock_item.path = b"/music/track.mp3"
+
+        mock_album = mocker.MagicMock()
+        mock_album.albumartist = "Artist"
+        mock_album.album = "Album"
+        mock_album.items.return_value = [mock_item]
+
+        lyrics_obj = _make_lyrics_obj(mocker, text="", full_text="", instrumental=True)
+        mock_plugin = mocker.MagicMock()
+        mock_plugin.name = "lyrics"
+        mock_plugin.find_lyrics.return_value = lyrics_obj
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_album.return_value = mock_album
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+        mocker.patch("beets.plugins.find_plugins", return_value=[mock_plugin])
+
+        state.identify_tasks.clear()
+        resp = client.post("/api/album/1/lyrics/fetch")
+        assert resp.status_code == 200
+        track = resp.get_json()["tracks"][0]
+        assert track["found"] is False
+        assert track["new_instrumental"] is True
+        assert track["new_lyrics"] == ""
+        # Stashed so /lyrics/confirm can persist the flag for this track too.
         assert "lyrics_1" in state.identify_tasks
 
     def test_returns_not_found_for_tracks_without_lyrics(self, client, mocker):

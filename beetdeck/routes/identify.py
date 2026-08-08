@@ -21,6 +21,7 @@ from beetdeck.schemas.common import ErrorResponse
 from beetdeck.schemas.identify import (
     ApplyResponse,
     CandidateBody,
+    ConfirmBody,
     ConfirmResponse,
     IdentifyStartBody,
     IdentifyStartResponse,
@@ -28,6 +29,8 @@ from beetdeck.schemas.identify import (
     IgnoreResponse,
 )
 from beetdeck.utils import (
+    STALE_GENERATION_ERROR,
+    _consume_matches,
     _get_ro_conn,
     _get_task_json,
     _init_beets,
@@ -130,6 +133,7 @@ def _run_identify(
             task["_lib"] = lib
             lib = None
             task["candidates"] = candidates
+            task["match_generation"] = state.next_match_generation()
             task["status"] = "done"
 
     except Exception as e:
@@ -210,6 +214,8 @@ def identify(album_id):
             "current_artist": "",
             "current_album": "",
             "error": None,
+            # Set when the background thread builds _matches; None while running.
+            "match_generation": None,
         }
         state.identify_tasks[f"album_{album_id}"] = task
 
@@ -327,11 +333,12 @@ def apply_match(album_id):
 
 @bp.route("/api/album/<int:album_id>/confirm", methods=["POST"])
 @api.validate(
-    json=CandidateBody,
+    json=ConfirmBody,
     resp=Response(
         HTTP_200=ConfirmResponse,
         HTTP_400=ErrorResponse,
         HTTP_404=ErrorResponse,
+        HTTP_409=ErrorResponse,
         HTTP_500=ErrorResponse,
     ),
     tags=["identify"],
@@ -339,10 +346,26 @@ def apply_match(album_id):
 def confirm_match(album_id):
     """Apply the selected match using beets API and write tags to files."""
     candidate_index = request.context.json.candidate_index
+    expected_generation = request.context.json.expected_generation
 
     lib = None
     with state.identify_lock:
         task = state.identify_tasks.get(f"album_{album_id}")
+        # The precondition is checked before the status/index checks and inside
+        # the same critical section that marks the task "confirming", so a
+        # re-identify or a competing confirm is rejected atomically rather than
+        # detected afterwards. Absent field ⇒ unchanged behaviour (the SPA does
+        # not send it).
+        if expected_generation is not None and (
+            task is None
+            or task.get("match_generation") != expected_generation
+            # A confirm already in flight has not bumped the generation yet
+            # (`_consume_matches` does that when it finishes), so without this
+            # arm the loser of the race falls through to the 400 below and a
+            # precondition holder is told "no results" instead of "stale".
+            or task.get("status") == "confirming"
+        ):
+            return jsonify({"error": STALE_GENERATION_ERROR}), 409
         if not task or task.get("status") not in ("done",):
             return jsonify({"error": "No identification results"}), 400
         matches = task.get("_matches", [])
@@ -363,7 +386,7 @@ def confirm_match(album_id):
         album = lib.get_album(album_id)
         if not album:
             with state.identify_lock:
-                task.pop("_matches", None)
+                _consume_matches(task)
                 task["status"] = "done"
             return jsonify({"error": "Album not found"}), 404
 
@@ -394,7 +417,7 @@ def confirm_match(album_id):
             album.store()
             log.info("Album %d tagged successfully", album_id)
             with state.identify_lock:
-                task.pop("_matches", None)
+                _consume_matches(task)
                 task["status"] = "done"
         else:
             log.warning(
@@ -403,7 +426,7 @@ def confirm_match(album_id):
                 len(write_failures),
             )
             with state.identify_lock:
-                task.pop("_matches", None)
+                _consume_matches(task)
                 task["status"] = "done"
             return (
                 jsonify({"error": f"Failed to write tags for {len(write_failures)} track(s)"}),
@@ -414,7 +437,7 @@ def confirm_match(album_id):
 
     except Exception as e:
         with state.identify_lock:
-            task.pop("_matches", None)
+            _consume_matches(task)
             task["status"] = "done"
         log.exception("Confirm failed for album_id=%d", album_id)
         return jsonify({"error": str(e)}), 500

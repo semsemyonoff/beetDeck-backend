@@ -9,6 +9,8 @@ import threading
 
 from flask import current_app
 
+from beetdeck import state
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -499,5 +501,32 @@ def _serialize_candidate(idx, album_match):
 
 
 def _get_task_json(task):
-    """Return JSON-serializable copy of task (without internal _-prefixed keys)."""
-    return {k: v for k, v in task.items() if not k.startswith("_")}
+    """Return JSON-serializable copy of task (without internal _-prefixed keys).
+
+    ``matches_available`` is derived from the private ``_matches`` list because a
+    consumed task is otherwise indistinguishable from a confirmable one over
+    HTTP: confirming pops ``_matches`` but restores ``status: "done"`` under the
+    same ``task_id``. Caller must hold ``state.identify_lock``.
+    """
+    data = {k: v for k, v in task.items() if not k.startswith("_")}
+    data["matches_available"] = bool(task.get("_matches"))
+    return data
+
+
+# Body of the 409 returned when a confirm's ``expected_generation`` does not
+# match the task's current one — the task was re-identified, already confirmed,
+# or (for the UUID-keyed items tasks) purged.
+STALE_GENERATION_ERROR = (
+    "Identification results changed since the preview (re-identified or already confirmed)"
+)
+
+
+def _consume_matches(task):
+    """Drop a task's candidate list and bump its ``match_generation``.
+
+    Caller must hold ``state.identify_lock``. The bump is what makes a second
+    confirm carrying the previous ``expected_generation`` fail the precondition
+    instead of falling through to "Invalid candidate index".
+    """
+    task.pop("_matches", None)
+    task["match_generation"] = state.next_match_generation()

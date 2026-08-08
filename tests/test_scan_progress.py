@@ -1,4 +1,4 @@
-"""Tests for beetdeck/scan_progress.py — pure beets 2.12.0 log parser.
+"""Tests for beetdeck/scan_progress.py — pure beets 2.13.1 log parser.
 
 Tests use fixed sample strings that reproduce the exact format produced by
 ``beet -v import -A -C [-i|-I] /music`` (and ``beet -v update -M``).  They
@@ -26,7 +26,15 @@ from beetdeck.scan_progress import (
 
 
 def test_beets_version_pinned():
-    assert BEETS_VERSION == "2.12.0"
+    """Tripwire tying the parser to the beets release its samples came from.
+
+    Compared against the *installed* beets rather than a second literal: the old
+    form asserted "2.12.0" == "2.12.0" and so could never fire, which is how two
+    beets releases went by without the log format being re-checked.
+    """
+    import beets
+
+    assert BEETS_VERSION == beets.__version__
 
 
 # --------------------------------------------------------------------------- #
@@ -407,7 +415,7 @@ class TestNoDoubleCount:
 
         Reproduces what ``beet -v import -A -C -I /music`` writes to the log
         file for a small two-album library with a duplicate replace — captured
-        from real beets 2.12.0 output (note: no 'Looking up:' lines under -A).
+        from real beets 2.13.1 output (note: no 'Looking up:' lines under -A).
         """
         sample = [
             # Import phase (two albums, one a duplicate replace)
