@@ -80,7 +80,8 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
         The escape hatch for endpoints with no dedicated tool. Read
         `beetdeck://openapi.json` (an MCP resource on this server) for the full
         endpoint list, then pass a path relative to the API root, query string
-        included — for example `/api/album/12/tags` or `/api/search?q=miles`.
+        included — for example `/api/album/12/track/34/tags` or
+        `/api/search?q=miles`.
 
         **Read-only.** This tool cannot write: `GET` is the only method, and
         there is no raw write mode. Every change goes through a `preview_*` tool
