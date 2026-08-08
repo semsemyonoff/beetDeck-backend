@@ -91,6 +91,8 @@ def album_detail(album_id):
                 "track": it["track"],
                 "disc": it["disc"] or 1,
                 "length": _fmt_length(it["length"]),
+                "length_sec": it["length"] or None,
+                "filename": os.path.basename(item_path) if item_path else "",
                 "format": it["format"],
                 "bitrate": it["bitrate"],
                 "samplerate": it["samplerate"],

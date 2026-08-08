@@ -79,9 +79,50 @@ single source of truth — there is no hand-maintained endpoint table here.
 Request models live in `beetdeck/schemas/` (one module per blueprint plus a shared
 `common.py`); the `SpecTree` singleton lives in `beetdeck/api.py`.
 
+## MCP server
+
+`beetdeck_mcp/` exposes the library to an MCP client (streamable-http) — album
+browsing, MusicBrainz identification, cover art, lyrics, genres, tag edits, plus
+library rescans, per-track BPM computation, the album ignore flag and a `GET`-only
+`/api/` escape hatch. It is a **separate process** from Flask, shipped in the same
+install and image, and it talks to this backend over HTTP. Every mutating
+capability is two-phase: a `preview_*` tool returns a diff plus a single-use token,
+and `apply_change` is the only tool that writes. Design notes and the per-kind
+freshness guarantees are in `CLAUDE.md` → *MCP server*.
+
+| env | default | notes |
+|---|---|---|
+| `BEETDECK_API_URL` | `http://backend:5000` | this backend's base URL |
+| `BEETDECK_MCP_TOKEN` | — | comma-separated bearer tokens; **empty ⇒ refuses to start** |
+| `MUSICBRAINZ_USER_AGENT` | — | `app/version (contact)`; **empty ⇒ refuses to start** |
+| `BEETDECK_MCP_READONLY` | `0` | disables `apply_change` only — previews still run, and `rescan_library` / `compute_bpm` / `toggle_album_ignored` still write |
+| `BEETDECK_MCP_HOST` / `_PORT` | `0.0.0.0` / `5100` | bind address of this process |
+| `BEETDECK_MCP_ALLOWED_HOSTS` | — | DNS-rebinding allowlist; needed behind a hostname. **Empty ⇒ the check is off entirely**, not narrowed to localhost |
+
+With the backend already running on `:5000`:
+
+```bash
+export BEETDECK_API_URL=http://127.0.0.1:5000
+export BEETDECK_MCP_TOKEN=$(python -c 'import secrets; print(secrets.token_urlsafe(32))')
+export MUSICBRAINZ_USER_AGENT='beetdeck-dev/0.0 (you@example.com)'
+python -m beetdeck_mcp
+```
+
+The MCP endpoint is `POST /mcp` on that port, authenticated with
+`Authorization: Bearer <token>`; `GET /health` is unauthenticated and reports
+`{"status": "ok", "readonly": …}`. Point a client at it, e.g. for Claude Code:
+
+```bash
+claude mcp add --transport http beetdeck http://127.0.0.1:5100/mcp \
+  --header "Authorization: Bearer $BEETDECK_MCP_TOKEN"
+```
+
+There is no reloader — restart the process after editing `beetdeck_mcp/`.
+
 ## Further documentation
 
 - `CLAUDE.md` — notes for AI agents: invariants, contracts the spec cannot express,
-  and the reasoning behind the threading and app-factory design.
+  the reasoning behind the threading and app-factory design, and the MCP server's
+  guarantees.
 - `docs/layout.md` — annotated repository tree.
 - `docs/beets-upgrades.md` — per-release notes from bumping the beets pin.

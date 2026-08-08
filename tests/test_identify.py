@@ -485,3 +485,226 @@ class TestIdentifyBehaviorUnchanged:
     def test_confirm_empty_body_reaches_handler(self, client):
         resp = client.post("/api/album/1/confirm", json={})
         assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# match_generation / expected_generation precondition
+# ---------------------------------------------------------------------------
+
+
+def _mock_match(mocker, distance=0.1, write_ok=True):
+    """An AlbumMatch stand-in that survives _serialize_candidate and confirm."""
+    item = mocker.MagicMock()
+    item.id = 1
+    item.track = 1
+    item.title = "Old Title"
+    item.path = b"/music/track.mp3"
+    item.try_write.return_value = write_ok
+
+    track = mocker.MagicMock()
+    track.title = "New Title"
+    track.index = 1
+    track.artist = "Artist"
+    track.length = 100
+
+    match = mocker.MagicMock()
+    match.distance = distance
+    match.info.artist = "Artist"
+    match.info.album = "Album"
+    match.info.year = 2000
+    match.info.label = "Label"
+    match.info.media = "CD"
+    match.info.data_source = "MusicBrainz"
+    match.info.album_id = "mbid-1"
+    match.info.tracks = [track]
+    match.mapping = {item: track}
+    return match
+
+
+def _run_identify(client, mocker, match, album_id=1):
+    """Drive POST /identify with mocked beets and return the done status body."""
+    import time
+
+    mock_album = mocker.MagicMock()
+    mock_album.albumartist = "Artist"
+    mock_album.album = "Album"
+    mock_album.items.return_value = [next(iter(match.mapping))]
+
+    mock_lib = mocker.MagicMock()
+    mock_lib.get_album.return_value = mock_album
+
+    mocker.patch("beetdeck.routes.identify._init_beets", return_value=mock_lib)
+    mock_proposal = mocker.MagicMock()
+    mock_proposal.candidates = [match]
+    mocker.patch(
+        "beets.autotag.tag_album",
+        return_value=("Artist", "Album", mock_proposal),
+    )
+
+    assert client.post(f"/api/album/{album_id}/identify", json={}).status_code == 200
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        data = client.get(f"/api/album/{album_id}/identify/status").get_json()
+        if data["status"] in ("done", "error"):
+            assert data["status"] == "done", data
+            return data
+        time.sleep(0.02)
+    raise AssertionError("identify did not finish in time")
+
+
+class TestMatchGenerationStatus:
+    def setup_method(self):
+        _reset_state()
+
+    def test_status_reports_generation_and_matches_available(self, client, mocker):
+        data = _run_identify(client, mocker, _mock_match(mocker))
+        assert isinstance(data["match_generation"], int)
+        assert data["matches_available"] is True
+
+    def test_running_task_has_no_generation_and_no_matches(self, client):
+        state.identify_tasks["album_1"] = {
+            "task_id": "abc",
+            "status": "running",
+            "candidates": [],
+            "match_generation": None,
+        }
+        data = client.get("/api/album/1/identify/status").get_json()
+        assert data["match_generation"] is None
+        assert data["matches_available"] is False
+
+    def test_consumed_task_reports_matches_unavailable(self, client, mocker):
+        gen = _run_identify(client, mocker, _mock_match(mocker))["match_generation"]
+
+        resp = client.post(
+            "/api/album/1/confirm",
+            json={"candidate_index": 0, "expected_generation": gen},
+        )
+        assert resp.status_code == 200
+
+        data = client.get("/api/album/1/identify/status").get_json()
+        # Same task_id and still "done" — matches_available is the only signal.
+        assert data["status"] == "done"
+        assert data["matches_available"] is False
+        assert data["match_generation"] != gen
+
+
+class TestConfirmPrecondition:
+    def setup_method(self):
+        _reset_state()
+
+    def test_confirm_succeeds_with_matching_generation(self, client, mocker):
+        gen = _run_identify(client, mocker, _mock_match(mocker))["match_generation"]
+
+        resp = client.post(
+            "/api/album/1/confirm",
+            json={"candidate_index": 0, "expected_generation": gen},
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "ok"
+
+    def test_reidentify_bumps_generation_and_confirm_is_rejected(self, client, mocker):
+        first = _run_identify(client, mocker, _mock_match(mocker))["match_generation"]
+        second = _run_identify(client, mocker, _mock_match(mocker))["match_generation"]
+        assert second != first
+
+        resp = client.post(
+            "/api/album/1/confirm",
+            json={"candidate_index": 0, "expected_generation": first},
+        )
+        assert resp.status_code == 409
+        assert "changed since the preview" in resp.get_json()["error"]
+        # Rejected before the task was touched — the fresh candidates survive.
+        assert state.identify_tasks["album_1"]["status"] == "done"
+        assert state.identify_tasks["album_1"]["_matches"]
+
+    def test_second_confirm_rejected_by_precondition_not_index(self, client, mocker):
+        gen = _run_identify(client, mocker, _mock_match(mocker))["match_generation"]
+
+        assert (
+            client.post(
+                "/api/album/1/confirm",
+                json={"candidate_index": 0, "expected_generation": gen},
+            ).status_code
+            == 200
+        )
+
+        resp = client.post(
+            "/api/album/1/confirm",
+            json={"candidate_index": 0, "expected_generation": gen},
+        )
+        assert resp.status_code == 409
+        assert "changed since the preview" in resp.get_json()["error"]
+
+    def test_second_confirm_without_precondition_falls_through_to_400(self, client, mocker):
+        """The behaviour the precondition exists to replace, pinned as-is."""
+        _run_identify(client, mocker, _mock_match(mocker))
+        assert client.post("/api/album/1/confirm", json={"candidate_index": 0}).status_code == 200
+
+        resp = client.post("/api/album/1/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "Invalid candidate index"
+
+    def test_a_confirm_already_in_flight_is_a_409_not_a_400(self, client, mocker):
+        """The loser of a genuine race gets the staleness answer.
+
+        A confirm marks the task `confirming` inside the lock but only bumps the
+        generation when it finishes, so between those two points the precondition
+        still matches — without the `confirming` arm the competing request falls
+        through to "No identification results", which the MCP layer reports as a
+        plain failure instead of "identify again".
+        """
+        gen = _run_identify(client, mocker, _mock_match(mocker))["match_generation"]
+        state.identify_tasks["album_1"]["status"] = "confirming"
+
+        resp = client.post(
+            "/api/album/1/confirm",
+            json={"candidate_index": 0, "expected_generation": gen},
+        )
+        assert resp.status_code == 409
+        assert "changed since the preview" in resp.get_json()["error"]
+
+    def test_a_confirm_in_flight_without_a_precondition_still_returns_400(self, client, mocker):
+        """Unchanged behaviour for the SPA, which sends no precondition."""
+        _run_identify(client, mocker, _mock_match(mocker))
+        state.identify_tasks["album_1"]["status"] = "confirming"
+
+        resp = client.post("/api/album/1/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "No identification results"
+
+    def test_missing_task_with_precondition_returns_409(self, client):
+        resp = client.post(
+            "/api/album/9/confirm",
+            json={"candidate_index": 0, "expected_generation": 7},
+        )
+        assert resp.status_code == 409
+
+    def test_missing_task_without_precondition_still_returns_400(self, client):
+        resp = client.post("/api/album/9/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 400
+        assert resp.get_json()["error"] == "No identification results"
+
+    def test_apply_rejects_expected_generation_as_unknown_field(self, client):
+        # apply cannot act on a precondition, so the field is not on its model.
+        resp = client.post(
+            "/api/album/1/apply",
+            json={"candidate_index": 0, "expected_generation": 1},
+        )
+        assert resp.status_code == 422
+
+    def test_confirm_documents_409_and_precondition_in_spec(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        op = spec["paths"]["/api/album/{album_id}/confirm"]["post"]
+        assert "409" in op["responses"]
+        ref = op["requestBody"]["content"]["application/json"]["schema"]["$ref"]
+        model = spec["components"]["schemas"][ref.rsplit("/", 1)[-1]]
+        assert "expected_generation" in model["properties"]
+
+    def test_status_documents_generation_fields_in_spec(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        op = spec["paths"]["/api/album/{album_id}/identify/status"]["get"]
+        ref = op["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+        model = spec["components"]["schemas"][ref.rsplit("/", 1)[-1]]
+        assert "match_generation" in model["properties"]
+        assert "matches_available" in model["properties"]

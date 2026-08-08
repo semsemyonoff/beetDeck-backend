@@ -160,6 +160,60 @@ class TestAlbumDetail:
         assert resp.status_code == 200
         assert resp.get_json()["tracks"][0]["length"] == ""
 
+    def test_length_sec_and_filename_present(self, client, db_path):
+        album_id = insert_album(db_path, album="Raw", albumartist="Artist R")
+        insert_item(
+            db_path,
+            album_id,
+            title="Come Together",
+            length=259.0,
+            path=b"/music/beatles/abbey road/01 Come Together.flac",
+        )
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        track = resp.get_json()["tracks"][0]
+        assert track["length_sec"] == 259.0
+        assert track["length"] == "4:19"
+        assert track["filename"] == "01 Come Together.flac"
+
+    def test_length_sec_null_when_length_missing(self, client, db_path):
+        album_id = insert_album(db_path, album="Untimed", albumartist="Artist T")
+        insert_item(db_path, album_id, title="Unknown", length=None)
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        assert resp.get_json()["tracks"][0]["length_sec"] is None
+
+    def test_length_sec_null_when_length_zero(self, client, db_path):
+        album_id = insert_album(db_path, album="Zeroed", albumartist="Artist U")
+        insert_item(db_path, album_id, title="Silence", length=0.0)
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        assert resp.get_json()["tracks"][0]["length_sec"] is None
+
+    def test_filename_empty_when_no_path(self, client, db_path):
+        album_id = insert_album(db_path, album="Pathless", albumartist="Artist V")
+        insert_item(db_path, album_id, title="Orphan", path=None)
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        assert resp.get_json()["tracks"][0]["filename"] == ""
+
+    def test_filename_from_relative_path(self, client, db_path):
+        album_id = insert_album(db_path, album="Relative", albumartist="Artist W")
+        insert_item(db_path, album_id, title="Track", path=b"artist/album/02 Track.mp3")
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        assert resp.get_json()["tracks"][0]["filename"] == "02 Track.mp3"
+
+    def test_filename_decodes_non_utf8_path_bytes(self, client, db_path):
+        album_id = insert_album(db_path, album="Broken", albumartist="Artist X")
+        insert_item(db_path, album_id, title="Mojibake", path=b"/music/a/b/03 Caf\xe9.mp3")
+        resp = client.get(f"/api/album/{album_id}")
+        assert resp.status_code == 200
+        filename = resp.get_json()["tracks"][0]["filename"]
+        assert filename.startswith("03 Caf")
+        assert filename.endswith(".mp3")
+        assert "�" in filename
+
     def test_path_field_present(self, client, db_path):
         album_id = insert_album(db_path, album="Pathed", albumartist="Artist I")
         insert_item(db_path, album_id, title="Track", path=b"/music/artist/album/track.mp3")

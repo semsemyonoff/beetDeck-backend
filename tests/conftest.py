@@ -2,10 +2,16 @@
 
 import sqlite3
 
+import httpx
 import pytest
+from starlette.testclient import TestClient
 
 import beetdeck.utils as beetdeck_utils
+import beetdeck_mcp.tools as tools_pkg
 from beetdeck import create_app, state
+from beetdeck_mcp.client import BeetdeckClient
+from beetdeck_mcp.config import load_config
+from beetdeck_mcp.server import create_http_app, create_server
 
 BEETS_SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS albums (
@@ -82,18 +88,26 @@ CREATE TABLE IF NOT EXISTS items (
     original_day INTEGER
 );
 
+-- The flexible-attribute tables mirror beets' own DDL
+-- (`dbcore.Database._make_attribute_table`) rather than declaring a plain
+-- composite primary key: beets updates a flex attr with a bare INSERT and
+-- relies on `ON CONFLICT REPLACE` to overwrite it. Without that clause a test
+-- that writes through the real beets Library raises IntegrityError on any
+-- attribute the item already carries — a failure the app never has.
 CREATE TABLE IF NOT EXISTS album_attributes (
-    entity_id INTEGER REFERENCES albums(id),
+    id INTEGER PRIMARY KEY,
+    entity_id INTEGER,
     key TEXT,
     value TEXT,
-    PRIMARY KEY (entity_id, key)
+    UNIQUE(entity_id, key) ON CONFLICT REPLACE
 );
 
 CREATE TABLE IF NOT EXISTS item_attributes (
-    entity_id INTEGER REFERENCES items(id),
+    id INTEGER PRIMARY KEY,
+    entity_id INTEGER,
     key TEXT,
     value TEXT,
-    PRIMARY KEY (entity_id, key)
+    UNIQUE(entity_id, key) ON CONFLICT REPLACE
 );
 """
 
@@ -212,3 +226,76 @@ def app(db_path, tmp_path):
 def client(app):
     """Flask test client."""
     return app.test_client()
+
+
+# --- MCP server fixtures ----------------------------------------------------
+#
+# The MCP tools are exercised against the real Flask app in-process: an
+# httpx.WSGITransport around the `app` fixture above, so the MCP↔REST contract
+# is tested for real instead of against hand-written mocks. This is why
+# everything in `beetdeck_mcp` is synchronous — an async httpx client cannot use
+# a WSGI transport.
+
+MCP_TEST_TOKEN = "test-token-primary"
+MCP_TEST_TOKEN_ALT = "test-token-secondary"
+
+MCP_TEST_ENV = {
+    "BEETDECK_MCP_TOKEN": f"{MCP_TEST_TOKEN},{MCP_TEST_TOKEN_ALT}",
+    "MUSICBRAINZ_USER_AGENT": "beetdeck-tests/0.0 (tests@example.invalid)",
+    "BEETDECK_API_URL": "http://backend.test",
+}
+
+
+@pytest.fixture(autouse=True)
+def reset_tool_client_caches():
+    """Drop the per-config client caches between tests.
+
+    `Config` is frozen and hashable and `mcp_config` rebuilds an *equal* instance
+    every test, so `tools.client_for` would otherwise hand every later test the
+    first test's client — one bound to the unreachable `http://backend.test`
+    rather than to that test's in-process app, and never closed.
+    """
+    yield
+    for cache in (tools_pkg._CLIENTS, tools_pkg._MB_CLIENTS):
+        for cached in cache.values():
+            cached.close()
+        cache.clear()
+
+
+@pytest.fixture()
+def mcp_config():
+    """Validated MCP config for tests, independent of the real environment."""
+    return load_config(MCP_TEST_ENV)
+
+
+@pytest.fixture()
+def api_transport(app):
+    """httpx transport dispatching straight into the Flask app, no sockets."""
+    return httpx.WSGITransport(app=app)
+
+
+@pytest.fixture()
+def api_client(mcp_config, api_transport):
+    """Blocking httpx client bound to the in-process Flask app."""
+    with httpx.Client(transport=api_transport, base_url=mcp_config.api_url) as http_client:
+        yield http_client
+
+
+@pytest.fixture()
+def beetdeck_client(mcp_config, api_transport):
+    """The MCP REST client wired to the in-process Flask app."""
+    with BeetdeckClient(mcp_config, transport=api_transport) as rest_client:
+        yield rest_client
+
+
+@pytest.fixture()
+def mcp_server(mcp_config):
+    """The MCP server instance with every tool registered."""
+    return create_server(mcp_config)
+
+
+@pytest.fixture()
+def mcp_http_client(mcp_config, mcp_server):
+    """Starlette test client over the streamable-http app (lifespan running)."""
+    with TestClient(create_http_app(mcp_config, server=mcp_server)) as http_client:
+        yield http_client

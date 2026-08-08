@@ -25,6 +25,11 @@ dependencies = [
     "beets @ https://github.com/beetbox/beets/archive/refs/tags/v2.13.1.tar.gz",
     "librosa",
     "resampy",
+    # MCP server (beetdeck_mcp): runs as a separate process from this same
+    # install, so its deps belong here rather than in an extra — the image's
+    # sync-venv.sh installs exactly `-e ".[dev]"` and nothing else.
+    "mcp",
+    "httpx",
 ]
 
 [project.optional-dependencies]
@@ -41,6 +46,8 @@ dev = [
 [tool.setuptools]
 py-modules = ["app"]
 
+# The glob is deliberate, not incidental: it already matches `beetdeck_mcp`
+# alongside `beetdeck`, so the MCP package needs no packaging change.
 [tool.setuptools.packages.find]
 include = ["beetdeck*"]
 
@@ -49,7 +56,7 @@ testpaths = ["tests"]
 addopts = "-v"
 
 [tool.coverage.run]
-source = ["beetdeck"]
+source = ["beetdeck", "beetdeck_mcp"]
 omit = ["tests/*"]
 
 [tool.coverage.report]
