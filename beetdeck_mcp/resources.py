@@ -51,8 +51,7 @@ WORKFLOW_GUIDE = """\
 No tool writes as a side effect of showing you something. A `preview_*` tool
 returns the diff it *would* apply plus a single-use `preview_token`, and
 `apply_change(preview_token)` commits exactly that diff. A token is burned on a
-successful apply and expires on its own (15 minutes; 5 for `cover` and
-`lyrics`).
+successful apply and expires on its own after 15 minutes.
 
 The preview tools are `preview_match`, `preview_items_match`,
 `preview_tags_edit`, `preview_cover`, `preview_lyrics` and `preview_genres`.
@@ -69,12 +68,12 @@ These writes land in real audio files, and the protection is not uniform.
 | kind | produced by | guarantee |
 |---|---|---|
 | `identify`, `items_identify` | `preview_match`, `preview_items_match` | **Enforced by the backend.** The token carries the identification generation read at preview time; the confirm is rejected inside the backend's own lock if identification was re-run or already applied. |
+| `cover`, `lyrics` | `preview_cover`, `preview_lyrics` | **Enforced by the backend.** The token carries the generation of the stash slot the fetched result went into; the confirm is rejected if a competing fetch (the web UI, another agent) replaced it. For lyrics the check is all-or-nothing across the selection. |
 | `tags`, `genres` | `preview_tags_edit`, `preview_genres` | **Best effort.** The previewed old values are re-read immediately before writing and the apply is refused on drift. A change landing between that re-read and the write is not caught. |
-| `cover`, `lyrics` | `preview_cover`, `preview_lyrics` | **TTL only.** The backend stash has no identity and no read endpoint, so a competing fetch from the web UI overwrites it and wins silently. Apply promptly. |
 
-A refused apply says which of the three failed — expiry, value drift, or the
-backend precondition — so re-run the matching preview rather than retrying the
-same token.
+A refused apply says which check failed — expiry, value drift, or the backend
+precondition — so re-run the matching preview rather than retrying the same
+token.
 
 Two consequences worth knowing:
 

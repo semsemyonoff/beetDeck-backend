@@ -61,6 +61,20 @@ COVER_EMBED_QUALITY = 70
 COVER_THUMB_SIZES = (64, 128, 256, 400)
 COVER_THUMB_QUALITY = 80
 
+
+def _default_file_mode():
+    """The mode a plain ``open()`` would produce here, i.e. 0666 minus the umask.
+
+    Read once at import: querying the umask means temporarily clearing it, which
+    would race with file creation in other threads under the threaded WSGI server.
+    """
+    umask = os.umask(0)
+    os.umask(umask)
+    return 0o666 & ~umask
+
+
+_FILE_MODE = _default_file_mode()
+
 # ---------------------------------------------------------------------------
 # Beets initialization state
 # ---------------------------------------------------------------------------
@@ -176,6 +190,39 @@ def _find_cover(album_dir, fallback_dirs=None):
     return None
 
 
+def _image_size(path):
+    """``(width, height)`` of the image at ``path``, or ``None`` if unreadable.
+
+    ``Image.open`` parses only the header, so this costs one small read — cheap
+    enough to answer on every album detail request. Dimensions are the one fact
+    that makes "is this candidate better than the cover we have" answerable
+    without downloading the image and running a tool on it.
+    """
+    from PIL import Image, UnidentifiedImageError
+
+    if not path:
+        return None
+    try:
+        with Image.open(path) as img:
+            return img.size
+    # DecompressionBombError needs its own arm: it derives from Exception, not
+    # OSError, and Pillow raises it straight from the header parse — a corrupt
+    # file whose declared dimensions exceed the bomb threshold never gets
+    # decoded, so it reaches here on a path that must answer None, not 500.
+    except (OSError, UnidentifiedImageError, Image.DecompressionBombError):
+        return None
+
+
+def _is_instrumental(value):
+    """Whether a stored ``lyrics_instrumental`` attribute means "instrumental".
+
+    beets 2.13.0's migration inserts the literal ``'1'`` while a write through
+    ``types.BOOLEAN`` lands as ``1`` in a TEXT-affinity column, so the raw value
+    has more than one truthy spelling. One rule, shared by every reader.
+    """
+    return str(value or "") in ("1", "True")
+
+
 def _remove_cover_files(album_dir):
     """Remove all cover/folder/front image files from album directory."""
     if not album_dir or not os.path.isdir(album_dir):
@@ -208,6 +255,10 @@ def _resize_image(src_path, max_size, quality=95):
         try:
             img.save(tmp, format="JPEG", quality=quality, optimize=True)
             tmp.close()
+            # NamedTemporaryFile always creates 0600 regardless of umask, and the
+            # caller *moves* this file into the library as cover.jpg — where other
+            # users (media servers, other containers) have to read it.
+            os.chmod(tmp.name, _FILE_MODE)
         except Exception:
             tmp.close()
             os.unlink(tmp.name)
@@ -264,6 +315,7 @@ def _save_cover_to_album(album, src_path):
     ``item_dir()`` which returns only the first item's directory, so we call
     ``art_destination`` directly with the correct common parent.
     """
+    from beets import plugins
     from beets.util import bytestring_path, move
     from beets.util import unique_path as beets_unique_path
     from beetsplug._utils import art
@@ -288,6 +340,14 @@ def _save_cover_to_album(album, src_path):
             os.unlink(hires_path)
 
     art.embed_album(_beets_log, album, maxwidth=COVER_EMBED_MAX, quality=COVER_EMBED_QUALITY)
+
+    # ``set_art`` is bypassed (see docstring), so emit the event it would have
+    # sent — plugins such as ``permissions`` only see cover art through it. It
+    # goes *after* the embed on purpose: beets' own ``embedart`` listens on
+    # ``art_set`` and, when the operator enabled its ``auto``, re-embeds the
+    # album and may delete the art file — which from inside our own embed would
+    # be re-entrant, and could remove the cover we just wrote before we use it.
+    plugins.send("art_set", album=album)
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +579,36 @@ def _get_task_json(task):
 STALE_GENERATION_ERROR = (
     "Identification results changed since the preview (re-identified or already confirmed)"
 )
+
+# Body of the 409 returned when a cover/lyrics confirm's ``expected_generation``
+# does not match the stash it was fetched into — a competing fetch (the web UI,
+# another agent) replaced the result, or it was already written and cleared.
+STALE_STASH_ERROR = "The fetched result changed since the preview (re-fetched or already written)"
+
+
+def _drop_cover_stash(album_id):
+    """Discard a fetched cover candidate because its album was written directly.
+
+    **Every** route that writes an album's cover must call this. A stash left
+    behind keeps the generation it was fetched with, so a confirm holding that
+    generation passes its precondition and silently reverts the write that
+    overruled it — the precondition only ever sees what goes *through* the stash.
+
+    Caller must not hold ``state.identify_lock``.
+    """
+    with state.identify_lock:
+        state.identify_tasks.pop(f"cover_{album_id}", None)
+
+
+def _drop_lyrics_stash(item_id):
+    """Discard a fetched-lyrics stash because its track was written directly.
+
+    Same contract as ``_drop_cover_stash`` — and the same obligation on every
+    route that writes ``lyrics`` or a ``lyrics_*`` attribute, including the
+    generic per-item tag patch.
+    """
+    with state.identify_lock:
+        state.identify_tasks.pop(f"lyrics_{item_id}", None)
 
 
 def _consume_matches(task):

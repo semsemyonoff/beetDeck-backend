@@ -72,6 +72,23 @@ class TestSearchLibrary:
         assert [row["title"] for row in by_track["tracks"]] == ["Everything In Its Right Place"]
         assert by_track["tracks"][0]["album_id"] == album_id
 
+    def test_an_artist_only_hit_names_the_call_that_follows_it(self, tools, db_path):
+        """Searching a band matched only its name and returned a bare string — no
+        id, no next call. The note is the way out."""
+        insert_album(db_path, album="The Wall", albumartist="Pink Floyd")
+
+        result = tools["search_library"]("pink floyd")
+        assert result["artists"] == ["Pink Floyd"]
+        assert result["albums"] == []
+        assert any("list_albums(artist=…)" in note for note in result["notes"])
+        assert any("'Pink Floyd'" in note for note in result["notes"])
+
+    def test_no_such_note_when_the_query_also_matched_albums(self, tools, db_path):
+        insert_album(db_path, album="Radiohead Live", albumartist="Radiohead")
+        result = tools["search_library"]("radiohead")
+        assert result["albums"]
+        assert "notes" not in result
+
     def test_empty_query_returns_an_empty_result_set(self, tools, db_path):
         insert_album(db_path, album="Kid A", albumartist="Radiohead")
         result = tools["search_library"]("")
@@ -129,6 +146,57 @@ class TestListAlbums:
         ]
         assert result["albums"][0]["tagged"] is False
         assert "notes" not in result
+
+    def test_the_artist_filter_answers_what_do_we_have_by_this_band(self, tools, db_path):
+        insert_album(db_path, album="The Wall", albumartist="Pink Floyd", year=1979)
+        insert_album(db_path, album="Animals", albumartist="Pink Floyd", year=1977)
+        insert_album(db_path, album="Kid A", albumartist="Radiohead", year=2000)
+
+        result = tools["list_albums"](artist="Pink Floyd")
+        assert result["artist"] == "Pink Floyd"
+        assert result["total"] == 2
+        assert [row["album"] for row in result["albums"]] == ["Animals", "The Wall"]
+        assert all(row["id"] for row in result["albums"])
+
+    def test_the_artist_filter_matches_a_case_insensitive_substring(self, tools, db_path):
+        insert_album(db_path, album="The Wall", albumartist="Pink Floyd")
+        assert tools["list_albums"](artist="floyd")["total"] == 1
+        assert tools["list_albums"](artist="  PINK  ".strip())["total"] == 1
+
+    def test_the_artist_filter_combines_with_the_work_queue_filter(self, tools, db_path):
+        done = insert_album(db_path, album="Done", albumartist="Pink Floyd")
+        insert_album(db_path, album="Todo", albumartist="Pink Floyd")
+        insert_album(db_path, album="Other", albumartist="Radiohead")
+        set_album_flag(db_path, done, "beetdeck_tagged")
+
+        result = tools["list_albums"](filter="untagged", artist="pink")
+        assert [row["album"] for row in result["albums"]] == ["Todo"]
+
+    def test_a_whitespace_only_artist_is_no_filter_and_is_not_claimed_as_one(self, tools, db_path):
+        """`needle` is stripped, so a blank argument filters nothing. Echoing the
+        raw value would label the whole library as that artist's discography."""
+        insert_album(db_path, album="Kid A", albumartist="Radiohead")
+        insert_album(db_path, album="Homework", albumartist="Daft Punk")
+
+        result = tools["list_albums"](artist="   ")
+        assert result["total"] == 2
+        assert "artist" not in result
+        assert "notes" not in result
+
+    def test_a_padded_artist_still_matches_and_echoes_the_trimmed_name(self, tools, db_path):
+        insert_album(db_path, album="The Wall", albumartist="Pink Floyd")
+        result = tools["list_albums"](artist="  Pink Floyd  ")
+        assert result["total"] == 1
+        assert result["artist"] == "Pink Floyd"
+
+    def test_an_unmatched_artist_says_so_rather_than_looking_like_an_empty_library(
+        self, tools, db_path
+    ):
+        insert_album(db_path, album="Kid A", albumartist="Radiohead")
+        result = tools["list_albums"](artist="Pink Fluid")
+        assert result["total"] == 0
+        assert any("no album artist contains 'Pink Fluid'" in note for note in result["notes"])
+        assert any("search_library" in note for note in result["notes"])
 
     def test_untagged_filter_is_the_work_queue(self, tools, db_path):
         tagged = insert_album(db_path, album="Tagged", albumartist="A")
@@ -207,6 +275,31 @@ class TestGetAlbum:
         assert result["tracks"][0]["length"] == "4:08"
         assert result["tracks"][0]["filename"] == "01 - Idioteque.mp3"
         assert "raw_tags" not in result["tracks"][0]
+
+    def test_carries_the_two_facts_that_close_out_an_album(self, tools, db_path, tmp_path):
+        """Cover size and the instrumental verdict — without them "is this album
+        done" needs a download and one extra request per track."""
+        from PIL import Image
+
+        art = tmp_path / "cover.jpg"
+        Image.new("RGB", (500, 500), color="green").save(str(art), format="JPEG")
+        album_id = insert_album(
+            db_path, album="Kid A", albumartist="Radiohead", artpath=str(art).encode()
+        )
+        checked = insert_item(db_path, album_id, title="Treefingers", track=1)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO item_attributes (entity_id, key, value) VALUES (?, ?, ?)",
+                (checked, "lyrics_instrumental", "1"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = tools["get_album"](album_id)
+        assert (result["cover_width"], result["cover_height"]) == (500, 500)
+        assert result["tracks"][0]["instrumental"] is True
 
     def test_drops_empty_album_and_track_fields(self, tools, db_path):
         album_id = insert_album(db_path, album="Kid A", albumartist="Radiohead", label=None)

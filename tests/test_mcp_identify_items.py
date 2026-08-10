@@ -406,7 +406,7 @@ class TestApplyItemsMatch:
         result = tools["apply_change"](second)
 
         assert result["status"] == "failed"
-        assert "re-run or already applied" in result["detail"][0]
+        assert "re-run, replaced or already applied" in result["detail"][0]
 
     def test_a_purged_task_is_reported_as_stale_not_as_not_found(self, tools, mocker):
         """Starting a second run purges the first task; a token minted against it
@@ -422,7 +422,7 @@ class TestApplyItemsMatch:
         result = tools["apply_change"](token)
 
         assert result["status"] == "failed"
-        assert "re-run or already applied" in result["detail"][0]
+        assert "re-run, replaced or already applied" in result["detail"][0]
         assert "identify again" in result["detail"][0]
         assert "not found" not in result["detail"][0]
         # The live task survives the rejected confirm, so the agent can preview it.

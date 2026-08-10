@@ -5,19 +5,25 @@ mints a token, and `apply_change(preview_token)` commits it. This module owns th
 token: what it carries, how long it lives, and what makes it refuse to apply.
 
 **The freshness guarantee is not uniform, and the difference is named here rather
-than implied.** Three strategies, one per group of kinds (`FRESHNESS_BY_KIND`):
+than implied.** Two strategies, one per group of kinds (`FRESHNESS_BY_KIND`):
 
-* `BACKEND_PRECONDITION` (`identify`, `items_identify`) — the token carries the
-  `match_generation` read at preview time and passes it to the confirm endpoint,
-  which compares it inside `state.identify_lock`. A re-identify or a competing
-  confirm is *rejected*, not merely noticed.
+* `BACKEND_PRECONDITION` (`identify`, `items_identify`, `cover`, `lyrics`) — the
+  token carries the generation of the state it previewed, read at preview time,
+  and passes it to the confirm endpoint, which compares it inside
+  `state.identify_lock`. For the identify kinds that generation is the task's
+  `match_generation`; for the fetch kinds it is the `stash_generation` of the
+  slot the fetched cover or lyrics landed in. Either way a re-run, a re-fetch or
+  a competing confirm is *rejected*, not merely noticed.
 * `REREAD_OLD_VALUES` (`tags`, `genres`) — the token records the values it
   previewed; `apply_change` re-reads them immediately before writing and refuses
   on drift. TOCTOU-racy by construction: a change landing between the re-read and
   the write is not caught.
-* `TTL_ONLY` (`cover`, `lyrics`) — the backend stash has no identity and no read
-  endpoint, so a competing fetch cannot be detected from outside at all. These
-  tokens get a short TTL and say so.
+
+`cover` and `lyrics` used to be a third, weaker case: their stash carried no
+identity, so a competing fetch overwrote it and won silently, and a short TTL was
+all that stood in the way. The backend now stamps every fetch with a generation
+and refuses a confirm that does not carry it, which is why they sit in the first
+group and no longer need a shorter lifetime than anything else.
 
 Refusals are deliberately *distinct*: expiry, value drift and a backend
 precondition failure each produce their own reason and their own actionable
@@ -37,11 +43,10 @@ from typing import Any, Literal
 
 from beetdeck_mcp.client import ApplyResult
 
-Freshness = Literal["backend_precondition", "reread_old_values", "ttl_only"]
+Freshness = Literal["backend_precondition", "reread_old_values"]
 
 BACKEND_PRECONDITION: Freshness = "backend_precondition"
 REREAD_OLD_VALUES: Freshness = "reread_old_values"
-TTL_ONLY: Freshness = "ttl_only"
 
 #: Which strategy defends which kind. The keys are exactly `client.WRITE_KINDS`
 #: — a write the MCP server can commit but cannot describe the guarantee for
@@ -51,34 +56,42 @@ FRESHNESS_BY_KIND: Mapping[str, Freshness] = {
     "items_identify": BACKEND_PRECONDITION,
     "tags": REREAD_OLD_VALUES,
     "genres": REREAD_OLD_VALUES,
-    "cover": TTL_ONLY,
-    "lyrics": TTL_ONLY,
+    "cover": BACKEND_PRECONDITION,
+    "lyrics": BACKEND_PRECONDITION,
+}
+
+#: What moved and what to do about it, per kind, when a backend precondition
+#: fails. One mechanism, but neither half is shared: "identification was re-run"
+#: for a cover would send an agent to fix the wrong thing, and re-running
+#: `preview_match` alone does not produce new candidates the way a re-fetch
+#: produces a new cover.
+PRECONDITION_SUBJECT: Mapping[str, tuple[str, str]] = {
+    "identify": ("identification", "identify again and preview the new candidates"),
+    "items_identify": ("identification", "identify again and preview the new candidates"),
+    "cover": ("the fetched cover art", "re-run the preview and decide again on the current state"),
+    "lyrics": ("the fetched lyrics", "re-run the preview and decide again on the current state"),
 }
 
 #: Agent-facing wording, returned with every minted token. An agent that cannot
 #: see how strong the promise is will treat all six kinds as equally safe.
 GUARANTEE: Mapping[Freshness, str] = {
     BACKEND_PRECONDITION: (
-        "Enforced by the backend: this token carries the identification generation read "
-        "at preview time, and the confirm is rejected outright if identification was "
-        "re-run or already applied in the meantime."
+        "Enforced by the backend: this token carries the generation of the state it "
+        "previewed — the identification run, or the slot the fetched result was stashed "
+        "in — and the confirm is rejected outright if that state was re-run, replaced or "
+        "already applied in the meantime."
     ),
     REREAD_OLD_VALUES: (
         "Best effort: the previewed values are re-read immediately before writing and the "
         "apply is refused if they changed. A change landing between that re-read and the "
         "write itself is not caught."
     ),
-    TTL_ONLY: (
-        "Time-limited only: the backend keeps the fetched result in an anonymous stash "
-        "that cannot be read back, so a competing fetch in the web UI overwrites it and "
-        "wins silently. Apply promptly."
-    ),
 }
 
 #: 15 minutes is long enough for an agent to think between preview and apply.
+#: Uniform across kinds: every one of them carries a precondition, so a stale
+#: token is refused by name rather than having to be aged out.
 DEFAULT_TTL = 15 * 60.0
-#: `cover`/`lyrics` get 5: nothing but the clock protects them.
-SHORT_TTL = 5 * 60.0
 
 #: How many burned tokens to remember, so a second apply can say *why* the token
 #: is gone instead of "unknown". Purely diagnostic — bounded on purpose.
@@ -126,11 +139,6 @@ def freshness_for(kind: str) -> Freshness:
         ) from None
 
 
-def ttl_for(kind: str) -> float:
-    """How long a token of `kind` stays applicable."""
-    return SHORT_TTL if freshness_for(kind) == TTL_ONLY else DEFAULT_TTL
-
-
 @dataclass(frozen=True)
 class Preview:
     """One minted token and everything `apply_change` needs to commit it."""
@@ -173,15 +181,18 @@ class Preview:
     def expired(self, now: float) -> bool:
         return now >= self.expires_at
 
-    def request_json(self) -> dict[str, Any] | None:
+    def request_json(self) -> dict[str, Any]:
         """The body to send on apply — `params` plus the backend precondition.
 
-        `None` when there is nothing to send (a bodyless confirm, e.g. cover).
+        Never empty: the precondition kinds always add `expected_generation`, and
+        the re-read kinds always carry the values they are writing. The cover
+        confirm used to be the bodyless one; it is not since it gained a
+        precondition.
         """
         body = dict(self.params)
         if self.freshness == BACKEND_PRECONDITION:
             body["expected_generation"] = self.expected_generation
-        return body or None
+        return body
 
 
 def _comparable(value: Any) -> Any:
@@ -255,11 +266,14 @@ def precondition_failed(preview: Preview, result: ApplyResult | None = None) -> 
             f"(they are defended by {preview.freshness!r})"
         )
     detail = f" (backend said: {'; '.join(result.detail)})" if result and result.detail else ""
+    subject, remedy = PRECONDITION_SUBJECT.get(
+        preview.kind,
+        ("the previewed state", "re-run the preview and decide again on the current state"),
+    )
     return PreviewError(
         STALE_GENERATION,
-        f"identification for {preview.target} was re-run or already applied since this "
-        f"preview{detail} — nothing was written; identify again and preview the new "
-        "candidates",
+        f"{subject} for {preview.target} changed since this preview — it was re-run, "
+        f"replaced or already applied{detail} — nothing was written; {remedy}",
     )
 
 
@@ -299,8 +313,8 @@ class PreviewStore:
 
         The arguments a kind *must* carry are enforced here, not left to each
         preview tool: an identification token without a generation, or a tags
-        token without old values, would silently downgrade to a TTL-only
-        promise while still being described as a strong one.
+        token without old values, would silently downgrade to a promise the clock
+        alone keeps while still being described as a strong one.
         """
         strategy = freshness_for(kind)
         if strategy == BACKEND_PRECONDITION:
@@ -311,7 +325,7 @@ class PreviewStore:
                 )
             if old_values is not None or reread_endpoint is not None:
                 raise ValueError(f"{kind!r} previews do not carry old_values")
-        elif strategy == REREAD_OLD_VALUES:
+        else:
             # Claiming the *other* strategy is reported before anything missing:
             # it says the caller has the wrong model of the kind, which is the
             # more useful complaint.
@@ -326,12 +340,6 @@ class PreviewStore:
                 raise ValueError(
                     f"{kind!r} previews must carry reread_endpoint — without it apply_change "
                     "has nowhere to re-read the previewed values from"
-                )
-        else:
-            if expected_generation is not None or old_values is not None or reread_endpoint:
-                raise ValueError(
-                    f"{kind!r} previews are defended by their TTL alone; they carry neither "
-                    "expected_generation nor old_values"
                 )
 
         now = self.clock()
@@ -351,7 +359,7 @@ class PreviewStore:
             requested_item_ids=None if requested_item_ids is None else tuple(requested_item_ids),
             summary=deepcopy(dict(summary or {})),
             created_at=now,
-            expires_at=now + ttl_for(kind),
+            expires_at=now + DEFAULT_TTL,
         )
         with self._lock:
             self._purge_expired(now)

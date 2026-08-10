@@ -1293,6 +1293,43 @@ class TestItemTagsPatch:
         mock_item.store.assert_called_once()
         write.assert_called_once_with(mock_item)
 
+    def test_writing_lyrics_drops_the_fetch_stash(self, client, mocker):
+        """`is_editable` is a deny-list, so this generic endpoint can write
+        `lyrics` and any `lyrics_*` attr — which makes it owe the same stash
+        invalidation as the dedicated lyrics routes, or a pending confirm's
+        precondition still passes and reverts the edit."""
+        state.identify_tasks.clear()
+        with state.identify_lock:
+            state.identify_tasks["lyrics_7"] = {
+                "_lyrics_obj": object(),
+                "stash_generation": state.next_stash_generation(),
+            }
+        mock_item = self._make_mock_item(mocker, 7)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
+
+        resp = client.patch("/api/items/7/tags", json={"fields": {"lyrics": "Edited by hand"}})
+        assert resp.status_code == 200
+        assert "lyrics_7" not in state.identify_tasks
+
+    def test_writing_an_unrelated_field_leaves_the_stash_alone(self, client, mocker):
+        state.identify_tasks.clear()
+        with state.identify_lock:
+            state.identify_tasks["lyrics_8"] = {
+                "_lyrics_obj": object(),
+                "stash_generation": state.next_stash_generation(),
+            }
+        mock_item = self._make_mock_item(mocker, 8)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
+
+        client.patch("/api/items/8/tags", json={"fields": {"title": "New Title"}})
+        assert "lyrics_8" in state.identify_tasks
+
     def test_empty_value_clears_field_via_delitem(self, client, mocker):
         mock_item = self._make_mock_item(mocker, 2)
         mock_lib = mocker.MagicMock()

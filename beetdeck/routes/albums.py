@@ -17,6 +17,8 @@ from beetdeck.utils import (
     _find_lrc_file,
     _format_genre,
     _get_ro_conn,
+    _image_size,
+    _is_instrumental,
     _read_lrc_file,
     _resolve_path,
 )
@@ -67,17 +69,38 @@ def album_detail(album_id):
                 (album_id,),
             ).fetchall()
 
+            # Without this an instrumental verdict is invisible here: the track
+            # carries no lyrics, exactly like one nobody ever looked up, and the
+            # flag only shows in the raw per-track tags.
+            instrumental_ids = {
+                r["entity_id"]
+                for r in conn.execute(
+                    """
+                    SELECT ia.entity_id, ia.value
+                    FROM item_attributes ia
+                    JOIN items i ON i.id = ia.entity_id
+                    WHERE i.album_id = ? AND ia.key = 'lyrics_instrumental'
+                    """,
+                    (album_id,),
+                ).fetchall()
+                if _is_instrumental(r["value"])
+            }
+
             album_dir = _album_dir_from_items(conn, album_id)
             discs = _detect_disc_subdirs(items)
             disc_dirs = [d["dir"] for d in discs if d["dir"]]
             artpath = _resolve_path(a["artpath"]) if a["artpath"] else None
-            has_cover = bool(artpath and os.path.isfile(artpath)) or bool(
-                _find_cover(album_dir, fallback_dirs=disc_dirs)
+            cover_path = (
+                artpath
+                if artpath and os.path.isfile(artpath)
+                else _find_cover(album_dir, fallback_dirs=disc_dirs)
             )
         finally:
             conn.close()
     except sqlite3.OperationalError as e:
         return jsonify({"error": str(e)}), 500
+
+    cover_size = _image_size(cover_path)
 
     tracks = []
     for it in items:
@@ -98,6 +121,7 @@ def album_detail(album_id):
                 "samplerate": it["samplerate"],
                 "has_lrc": bool(lrc_path),
                 "has_lyrics": bool(it["lyrics"]) or bool(lrc_path and _read_lrc_file(lrc_path)),
+                "instrumental": it["id"] in instrumental_ids,
                 "has_bpm": bool(it["bpm"]),
                 "bpm": it["bpm"] or None,
             }
@@ -122,7 +146,9 @@ def album_detail(album_id):
             "path": album_dir or "",
             "multi_disc": len(discs) > 1,
             "discs": discs,
-            "has_cover": has_cover,
+            "has_cover": bool(cover_path),
+            "cover_width": cover_size[0] if cover_size else None,
+            "cover_height": cover_size[1] if cover_size else None,
             "tagged": a["tagged"] == "1" if a["tagged"] else False,
             "ignored": a["ignored"] == "1" if a["ignored"] else False,
             "tracks": tracks,

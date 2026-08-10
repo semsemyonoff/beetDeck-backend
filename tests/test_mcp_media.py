@@ -83,11 +83,17 @@ def album(db_path):
 
 @pytest.fixture()
 def art_source(mocker, tmp_path):
-    """The `fetchart` plugin, answering with a real file on disk."""
+    """The `fetchart` plugin, answering with a real image file on disk.
 
-    def _install(source="coverart", filename="candidate.jpg"):
+    A real JPEG rather than a few magic bytes: the fetch route reads the
+    candidate's dimensions off it, and those are part of what the tool returns.
+    """
+
+    def _install(source="coverart", filename="candidate.jpg", size=(600, 587)):
+        from PIL import Image
+
         image = tmp_path / filename
-        image.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 32)
+        Image.new("RGB", size, color="red").save(str(image), format="JPEG")
         candidate = mocker.MagicMock()
         candidate.path = str(image).encode()
         candidate.source_name = source
@@ -136,7 +142,7 @@ class TestExcerpt:
 
 class TestPreviewCover:
     def test_reports_the_source_and_mints_a_token(self, tools, album, art_source, store):
-        art_source(source="itunes")
+        art_source(source="itunes", size=(600, 587))
         result = tools["preview_cover"](album)
 
         assert result["preview_token"].startswith("cover-")
@@ -146,26 +152,78 @@ class TestPreviewCover:
             "album_id": album,
             "source": "itunes",
             "preview_url": f"/api/album/{album}/cover/preview",
+            "width": 600,
+            "height": 587,
         }
         assert len(store) == 1
 
-    def test_says_the_guarantee_is_the_clock_alone(self, tools, album, art_source):
+    def test_the_dimensions_are_comparable_against_the_current_cover(
+        self, tools, album, art_source, client
+    ):
+        """The whole point of carrying them: deciding upgrade-or-not from the API
+        alone, with no download and no external image tool."""
+        art_source(size=(600, 587))
+        candidate = tools["preview_cover"](album)["changes"]
+        current = client.get(f"/api/album/{album}").get_json()
+
+        assert (candidate["width"], candidate["height"]) == (600, 587)
+        # No cover on disk for this album, so the comparison side is explicit.
+        assert current["cover_width"] is None
+        assert current["cover_height"] is None
+
+    def test_an_unreadable_candidate_reports_no_dimensions_rather_than_failing(
+        self, tools, album, mocker, tmp_path, store
+    ):
+        broken = tmp_path / "broken.jpg"
+        broken.write_bytes(b"\xff\xd8\xff\xe0not-an-image")
+        candidate = mocker.MagicMock()
+        candidate.path = str(broken).encode()
+        candidate.source_name = "coverart"
+        plugin = fake_plugin(mocker, "fetchart")
+        plugin.art_for_album.return_value = candidate
+        mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+
+        result = tools["preview_cover"](album)
+        assert "width" not in result["changes"]
+        assert len(store) == 1
+
+    def test_says_the_guarantee_is_backend_enforced(self, tools, album, art_source):
         art_source()
         result = tools["preview_cover"](album)
 
-        assert "Time-limited only" in result["guarantee"]
-        assert any("overwrites it and wins" in note for note in result["notes"])
-        # 5 minutes, not the 15 the checked kinds get.
-        assert 240 < result["expires_in_seconds"] <= 300
+        assert "Enforced by the backend" in result["guarantee"]
+        assert any("stale-state refusal" in note for note in result["notes"])
+        # The same 15 minutes as every other kind — the short window existed only
+        # while nothing but the clock defended this one.
+        assert 840 < result["expires_in_seconds"] <= 900
 
-    def test_the_token_commits_the_bodyless_confirm(self, tools, album, art_source, store):
+    def test_the_token_commits_the_confirm_with_its_precondition(
+        self, tools, album, art_source, store
+    ):
         art_source()
         token = tools["preview_cover"](album)["preview_token"]
 
         preview = store.peek(token)
         assert preview.method == "POST"
         assert preview.endpoint == f"/api/album/{album}/cover/confirm"
-        assert preview.request_json() is None
+        assert preview.request_json() == {
+            "expected_generation": state.identify_tasks[f"cover_{album}"]["stash_generation"]
+        }
+
+    def test_a_fetch_without_a_generation_refuses_to_mint(self, make_tools, mcp_config, store):
+        """Minting anyway would describe the token as backend-enforced while
+        nothing enforced it — the exact silent downgrade this guards."""
+
+        def handler(request):
+            return httpx.Response(
+                200, json={"status": "ok", "found": True, "source": "x", "preview_url": "/p"}
+            )
+
+        client = BeetdeckClient(mcp_config, transport=httpx.MockTransport(handler))
+        result = make_tools(client)["preview_cover"](1)
+
+        assert "no stash generation" in result["error"]
+        assert len(store) == 0
 
     def test_nothing_found_mints_nothing(self, tools, album, mocker, store):
         plugin = fake_plugin(mocker, "fetchart")
@@ -221,22 +279,26 @@ class TestApplyCover:
 
         result = tools["apply_change"](token)
         assert result["status"] == "failed"
-        assert "No cover art to confirm" in result["detail"][0]
+        assert "the fetched cover art" in result["detail"][0]
         assert not saved_cover.called
 
-    def test_a_second_fetch_between_preview_and_apply_wins(
+    def test_a_second_fetch_between_preview_and_apply_is_refused(
         self, tools, album, art_source, saved_cover
     ):
-        """The documented limitation, pinned. The stash has no identity, so the
-        token cannot tell that what it previewed was replaced."""
+        """The old limitation, now closed: the stash carries a generation, so the
+        token can tell that what it previewed was replaced — and refuses rather
+        than writing the other image."""
         art_source(source="first", filename="first.jpg")
         token = tools["preview_cover"](album)["preview_token"]
 
-        second = art_source(source="second", filename="second.jpg")
+        art_source(source="second", filename="second.jpg")
         assert tools["preview_cover"](album)["changes"]["source"] == "second"
 
-        assert tools["apply_change"](token)["status"] == "ok"
-        assert saved_cover.call_args[0][1] == second
+        result = tools["apply_change"](token)
+        assert result["status"] == "failed"
+        assert "the fetched cover art" in result["detail"][0]
+        assert "re-run the preview" in result["detail"][0]
+        assert not saved_cover.called
 
     def test_the_token_commits_exactly_once(self, tools, album, art_source, saved_cover):
         art_source()
@@ -413,7 +475,8 @@ class TestPreviewLyricsAlbum:
         album_id, ids = tracks
         lyrics_source({ids[0]: lyrics_result(mocker)})
         result = tools["preview_lyrics"](album_id)
-        assert "overwrites it and wins" in result["notes"][0]
+        assert "replaces it" in result["notes"][0]
+        assert "stale-state refusal" in result["notes"][0]
 
     def test_nothing_found_mints_nothing(self, tools, tracks, lyrics_source, store):
         album_id, _ids = tracks
@@ -509,12 +572,12 @@ class TestApplyLyrics:
         assert not stored_lyrics(db_path, ids[0])
         assert stored_flex(db_path, ids[0], "lyrics_instrumental") in ("1", "True")
 
-    def test_a_stash_consumed_elsewhere_is_partial_not_ok(
+    def test_a_stash_consumed_elsewhere_refuses_the_whole_selection(
         self, tools, tracks, lyrics_source, db_path, writable, mocker
     ):
-        """The album confirm skips an id with no stashed fetch **silently** — the
-        tool has to notice that by counting, or it reports a write that never
-        happened as success."""
+        """The precondition is all-or-nothing: one id whose stash is gone means
+        the caller is looking at a state that no longer exists, so writing the
+        rest would commit a change nobody previewed."""
         album_id, ids = tracks
         lyrics_source({ids[0]: lyrics_result(mocker), ids[1]: lyrics_result(mocker)})
         token = tools["preview_lyrics"](album_id)["preview_token"]
@@ -522,10 +585,9 @@ class TestApplyLyrics:
         state.identify_tasks.pop(f"lyrics_{ids[1]}")
 
         result = tools["apply_change"](token)
-        assert result["status"] == "partial"
-        assert any("no stashed lyrics fetch" in entry for entry in result["detail"])
-        assert str(ids[1]) in " ".join(result["detail"])
-        assert stored_lyrics(db_path, ids[0]) == "Verse one\nVerse two"
+        assert result["status"] == "failed"
+        assert "the fetched lyrics" in result["detail"][0]
+        assert stored_lyrics(db_path, ids[0]) is None
         assert stored_lyrics(db_path, ids[1]) is None
 
     def test_a_file_write_failure_is_partial(self, tools, tracks, lyrics_source, db_path, mocker):
@@ -551,10 +613,10 @@ class TestApplyLyrics:
         assert result["status"] == "partial"
         assert any("sidecar .lrc could not be removed" in entry for entry in result["detail"])
 
-    def test_a_second_fetch_between_preview_and_apply_wins(
+    def test_a_second_fetch_between_preview_and_apply_is_refused(
         self, tools, tracks, lyrics_source, db_path, writable, mocker
     ):
-        """The documented limitation, pinned — same as for covers."""
+        """The old limitation, now closed — same as for covers."""
         album_id, ids = tracks
         lyrics_source({ids[0]: lyrics_result(mocker, text="First words")})
         token = tools["preview_lyrics"](album_id, ids[0])["preview_token"]
@@ -564,8 +626,10 @@ class TestApplyLyrics:
             "Second words"
         )
 
-        assert tools["apply_change"](token)["status"] == "ok"
-        assert stored_lyrics(db_path, ids[0]) == "Second words"
+        result = tools["apply_change"](token)
+        assert result["status"] == "failed"
+        assert "the fetched lyrics" in result["detail"][0]
+        assert stored_lyrics(db_path, ids[0]) is None
 
     def test_the_token_commits_exactly_once(self, tools, tracks, lyrics_source, writable, mocker):
         album_id, ids = tracks

@@ -1,26 +1,31 @@
-"""Cover art and lyrics — the two previews nothing but the clock defends.
+"""Cover art and lyrics — the two previews that commit a *fetched remote result*.
 
 Both endpoints work the same way on the backend: a fetch stashes its result in
 `state.identify_tasks` under `cover_<album_id>` / `lyrics_<item_id>`, and a later
-confirm writes whatever is stashed. That stash carries **no identity and no read
-endpoint**, so from outside the process there is no way to tell whether the thing
-about to be committed is still the thing that was previewed — a second fetch (a
-click in the web UI, another agent) silently overwrites it and wins. That is why
-these kinds are `TTL_ONLY` with a 5-minute lifetime, and why both tool
-descriptions say it outright instead of implying the guarantee the identify and
-tag previews give.
+confirm writes whatever is stashed. There is one slot per target, so a second
+fetch (a click in the web UI, another agent) replaces what an earlier preview
+saw. The backend stamps every fetch with a `stash_generation` and rejects a
+confirm carrying a different one, so that replacement is a `409` rather than a
+silent substitution — which is what puts these kinds in the same
+`BACKEND_PRECONDITION` group as the identify previews. Threading that generation
+from the fetch response into the token is this module's job; dropping it would
+downgrade the guarantee without changing a word of any description.
 
-Two consequences shape the code:
+Three consequences shape the code:
 
 * **Only ids this fetch actually stashed go into the token.** A track the sources
   had nothing for leaves any *earlier* stash in place, so requesting it on
-  confirm would commit a result from a previous fetch that was never previewed.
+  confirm would commit a result from a previous fetch that was never previewed —
+  and one carrying an older generation, which the backend now refuses outright.
 * **Lyrics always commit through the album-wide confirm**, even for a single
   track. `…/track/<id>/lyrics/confirm` answers `{"status", "has_lrc"}` — a shape
   with no per-id partial signal — while the album confirm reports
   `written_item_ids`, `failed` and `retained_lrc_item_ids`, which is what
   `client._normalize_lyrics` maps, including the ids it silently skipped. One
   write path, one normalizer.
+* **A fetch response with no usable generation is an error, not a weaker token.**
+  `PreviewStore.mint` would raise on it, and minting one anyway is precisely the
+  silent downgrade the precondition exists to prevent.
 
 An instrumental track is a **third state**, not a miss: the fetch answers
 `found: false` together with `new_instrumental: true` and still stashes the
@@ -58,10 +63,29 @@ EXCERPT_CHARS = 160
 FETCH_TIMEOUT = 300.0
 
 RACE_NOTE = (
-    "The backend keeps this fetch in an anonymous stash that cannot be read back, so a "
-    "competing fetch (the web UI, another agent) overwrites it and wins without either side "
-    "noticing. Apply within the token's lifetime or re-run the preview."
+    "The backend keeps this fetch in a single slot per target, so a competing fetch (the web "
+    "UI, another agent) replaces it. Applying then fails with a stale-state refusal instead "
+    "of writing the other result — re-run the preview if that happens."
 )
+
+
+def _stash_generation(data: Mapping[str, Any], subject: str) -> int | dict[str, Any]:
+    """The fetch's `stash_generation`, or an error dict explaining its absence.
+
+    Minting without it would produce a token described as backend-enforced that
+    nothing enforces, so a missing value fails the preview rather than weakening
+    it silently.
+    """
+    generation = data.get("stash_generation")
+    if isinstance(generation, int) and not isinstance(generation, bool):
+        return generation
+    return {
+        "error": (
+            f"the backend's fetch for {subject} returned no stash generation, so a confirm "
+            "could not be made conditional on it and this preview would not be safe to "
+            "apply — nothing was previewed; check that the beetDeck API is up to date"
+        )
+    }
 
 
 def _excerpt(text: str) -> str:
@@ -111,17 +135,21 @@ def build_tools(
     def preview_cover(album_id: int) -> dict[str, Any]:
         """Fetch cover art for an album from online sources, without saving it.
 
-        Returns what the backend found — the source it came from and a
-        `preview_url` on the beetDeck API that serves the candidate image — plus
-        a single-use `preview_token`. Nothing is written until you pass that
-        token to `apply_change`, which saves the image into the album directory
-        and embeds it into every track. Image dimensions are not part of the
-        API's answer and are not fetched here.
+        Returns what the backend found — the source it came from, the
+        candidate's pixel `width` and `height`, and a `preview_url` on the
+        beetDeck API that serves the image — plus a single-use `preview_token`.
+        Nothing is written until you pass that token to `apply_change`, which
+        saves the image into the album directory and embeds it into every track.
 
-        **This preview is guarded by its 5-minute lifetime alone.** The fetched
-        image sits in an anonymous stash on the backend with no way to read it
-        back, so a cover fetched afterwards from the web UI replaces it and would
-        be what `apply_change` writes. Apply promptly, or re-run this preview.
+        Compare `width`/`height` against `cover_width`/`cover_height` from
+        `get_album` to decide whether the candidate is an upgrade over the cover
+        the album already has; both come from the API, so this needs no download
+        and no external image tool.
+
+        The fetched image sits in a single stash slot per album, so a cover
+        fetched afterwards from the web UI replaces it — but this token carries
+        the generation of the slot it went into, and applying it after that
+        happens is refused rather than writing the other image.
         """
         response = client.post(f"/api/album/{album_id}/cover/fetch", timeout=FETCH_TIMEOUT)
         if not response.ok:
@@ -137,16 +165,23 @@ def build_tools(
                 )
             }
 
+        generation = _stash_generation(data, f"album {album_id}")
+        if isinstance(generation, dict):
+            return generation
+
         preview = store.mint(
             "cover",
             target=f"album {album_id}",
             method="POST",
             endpoint=f"/api/album/{album_id}/cover/confirm",
+            expected_generation=generation,
             summary=compact(
                 {
                     "album_id": album_id,
                     "source": data.get("source"),
                     "preview_url": data.get("preview_url"),
+                    "width": data.get("width"),
+                    "height": data.get("height"),
                 }
             ),
         )
@@ -168,11 +203,15 @@ def build_tools(
         source positively says there are no lyrics, and applying it records that
         verdict and clears any lyrics tag on the file. Tracks the sources had
         nothing at all for are named in `notes` and are left out of the change.
+        Applied instrumental verdicts show up as `instrumental: true` on the
+        track in `get_album` — that is how "checked, nothing to fetch" stays
+        distinguishable from "never looked up".
 
-        **This preview is guarded by its 5-minute lifetime alone.** The fetched
-        lyrics sit in an anonymous stash on the backend with no way to read them
-        back, so a fetch afterwards from the web UI replaces them and would be
-        what `apply_change` writes. Apply promptly, or re-run this preview.
+        The fetched lyrics sit in a single stash slot per track, so a fetch
+        afterwards from the web UI replaces them — but this token carries the
+        generation of that fetch, and applying it after a replacement is refused
+        (as a whole, for every track in the selection) rather than writing the
+        other result.
         """
         if item_id is None:
             response = client.post(f"/api/album/{album_id}/lyrics/fetch", timeout=FETCH_TIMEOUT)
@@ -205,6 +244,10 @@ def build_tools(
                 )
             }
 
+        generation = _stash_generation(response.data, subject)
+        if isinstance(generation, dict):
+            return generation
+
         item_ids = [row["item_id"] for row in fetched]
         preview = store.mint(
             "lyrics",
@@ -213,6 +256,7 @@ def build_tools(
             # Always the album-wide confirm — see the module docstring.
             endpoint=f"/api/album/{album_id}/lyrics/confirm",
             params={"item_ids": item_ids},
+            expected_generation=generation,
             requested_item_ids=item_ids,
             summary={
                 "album_id": album_id,

@@ -178,6 +178,18 @@ Behaviours this app works around:
 - Cover embedding imports `embed_album` from the private
   `beetsplug._utils.art` (the old `beets.art` shim is slated for removal in beets
   3.0.0). Cover tests patch `beetsplug._utils.art.embed_album`.
+- `_save_cover_to_album()` bypasses `album.set_art()` (multi-disc, see its
+  docstring), so it must send `art_set` itself — that event is the only way
+  plugins like `permissions` ever see cover art. It sends it **after** its own
+  `embed_album`: beets' `embedart` listens on the same event and, with its `auto`
+  enabled, re-embeds the album and can delete the art file, which from inside our
+  embed would be re-entrant. It also chmods the resized file: `tempfile` hands
+  out 0600 regardless of umask, and `move()` carries that mode into the library.
+- An instrumental verdict lives in the `lyrics_instrumental` flex attr and has
+  more than one truthy spelling (`'1'` from the 2.13.0 migration, `1` from a
+  `types.BOOLEAN` write) — `_is_instrumental()` is the single rule. It is surfaced
+  per track on `GET /api/album/<id>`: `has_lyrics: false` alone cannot tell
+  "checked, nothing to fetch" from "never looked up".
 
 Per-release upgrade notes: [`docs/beets-upgrades.md`](docs/beets-upgrades.md).
 
@@ -209,17 +221,21 @@ every minted token:
 | kind | guarantee | mechanism |
 |---|---|---|
 | `identify`, `items_identify` | enforced by the backend | `match_generation` precondition, compared inside `state.identify_lock` |
+| `cover`, `lyrics` | enforced by the backend | `stash_generation` precondition on the fetch slot, same lock; all-or-nothing across a lyrics selection |
 | `tags`, `genres` | best-effort, TOCTOU-racy | old values re-read immediately before the write; refuses on drift |
-| `cover`, `lyrics` | TTL only (5 min, vs 15 for the rest) | the backend stash has no identity and no read path, so a competing fetch cannot be detected at all — a concurrent fetch in the SPA wins silently |
 
-The asymmetry is deliberate, not an oversight: identification is the expensive
-failure (candidates are addressed by **positional index** into rebuildable in-memory
-state, and a wrong apply rewrites tags across a whole album), so it is the one kind
-that got a real backend precondition.
+Only the tag kinds are left without a backend check, and that is a property of the
+endpoints: a tag write has no server-side staging to pin a generation to. The
+fetch kinds *did* have that gap — one anonymous stash slot per target, silently
+overwritten by a competing fetch — and closed it by stamping every fetch (see
+below), which is also why they no longer carry a shorter TTL than everything else.
 
-### `match_generation`
+### `match_generation` and `stash_generation`
 
-Identify tasks carry a monotonic `match_generation` (`state.next_match_generation()`),
+One process-wide counter (`state.next_match_generation`, aliased
+`next_stash_generation`) backs both, so a value never means two things.
+
+Identify tasks carry a monotonic `match_generation`,
 exposed on the status responses of `…/identify/status` and the untagged-items
 equivalent alongside `matches_available`. Both confirm endpoints accept an optional
 `expected_generation` and compare it **inside `state.identify_lock`**, so a stale
@@ -232,6 +248,35 @@ This exists because the status endpoint could not otherwise express consumption:
 `_get_task_json` strips every `_`-prefixed key, and `confirm_match` pops `_matches`
 but restores `status: "done"` under the same `task_id` — an already-consumed task was
 indistinguishable from a confirmable one over HTTP.
+
+The cover/lyrics fetches stamp `stash_generation` on the stash entry and return it;
+the matching confirms take the same optional `expected_generation` and answer `409`
+on a mismatch. The album-wide lyrics confirm checks it for **every** requested id
+before writing anything, and writes from the snapshot it validated rather than
+re-reading each entry in the loop — the selection came out of one fetch, so a
+partial write is a change nobody previewed, and the loop spends a real file write
+per track, which is a wide enough window for a competing fetch to land in.
+Omitting the field everywhere keeps the old behaviour, which is what the SPA relies
+on (it POSTs those confirms with no body at all).
+
+The precondition only sees what goes *through* the stash, so **every** route that
+writes one of those targets directly clears it on success — `…/cover/upload`,
+`…/lyrics/save`, both `…/lyrics/embed` routes, and `PATCH /api/items/<id>/tags`
+when the patch touches `lyrics` or a `lyrics_*` attr (`is_editable` is a
+deny-list, so that endpoint can write them). `_drop_cover_stash` /
+`_drop_lyrics_stash` are the single implementation; a route that writes lyrics
+and forgets to call one leaves the stash intact with its original generation, and
+a token minted before it still passes its precondition and reverts the edit.
+
+A generation check alone is not enough, because it is checked in microseconds and
+the write that follows takes seconds. `state.album_write_lock(album_id)` is held
+across check *and* write by every cover/lyrics write path, so a direct upload or
+save cannot land inside a confirm's window and be reverted by it. It is keyed by
+**album**, not item, so no handler ever holds two — which is what would make lock
+ordering a hazard — and it is always acquired *outside* `identify_lock`. The one
+deliberate exception is `PATCH …/tags`: it is keyed by item, has no album in its
+route, and taking an album lock for every tag edit would serialize unrelated
+writes; it invalidates the stash but does not serialize against a confirm.
 
 ### Genres commit through `save`, not `confirm`
 

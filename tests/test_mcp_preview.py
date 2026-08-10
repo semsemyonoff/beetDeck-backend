@@ -1,10 +1,10 @@
-"""Preview-token store: minting, single use, TTL, and the three freshness
+"""Preview-token store: minting, single use, TTL, and the two freshness
 strategies.
 
 The staleness paths are the point of this module, so they are tested where they
-actually live: value drift as a pure comparison, and the identification
-precondition against the **real** confirm endpoint in-process — the backend is
-what enforces that one, so a mock would prove nothing.
+actually live: value drift as a pure comparison, and the backend preconditions
+against the **real** confirm endpoints in-process — the backend is what enforces
+those, so a mock would prove nothing.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -23,9 +23,7 @@ from beetdeck_mcp.preview import (
     FRESHNESS_BY_KIND,
     GUARANTEE,
     REREAD_OLD_VALUES,
-    SHORT_TTL,
     STALE_GENERATION,
-    TTL_ONLY,
     UNKNOWN_TOKEN,
     PreviewError,
     PreviewStore,
@@ -33,7 +31,6 @@ from beetdeck_mcp.preview import (
     default_store,
     freshness_for,
     precondition_failed,
-    ttl_for,
     values_equal,
 )
 from tests.conftest import insert_album
@@ -86,13 +83,60 @@ def mint_tags(store, *, item_id=5, album_id=1, old_values=None):
     )
 
 
-def mint_cover(store, *, album_id=1):
+def mint_cover(store, *, album_id=1, generation=11):
     return store.mint(
         "cover",
         target=f"album {album_id}",
         method="POST",
         endpoint=f"/api/album/{album_id}/cover/confirm",
+        expected_generation=generation,
     )
+
+
+def mint_lyrics(store, *, album_id=1, item_ids=(3,), generation=12):
+    return store.mint(
+        "lyrics",
+        target=f"album {album_id}",
+        method="POST",
+        endpoint=f"/api/album/{album_id}/lyrics/confirm",
+        params={"item_ids": list(item_ids)},
+        expected_generation=generation,
+        requested_item_ids=list(item_ids),
+    )
+
+
+def mint_items_identify(store, *, task_id="t1", generation=13):
+    return store.mint(
+        "items_identify",
+        target=f"untagged items task {task_id}",
+        method="POST",
+        endpoint=f"/api/items/identify/{task_id}/confirm",
+        expected_generation=generation,
+    )
+
+
+def mint_genres(store, *, album_id=4):
+    return store.mint(
+        "genres",
+        target=f"album {album_id}",
+        method="POST",
+        endpoint=f"/api/album/{album_id}/genre/save",
+        params={"genre": "Ambient"},
+        old_values={"genre": "Rock"},
+        reread_endpoint=f"/api/album/{album_id}",
+    )
+
+
+#: One minter per write kind, so an assertion that must hold for *every* kind can
+#: be parametrized over `WRITE_KINDS` and fail loudly when a kind is added.
+MINTERS = {
+    "identify": mint_identify,
+    "items_identify": mint_items_identify,
+    "tags": mint_tags,
+    "genres": mint_genres,
+    "cover": mint_cover,
+    "lyrics": mint_lyrics,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -105,31 +149,47 @@ class TestFreshnessTable:
         assert set(FRESHNESS_BY_KIND) == set(WRITE_KINDS)
 
     def test_every_strategy_has_agent_facing_wording(self):
-        assert set(GUARANTEE) == {BACKEND_PRECONDITION, REREAD_OLD_VALUES, TTL_ONLY}
+        assert set(GUARANTEE) == {BACKEND_PRECONDITION, REREAD_OLD_VALUES}
         assert all(text for text in GUARANTEE.values())
 
     @pytest.mark.parametrize("kind", ["identify", "items_identify"])
     def test_identification_is_backend_enforced(self, kind):
         assert freshness_for(kind) == BACKEND_PRECONDITION
-        assert ttl_for(kind) == DEFAULT_TTL
 
     @pytest.mark.parametrize("kind", ["tags", "genres"])
     def test_tags_and_genres_re_read(self, kind):
         assert freshness_for(kind) == REREAD_OLD_VALUES
-        assert ttl_for(kind) == DEFAULT_TTL
 
     @pytest.mark.parametrize("kind", ["cover", "lyrics"])
-    def test_cover_and_lyrics_have_the_ttl_only_and_a_short_one(self, kind):
-        assert freshness_for(kind) == TTL_ONLY
-        assert ttl_for(kind) == SHORT_TTL
-        assert "wins silently" in GUARANTEE[TTL_ONLY]
+    def test_the_fetch_kinds_are_backend_enforced_too(self, kind):
+        # They used to be the weak case, defended by a short TTL alone; the
+        # backend now stamps every fetch stash with a generation.
+        assert freshness_for(kind) == BACKEND_PRECONDITION
+
+    @pytest.mark.parametrize("kind", list(WRITE_KINDS))
+    def test_every_kind_gets_the_same_lifetime(self, store, clock, kind):
+        preview = MINTERS[kind](store)
+        assert preview.expires_at == clock.now + DEFAULT_TTL
+
+    @pytest.mark.parametrize("kind", ["cover", "lyrics"])
+    def test_a_fetch_kind_must_carry_its_stash_generation(self, store, kind):
+        with pytest.raises(ValueError, match="must carry expected_generation"):
+            store.mint(kind, target="album 1", method="POST", endpoint="/x")
+
+    def test_the_precondition_refusal_names_what_moved_and_the_way_out_per_kind(self, store):
+        for preview, subject, remedy in (
+            (mint_identify(store), "identification", "identify again"),
+            (mint_cover(store), "the fetched cover art", "re-run the preview"),
+            (mint_lyrics(store), "the fetched lyrics", "re-run the preview"),
+        ):
+            message = str(precondition_failed(preview))
+            assert message.startswith(subject)
+            assert remedy in message
 
     @pytest.mark.parametrize("kind", ["", "unknown", "identity"])
     def test_an_unknown_kind_is_a_programming_error(self, kind):
         with pytest.raises(ValueError, match="unknown preview kind"):
             freshness_for(kind)
-        with pytest.raises(ValueError, match="unknown preview kind"):
-            ttl_for(kind)
 
 
 # ---------------------------------------------------------------------------
@@ -159,8 +219,10 @@ class TestMint:
     def test_other_kinds_do_not_send_a_precondition(self, store):
         assert mint_tags(store).request_json() == {"fields": {"title": "New Title"}}
 
-    def test_a_bodyless_confirm_sends_no_body(self, store):
-        assert mint_cover(store).request_json() is None
+    def test_a_fetch_confirm_carries_only_its_precondition(self, store):
+        # The cover confirm takes no parameters of its own, so the precondition
+        # is the whole body — and there is no bodyless confirm left.
+        assert mint_cover(store, generation=4).request_json() == {"expected_generation": 4}
 
     def test_params_are_copied_not_aliased(self, store):
         fields = {"title": "New"}
@@ -206,24 +268,15 @@ class TestMint:
                 reread_endpoint="/api/album/1",
             )
 
-    def test_a_ttl_only_kind_may_not_claim_a_re_read(self, store):
-        with pytest.raises(ValueError, match="defended by their TTL alone"):
+    def test_a_fetch_kind_may_not_claim_a_re_read(self, store):
+        with pytest.raises(ValueError, match="do not carry old_values"):
             store.mint(
                 "cover",
                 target="album 1",
                 method="POST",
                 endpoint="/api/album/1/cover/confirm",
+                expected_generation=3,
                 reread_endpoint="/api/album/1",
-            )
-
-    def test_a_ttl_only_kind_may_not_claim_a_stronger_defence(self, store):
-        with pytest.raises(ValueError, match="defended by their TTL alone"):
-            store.mint(
-                "cover",
-                target="album 1",
-                method="POST",
-                endpoint="/api/album/1/cover/confirm",
-                old_values={"art": "x"},
             )
 
     def test_a_kind_may_not_claim_the_other_strategy(self, store):
@@ -272,7 +325,7 @@ class TestMint:
 
     def test_describe_of_an_expired_token_reports_zero_not_a_negative(self, store, clock):
         preview = mint_cover(store)
-        clock.advance(SHORT_TTL + 60)
+        clock.advance(DEFAULT_TTL + 60)
         assert store.describe(preview)["expires_in_seconds"] == 0
 
 
@@ -387,54 +440,38 @@ class TestTake:
             store.take(preview.token)
         assert excinfo.value.reason == EXPIRED
 
-    def test_cover_and_lyrics_expire_after_five_minutes(self, store, clock):
+    def test_the_fetch_kinds_get_the_same_lifetime_as_everything_else(self, store, clock):
         cover = mint_cover(store)
-        lyrics = store.mint(
-            "lyrics",
-            target="album 1",
-            method="POST",
-            endpoint="/api/album/1/lyrics/confirm",
-            params={"item_ids": [3]},
-            requested_item_ids=[3],
-        )
-        clock.advance(SHORT_TTL - 1)
+        lyrics = mint_lyrics(store)
+        clock.advance(DEFAULT_TTL - 1)
         assert store.peek(cover.token) is cover
         clock.advance(2)
         for preview in (cover, lyrics):
             with pytest.raises(PreviewError) as excinfo:
                 store.take(preview.token)
             assert excinfo.value.reason == EXPIRED
-            assert "expired after 5 minutes" in str(excinfo.value)
-
-    def test_a_long_lived_kind_outlives_the_short_ttl(self, store, clock):
-        preview = mint_identify(store)
-        clock.advance(SHORT_TTL + 60)
-        assert store.take(preview.token) == preview
+            assert "expired after 15 minutes" in str(excinfo.value)
 
     def test_expired_records_are_purged(self, store, clock):
         mint_cover(store, album_id=1)
         mint_cover(store, album_id=2)
+        # Every kind has the same lifetime now, so what separates a survivor from
+        # a casualty is when it was minted, not what it is.
+        clock.advance(DEFAULT_TTL - 60)
         survivor = mint_identify(store)
-        clock.advance(SHORT_TTL + 1)
+        clock.advance(61)
         assert store.purge_expired() == 2
         assert len(store) == 1
         assert store.peek(survivor.token) == survivor
 
     def test_minting_purges_expired_records(self, store, clock):
         mint_cover(store)
-        clock.advance(SHORT_TTL + 1)
+        clock.advance(DEFAULT_TTL + 1)
         mint_identify(store)
         assert len(store) == 1
 
     def test_the_lyrics_requested_ids_survive_the_round_trip(self, store):
-        preview = store.mint(
-            "lyrics",
-            target="album 1",
-            method="POST",
-            endpoint="/api/album/1/lyrics/confirm",
-            params={"item_ids": [3, 4]},
-            requested_item_ids=[3, 4],
-        )
+        preview = mint_lyrics(store, item_ids=(3, 4))
         assert store.take(preview.token).requested_item_ids == (3, 4)
 
     def test_the_burned_history_is_bounded(self, store):
@@ -541,7 +578,7 @@ class TestBackendPrecondition:
         assert error.reason == STALE_GENERATION
         assert error.stale is True
         assert "album 12" in str(error)
-        assert "re-run or already applied" in str(error)
+        assert "re-run, replaced or already applied" in str(error)
         assert "identify again" in str(error)
 
     def test_the_backend_message_is_carried_through(self, store):

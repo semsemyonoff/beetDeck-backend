@@ -210,7 +210,7 @@ class TestResourceRegistration:
         text = content.content
         # The three things a tool description cannot carry on its own.
         assert "apply_change" in text
-        assert "TTL only" in text
+        assert "Enforced by the backend" in text
         assert "mb_release_id" in text
 
     def test_resources_are_registered_outside_register_all(self, mcp_config, beetdeck_client):

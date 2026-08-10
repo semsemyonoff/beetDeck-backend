@@ -10,18 +10,22 @@ from beetdeck import state
 from beetdeck.api import api
 from beetdeck.schemas.common import ErrorResponse
 from beetdeck.schemas.cover import (
+    CoverConfirmBody,
     CoverFetchResponse,
     CoverStatusResponse,
     CoverUploadForm,
 )
 from beetdeck.utils import (
     COVER_THUMB_SIZES,
+    STALE_STASH_ERROR,
     _album_dir_from_items,
     _cover_thumbnail,
     _decode_path,
     _detect_disc_subdirs,
+    _drop_cover_stash,
     _find_cover,
     _get_ro_conn,
+    _image_size,
     _init_beets,
     _resolve_path,
     _save_cover_to_album,
@@ -122,19 +126,27 @@ def fetch_cover(album_id):
             log.info("No cover art found for album_id=%d", album_id)
             return jsonify({"status": "ok", "found": False})
 
+        candidate_path = _decode_path(candidate.path)
+        size = _image_size(candidate_path)
+
         # Store candidate path temporarily for confirm step
         # Cover previews share the identify_tasks dict with "cover_" prefix keys
         with state.identify_lock:
+            # The stash is one slot per album, so a competing fetch replaces it
+            # silently. The generation is what lets a client that previewed this
+            # candidate refuse to commit somebody else's — see confirm below.
+            generation = state.next_stash_generation()
             state.identify_tasks[f"cover_{album_id}"] = {
-                "candidate_path": _decode_path(candidate.path),
+                "candidate_path": candidate_path,
                 "source": getattr(candidate, "source_name", "unknown"),
+                "stash_generation": generation,
             }
 
         log.info(
             "Cover art found for album_id=%d from %s: %s",
             album_id,
             getattr(candidate, "source_name", "?"),
-            _decode_path(candidate.path),
+            candidate_path,
         )
 
         return jsonify(
@@ -143,6 +155,9 @@ def fetch_cover(album_id):
                 "found": True,
                 "source": getattr(candidate, "source_name", "unknown"),
                 "preview_url": f"/api/album/{album_id}/cover/preview",
+                "width": size[0] if size else None,
+                "height": size[1] if size else None,
+                "stash_generation": generation,
             }
         )
 
@@ -169,41 +184,56 @@ def cover_preview(album_id):
 
 @bp.route("/api/album/<int:album_id>/cover/confirm", methods=["POST"])
 @api.validate(
+    json=CoverConfirmBody,
     resp=Response(
         HTTP_200=CoverStatusResponse,
         HTTP_400=ErrorResponse,
         HTTP_404=ErrorResponse,
+        HTTP_409=ErrorResponse,
         HTTP_500=ErrorResponse,
     ),
     tags=["cover"],
 )
 def confirm_cover(album_id):
     """Save fetched cover to album directory and embed into files."""
-    with state.identify_lock:
-        task = state.identify_tasks.get(f"cover_{album_id}")
-    if not task or not task.get("candidate_path"):
-        return jsonify({"error": "No cover art to confirm"}), 400
+    expected_generation = request.context.json.expected_generation
 
     lib = None
+    # Held across the check *and* the write: checking the generation and then
+    # releasing would let an upload land in between and be reverted by this
+    # write, which is the race the precondition exists to stop.
     try:
-        library_db = current_app.config["LIBRARY_DB"]
-        library_dir = current_app.config.get("LIBRARY_ROOT") or None
-        lib = _init_beets(library_db, library_dir)
-        album = lib.get_album(album_id)
-        if not album:
-            return jsonify({"error": "Album not found"}), 404
+        with state.album_write_lock(album_id):
+            with state.identify_lock:
+                task = state.identify_tasks.get(f"cover_{album_id}")
+                # A client that sends the generation its fetch returned must not
+                # commit a candidate someone else fetched into the same slot.
+                # Absent field ⇒ unchanged behaviour (the SPA does not send it).
+                if expected_generation is not None and (
+                    task is None or task.get("stash_generation") != expected_generation
+                ):
+                    return jsonify({"error": STALE_STASH_ERROR}), 409
+            if not task or not task.get("candidate_path"):
+                return jsonify({"error": "No cover art to confirm"}), 400
 
-        candidate_path = task["candidate_path"]
-        if not os.path.isfile(candidate_path):
-            return jsonify({"error": "Cover art file not found"}), 404
+            library_db = current_app.config["LIBRARY_DB"]
+            library_dir = current_app.config.get("LIBRARY_ROOT") or None
+            lib = _init_beets(library_db, library_dir)
+            album = lib.get_album(album_id)
+            if not album:
+                return jsonify({"error": "Album not found"}), 404
 
-        log.info("Saving cover art for album_id=%d from %s", album_id, candidate_path)
+            candidate_path = task["candidate_path"]
+            if not os.path.isfile(candidate_path):
+                return jsonify({"error": "Cover art file not found"}), 404
 
-        _save_cover_to_album(album, candidate_path)
+            log.info("Saving cover art for album_id=%d from %s", album_id, candidate_path)
 
-        with state.identify_lock:
-            if state.identify_tasks.get(f"cover_{album_id}") is task:
-                state.identify_tasks.pop(f"cover_{album_id}", None)
+            _save_cover_to_album(album, candidate_path)
+
+            with state.identify_lock:
+                if state.identify_tasks.get(f"cover_{album_id}") is task:
+                    state.identify_tasks.pop(f"cover_{album_id}", None)
 
         log.info("Cover art saved and embedded for album_id=%d", album_id)
         return jsonify({"status": "ok"})
@@ -260,7 +290,12 @@ def upload_cover(album_id):
 
         log.info("Uploading cover art for album_id=%d: %s", album_id, f.filename)
 
-        _save_cover_to_album(album, tmp.name)
+        # Same lock as the confirm, for the same reason: an upload that ran
+        # inside a confirm's check-to-write window would be reverted by it.
+        with state.album_write_lock(album_id):
+            _save_cover_to_album(album, tmp.name)
+            # An upload overrules any fetched candidate waiting in the stash.
+            _drop_cover_stash(album_id)
 
         log.info("Cover art uploaded and embedded for album_id=%d", album_id)
         return jsonify({"status": "ok"})

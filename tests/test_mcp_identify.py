@@ -421,7 +421,7 @@ class TestApplyChange:
         result = tools["apply_change"](token)
 
         assert result["status"] == "failed"
-        assert "re-run or already applied" in result["detail"][0]
+        assert "re-run, replaced or already applied" in result["detail"][0]
         assert "identify again" in result["detail"][0]
         # The fresh candidates survive the refusal.
         assert state.identify_tasks[f"album_{album}"]["_matches"]
@@ -437,7 +437,7 @@ class TestApplyChange:
         result = tools["apply_change"](second)
 
         assert result["status"] == "failed"
-        assert "re-run or already applied" in result["detail"][0]
+        assert "re-run, replaced or already applied" in result["detail"][0]
 
     def test_an_unknown_token_says_so(self, tools):
         result = tools["apply_change"]("identify-nope")
@@ -458,6 +458,7 @@ class TestApplyChange:
             target=f"album {album}",
             method="POST",
             endpoint=f"/api/album/{album}/cover/confirm",
+            expected_generation=1,
         ).token
 
         result = tools["apply_change"](token)

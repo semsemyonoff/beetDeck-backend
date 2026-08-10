@@ -41,6 +41,13 @@ class TrackSummary(BaseModel):
     has_lyrics: bool = Field(
         description="Whether the track has lyrics (embedded or readable non-empty sidecar .lrc)."
     )
+    instrumental: bool = Field(
+        default=False,
+        description="Whether a lyrics source positively reported this track as instrumental "
+        "(beets `lyrics_instrumental`). Pairs with has_lyrics=false but means 'checked, "
+        "there is nothing to fetch' — without it that is indistinguishable from 'never "
+        "looked up'.",
+    )
     has_bpm: bool = Field(description="Whether the track has a BPM value stored.")
     bpm: int | None = Field(
         default=None,
@@ -71,6 +78,15 @@ class AlbumDetailResponse(BaseModel):
     multi_disc: bool = Field(description="Whether the album spans more than one disc.")
     discs: list[DiscSummary] = Field(default_factory=list, description="Per-disc groupings.")
     has_cover: bool = Field(description="Whether cover art is available.")
+    cover_width: int | None = Field(
+        default=None,
+        description="Pixel width of the current cover; null when there is none or it "
+        "cannot be read as an image. Comparable against the dimensions a cover fetch "
+        "reports, so 'is this candidate an upgrade' needs no external tooling.",
+    )
+    cover_height: int | None = Field(
+        default=None, description="Pixel height of the current cover (see cover_width)."
+    )
     tagged: bool = Field(description="Whether the album is marked beetdeck_tagged.")
     ignored: bool = Field(description="Whether the album is marked beetdeck_ignored.")
     tracks: list[TrackSummary] = Field(

@@ -60,6 +60,7 @@ from beetdeck.schemas.items import (
 from beetdeck.utils import (
     STALE_GENERATION_ERROR,
     _consume_matches,
+    _drop_lyrics_stash,
     _get_ro_conn,
     _get_task_json,
     _init_beets,
@@ -386,6 +387,16 @@ def patch_item_tags(item_id):
                     item[name] = coerced
 
             item.store()
+
+            # This generic path can write `lyrics` and any `lyrics_*` attr
+            # (`is_editable` is a deny-list), so it owes the same stash
+            # invalidation as the dedicated lyrics routes — a fetched result left
+            # behind keeps its generation, and a confirm holding it would revert
+            # this edit. It is deliberately *not* under `album_write_lock`: this
+            # endpoint is keyed by item, not album, and taking an album lock for
+            # every tag edit would serialize unrelated writes across the album.
+            if any(name == "lyrics" or name.startswith("lyrics_") for name in fields):
+                _drop_lyrics_stash(item_id)
 
             warnings = []
             if not _try_write_item(item):

@@ -16,10 +16,12 @@ Bulk (album-wide):
 
 Request shapes (verified against the handlers):
 
-- read / ``fetch`` (single & bulk) / ``confirm`` (single) / ``embed`` (single &
-  bulk) take **no request body** — they act on the path params plus server-side
-  ``state.identify_tasks``. No ``json=`` model is added (forcing one would 422 the
-  SPA's body-less POSTs); these are documented response-only.
+- read / ``fetch`` (single & bulk) / ``embed`` (single & bulk) take **no request
+  body** — they act on the path params plus server-side ``state.identify_tasks``.
+  No ``json=`` model is added; these are documented response-only.
+- ``confirm`` (single) takes an optional ``{"expected_generation": int}``
+  precondition (``LyricsConfirmPrecondition``). Every field defaults, so a
+  body-less POST stays valid and the SPA is unaffected.
 - ``save`` (single) takes ``{"lyrics": "..."}``. ``lyrics`` is kept **optional**
   (default ``""``) so saving an empty body clears the lyrics, matching the
   handler's ``data.get("lyrics", "")``; ``extra="forbid"`` makes unknown fields a
@@ -58,15 +60,39 @@ class TrackLyricsSaveBody(BaseModel):
     )
 
 
-class AlbumLyricsConfirmBody(BaseModel):
+class LyricsConfirmPrecondition(BaseModel):
+    """JSON body for ``POST /api/album/<id>/track/<id>/lyrics/confirm``.
+
+    An optional precondition on the fetch stash. When ``expected_generation`` is
+    sent, the handler compares it against the ``stash_generation`` of the stashed
+    fetch inside ``state.identify_lock`` and rejects a mismatch with ``409`` —
+    that is what stops a confirm from committing lyrics somebody else fetched
+    into the same slot. Omitting it keeps the pre-existing behaviour (the SPA
+    does not send it), so a body-less POST stays valid.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_generation: int | None = Field(
+        default=None,
+        description=(
+            "Precondition: the ``stash_generation`` returned by the fetch whose "
+            "lyrics this confirm intends to write. A mismatch yields 409."
+        ),
+    )
+
+
+class AlbumLyricsConfirmBody(LyricsConfirmPrecondition):
     """JSON body for ``POST /api/album/<id>/lyrics/confirm``.
 
     The ids of the tracks whose previously-fetched lyrics should be written. Kept
     optional so the handler's own "No tracks selected" ``400`` stays authoritative
     for an empty selection; ``extra="forbid"`` makes unknown fields a ``422``.
-    """
 
-    model_config = ConfigDict(extra="forbid")
+    ``expected_generation`` (inherited) is checked **all-or-nothing**: the
+    selection came out of one fetch, so if any requested id's stash was replaced
+    or already consumed, nothing is written at all.
+    """
 
     item_ids: list[int] = Field(
         default_factory=list,
@@ -134,6 +160,12 @@ class TrackLyricsFetchResponse(BaseModel):
     )
     current_source: str | None = Field(
         default=None, description="Source of the current lyrics ('embedded'/'lrc_file'/null)."
+    )
+    stash_generation: int | None = Field(
+        default=None,
+        description="Generation of the stash slot this fetch was written into (absent "
+        "when nothing was stashed). Pass it back as ``expected_generation`` on confirm "
+        "to refuse lyrics that a competing fetch replaced in the meantime.",
     )
 
 
@@ -227,6 +259,12 @@ class AlbumLyricsFetchResponse(BaseModel):
     status: str = Field(description="Always 'ok' on success.")
     tracks: list[AlbumLyricsFetchTrack] = Field(
         default_factory=list, description="Per-track fetch results."
+    )
+    stash_generation: int | None = Field(
+        default=None,
+        description="One generation for the whole fetch, stamped on every row it "
+        "stashed. Pass it back as ``expected_generation`` on confirm to refuse a "
+        "selection whose stashed results a competing fetch replaced.",
     )
 
 

@@ -36,10 +36,11 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 TOOL_NAMES = ("apply_change",)
 
-#: `cover`/`lyrics` confirms embed into every track of the album one file at a
-#: time, so the write scales with the album the way the fetch does — the 30 s
+#: The `cover`/`lyrics` confirms embed into every track of the album one file at
+#: a time, so the write scales with the album the way the fetch does — the 30 s
 #: client default would abort a long one mid-embed. See `media.FETCH_TIMEOUT`.
 EMBED_TIMEOUT = 300.0
+_SLOW_EMBED_KINDS = frozenset({"cover", "lyrics"})
 
 READONLY_REFUSAL = (
     "BEETDECK_MCP_READONLY is set on this server — apply_change is disabled and nothing was "
@@ -49,17 +50,24 @@ READONLY_REFUSAL = (
 
 
 def _apply_backend_precondition(client: BeetdeckClient, preview: Preview) -> ApplyResult:
-    """Commit a kind whose freshness the backend enforces (the identify kinds).
+    """Commit a kind whose freshness the backend enforces — all four of them.
 
     `request_json()` adds `expected_generation`, which the confirm handler
-    compares inside `state.identify_lock` — so a re-identify or a competing
-    confirm is rejected there, atomically, and comes back as a `409`.
+    compares inside `state.identify_lock` — so a re-identify, a competing fetch
+    or a competing confirm is rejected there, atomically, and comes back as a
+    `409`. One handler on purpose: the refusal is the same mechanism for every
+    kind, and two copies of it would drift.
+
+    `requested_item_ids` is only ever set on a lyrics preview; the identify kinds
+    carry `None`, which the normalizer treats as "nothing to reconcile".
     """
     result = client.write(
         preview.kind,
         preview.method,
         preview.endpoint,
         json=preview.request_json(),
+        timeout=EMBED_TIMEOUT if preview.kind in _SLOW_EMBED_KINDS else None,
+        requested_item_ids=preview.requested_item_ids,
     )
     if result.stale:
         return _precondition_failed(preview, result).as_result()
@@ -98,32 +106,13 @@ def _apply_after_reread(client: BeetdeckClient, preview: Preview) -> ApplyResult
     )
 
 
-def _apply_ttl_only(client: BeetdeckClient, preview: Preview) -> ApplyResult:
-    """Commit a kind nothing but the clock defends (`cover`, `lyrics`).
-
-    There is no check to make: the backend's fetch stash has no identity and no
-    read endpoint, so a competing fetch cannot be detected from here at all. The
-    honest implementation is to send the request and let the normalizer report
-    what came back — including the ids the lyrics confirm silently skipped, which
-    is why `requested_item_ids` is threaded through.
-    """
-    return client.write(
-        preview.kind,
-        preview.method,
-        preview.endpoint,
-        json=preview.request_json(),
-        timeout=EMBED_TIMEOUT,
-        requested_item_ids=preview.requested_item_ids,
-    )
-
-
 _HANDLERS: Mapping[str, Callable[[BeetdeckClient, Preview], ApplyResult]] = {
     "identify": _apply_backend_precondition,
     "items_identify": _apply_backend_precondition,
     "tags": _apply_after_reread,
     "genres": _apply_after_reread,
-    "cover": _apply_ttl_only,
-    "lyrics": _apply_ttl_only,
+    "cover": _apply_backend_precondition,
+    "lyrics": _apply_backend_precondition,
 }
 
 
@@ -140,9 +129,10 @@ def build_tools(
 
         Pass the `preview_token` returned by a `preview_*` tool. Tokens are
         single-use and time-limited, and a refusal always says which it was:
-        expired, already applied, the previewed values changed, or identification
-        was re-run. In every one of those cases **nothing was written** — re-run
-        the preview and decide again on the current state.
+        expired, already applied, the previewed values changed, or the state the
+        preview was taken from was re-run or replaced. In every one of those
+        cases **nothing was written** — re-run the preview and decide again on
+        the current state.
 
         The result is `{status, detail}` where `status` is `ok`, `partial` (the
         database was written but not every file) or `failed`.

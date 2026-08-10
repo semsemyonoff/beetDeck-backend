@@ -86,6 +86,12 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
         returns an empty result set, not the whole library — use `list_albums`
         for that. Each group is truncated to `limit`, and a `notes` entry says so
         when that happens.
+
+        The groups match **independently**: an artist name only ever lands in
+        `artists`, so searching for a band returns its name and an empty `albums`
+        unless the band's name is also part of an album title. `artists` entries
+        are bare names — feed one to `list_albums(artist=…)` to get that artist's
+        albums with their ids.
         """
         bad = _bad_window(limit, 0)
         if bad is not None:
@@ -103,12 +109,22 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
             result[group] = [compact(row) if isinstance(row, dict) else row for row in page]
             if note is not None:
                 notes.append(note)
+        if result["artists"] and not result["albums"]:
+            # The dead end this tool used to leave an agent in: a name, no id,
+            # and no obvious next call. Name the next call.
+            names = ", ".join(f"{name!r}" for name in result["artists"][:3])
+            notes.append(
+                f"matched {len(result['artists'])} artist name(s) but no album title — "
+                f"call list_albums(artist=…) with one of {names} to see what the library "
+                "has for them"
+            )
         if notes:
             result["notes"] = notes
         return result
 
     def list_albums(
         filter: AlbumFilter = "all",
+        artist: str | None = None,
         limit: int = DEFAULT_ALBUM_LIMIT,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -118,16 +134,31 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
         whole library grouped by artist, so filtering and paging happen in this
         tool: `limit`/`offset` bound what reaches you, not what is fetched.
 
+        `artist` narrows the list to album artists whose name contains it
+        (case-insensitive substring, so `"floyd"` finds `"Pink Floyd"`). This is
+        the answer to "what does the library have by this band" — `search_library`
+        matches artist names only into its own `artists` group and returns bare
+        names, so pass one of those here to get the albums and their ids.
+
         `filter`:
 
         * `all` — every album.
         * `untagged` — not yet confirmed against MusicBrainz and not ignored;
           this is the work queue.
         * `ignored` — explicitly marked ignored.
+
+        `filter` and `artist` combine: `filter="untagged", artist="Pink Floyd"`
+        is that artist's share of the work queue.
         """
         bad = _bad_window(limit, offset)
         if bad is not None:
             return bad
+
+        # Normalize once and key everything below off the result — echoing or
+        # reporting the raw value would claim a filter that a whitespace-only
+        # argument silently turned off.
+        wanted = (artist or "").strip()
+        needle = wanted.lower()
 
         response = client.get("/api/library")
         if not response.ok:
@@ -136,7 +167,9 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
 
         rows: list[dict[str, Any]] = []
         for group in groups:
-            artist = group.get("artist") if isinstance(group, dict) else None
+            artist_name = group.get("artist") if isinstance(group, dict) else None
+            if needle and needle not in (artist_name or "").lower():
+                continue
             for album in (group.get("albums") or []) if isinstance(group, dict) else []:
                 tagged = bool(album.get("tagged"))
                 ignored = bool(album.get("ignored"))
@@ -148,7 +181,7 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
                     compact(
                         {
                             "id": album.get("id"),
-                            "artist": artist,
+                            "artist": artist_name,
                             "album": album.get("album"),
                             "year": album.get("year"),
                             "tagged": tagged,
@@ -165,8 +198,20 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
             "offset": offset,
             "albums": page,
         }
-        if note is not None:
-            result["notes"] = [note]
+        if wanted:
+            result["artist"] = wanted
+        notes = [note] if note is not None else []
+        if wanted and not rows:
+            # An empty page under an artist filter is ambiguous — no such artist,
+            # or none matching `filter` — and the difference decides the next call.
+            notes.append(
+                f"no album artist contains {wanted!r}"
+                + (f" among the {filter} albums" if filter != "all" else "")
+                + " — names must match as a substring; search_library(query) finds the "
+                "spelling the library actually uses"
+            )
+        if notes:
+            result["notes"] = notes
         return result
 
     def get_album(album_id: int, include_raw_tags: bool = False) -> dict[str, Any]:
@@ -175,6 +220,14 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
         Every track carries `length_sec` (raw seconds) and `filename`, which is
         what makes a tracklist comparable against a MusicBrainz release without
         further calls.
+
+        Two fields answer "is this album done" without a second call per track:
+        `cover_width`/`cover_height` are the current cover's pixel dimensions
+        (null when there is none), directly comparable against what
+        `preview_cover` reports for a candidate; and a track's `instrumental`
+        flag means a lyrics source positively said there is nothing to fetch —
+        `has_lyrics: false` with `instrumental: false` is the one that still
+        needs work.
 
         With `include_raw_tags=true` each track additionally carries `raw_tags` —
         its complete beets row including flexible attributes — at the cost of one

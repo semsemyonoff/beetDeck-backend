@@ -11,9 +11,56 @@ from beetdeck.utils import (
     _detect_disc_subdirs,
     _find_cover,
     _format_genre,
+    _image_size,
     _remove_cover_files,
     _resolve_path,
 )
+
+# ---------------------------------------------------------------------------
+# _image_size
+# ---------------------------------------------------------------------------
+
+
+def _write_jpeg(path, size=(40, 30)):
+    from PIL import Image
+
+    Image.new("RGB", size, color="red").save(str(path), format="JPEG")
+    return str(path)
+
+
+def test_image_size_reads_the_header(tmp_path):
+    assert _image_size(_write_jpeg(tmp_path / "c.jpg", (40, 30))) == (40, 30)
+
+
+@pytest.mark.parametrize("path", [None, ""])
+def test_image_size_of_no_path_is_none(path):
+    assert _image_size(path) is None
+
+
+def test_image_size_of_a_missing_file_is_none(tmp_path):
+    assert _image_size(str(tmp_path / "nope.jpg")) is None
+
+
+def test_image_size_of_a_non_image_is_none(tmp_path):
+    broken = tmp_path / "broken.jpg"
+    broken.write_bytes(b"\xff\xd8\xff\xe0not-an-image")
+    assert _image_size(str(broken)) is None
+
+
+def test_image_size_of_a_decompression_bomb_is_none(tmp_path, mocker):
+    """Pillow raises this one straight from the header parse, and it derives from
+    Exception rather than OSError — so it needs its own arm or it escapes as a
+    500 from every route that asks an album for its cover dimensions."""
+    from PIL import Image
+
+    path = _write_jpeg(tmp_path / "big.jpg", (100, 100))
+    # 100x100 = 10_000 px, over the 2x threshold Pillow applies to this cap.
+    mocker.patch.object(Image, "MAX_IMAGE_PIXELS", 10)
+
+    with pytest.raises(Image.DecompressionBombError):
+        Image.open(path)
+    assert _image_size(path) is None
+
 
 # ---------------------------------------------------------------------------
 # _decode_path

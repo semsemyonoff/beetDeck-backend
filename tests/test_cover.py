@@ -2,6 +2,8 @@
 
 import io
 
+import pytest
+
 from beetdeck import state
 from tests.conftest import insert_album, insert_item
 
@@ -342,6 +344,85 @@ class TestSaveCoverToAlbumMultiDisc:
         assert call_kwargs["item_dir"] == str(album_dir).encode()
         assert album.store.called
 
+    def test_written_cover_is_world_readable(self, app, tmp_path, mocker):
+        """The cover lands in the library via ``move``, so it must not keep the
+        0600 mode ``NamedTemporaryFile`` gives the intermediate resize output.
+        """
+        import os
+        import stat
+
+        from beetdeck.utils import _save_cover_to_album
+
+        album_dir = tmp_path / "Artist" / "Album"
+        album_dir.mkdir(parents=True)
+        dest = album_dir / "cover.jpg"
+
+        item = mocker.MagicMock()
+        item.path = str(album_dir / "01.mp3").encode()
+        album = mocker.MagicMock()
+        album.items.return_value = [item]
+        album.art_destination.return_value = str(dest).encode()
+
+        src = tmp_path / "new.jpg"
+        self._make_jpeg(src)
+        mocker.patch("beetsplug._utils.art.embed_album")
+
+        with app.app_context():
+            _save_cover_to_album(album, str(src))
+
+        umask = os.umask(0)
+        os.umask(umask)
+        assert stat.S_IMODE(dest.stat().st_mode) == 0o666 & ~umask
+
+    def test_emits_art_set_event(self, app, tmp_path, mocker):
+        from beetdeck.utils import _save_cover_to_album
+
+        album_dir = tmp_path / "Artist" / "Album"
+        album_dir.mkdir(parents=True)
+
+        item = mocker.MagicMock()
+        item.path = str(album_dir / "01.mp3").encode()
+        album = mocker.MagicMock()
+        album.items.return_value = [item]
+        album.art_destination.return_value = str(album_dir / "cover.jpg").encode()
+
+        src = tmp_path / "new.jpg"
+        self._make_jpeg(src)
+        mocker.patch("beetsplug._utils.art.embed_album")
+        send = mocker.patch("beets.plugins.send")
+
+        with app.app_context():
+            _save_cover_to_album(album, str(src))
+
+        send.assert_called_once_with("art_set", album=album)
+
+    def test_art_set_is_emitted_after_the_embed(self, app, tmp_path, mocker):
+        """beets' own ``embedart`` listens on ``art_set`` and, with its ``auto``
+        enabled, re-embeds the album and may delete the art file. Emitting before
+        our embed makes that re-entrant on the cover we just wrote."""
+        from beetdeck.utils import _save_cover_to_album
+
+        album_dir = tmp_path / "Artist" / "Album"
+        album_dir.mkdir(parents=True)
+
+        item = mocker.MagicMock()
+        item.path = str(album_dir / "01.mp3").encode()
+        album = mocker.MagicMock()
+        album.items.return_value = [item]
+        album.art_destination.return_value = str(album_dir / "cover.jpg").encode()
+
+        src = tmp_path / "new.jpg"
+        self._make_jpeg(src)
+
+        order = mocker.MagicMock()
+        order.attach_mock(mocker.patch("beetsplug._utils.art.embed_album"), "embed")
+        order.attach_mock(mocker.patch("beets.plugins.send"), "send")
+
+        with app.app_context():
+            _save_cover_to_album(album, str(src))
+
+        assert [call[0] for call in order.mock_calls] == ["embed", "send"]
+
 
 class TestFetchCover:
     def setup_method(self):
@@ -409,6 +490,191 @@ class TestFetchCover:
         assert data["preview_url"] == "/api/album/77/cover/preview"
         assert "cover_77" in state.identify_tasks
         assert state.identify_tasks["cover_77"]["candidate_path"] == str(img_file)
+
+    def _install_candidate(self, client, mocker, tmp_path, *, album_id, filename, size):
+        from PIL import Image
+
+        img_file = tmp_path / filename
+        Image.new("RGB", size, color="blue").save(str(img_file), format="JPEG")
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_album.return_value = mocker.MagicMock()
+        mocker.patch("beetdeck.routes.cover._init_beets", return_value=mock_lib)
+        candidate = mocker.MagicMock()
+        candidate.path = str(img_file).encode()
+        candidate.source_name = "coverart"
+        plugin = mocker.MagicMock()
+        plugin.name = "fetchart"
+        plugin.art_for_album.return_value = candidate
+        mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+        return client.post(f"/api/album/{album_id}/cover/fetch").get_json()
+
+    def test_reports_the_candidate_dimensions(self, client, tmp_path, mocker):
+        data = self._install_candidate(
+            client, mocker, tmp_path, album_id=78, filename="c.jpg", size=(600, 587)
+        )
+        assert (data["width"], data["height"]) == (600, 587)
+
+    def test_an_unreadable_candidate_reports_null_dimensions_not_an_error(
+        self, client, tmp_path, mocker
+    ):
+        img_file = tmp_path / "broken.jpg"
+        img_file.write_bytes(b"\xff\xd8\xff\xe0not-an-image")
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_album.return_value = mocker.MagicMock()
+        mocker.patch("beetdeck.routes.cover._init_beets", return_value=mock_lib)
+        candidate = mocker.MagicMock()
+        candidate.path = str(img_file).encode()
+        candidate.source_name = "coverart"
+        plugin = mocker.MagicMock()
+        plugin.name = "fetchart"
+        plugin.art_for_album.return_value = candidate
+        mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+
+        data = client.post("/api/album/79/cover/fetch").get_json()
+        assert data["found"] is True
+        assert data["width"] is None
+        assert data["height"] is None
+
+    def test_each_fetch_stamps_a_fresh_stash_generation(self, client, tmp_path, mocker):
+        first = self._install_candidate(
+            client, mocker, tmp_path, album_id=80, filename="a.jpg", size=(10, 10)
+        )
+        second = self._install_candidate(
+            client, mocker, tmp_path, album_id=80, filename="b.jpg", size=(10, 10)
+        )
+        assert second["stash_generation"] > first["stash_generation"]
+        assert state.identify_tasks["cover_80"]["stash_generation"] == second["stash_generation"]
+
+
+class TestConfirmCoverPrecondition:
+    """``expected_generation`` is what stops a confirm from committing a candidate
+    a competing fetch put in the album's single stash slot."""
+
+    def setup_method(self):
+        for key in [k for k in state.identify_tasks if k.startswith("cover_")]:
+            del state.identify_tasks[key]
+
+    @pytest.fixture()
+    def stashed(self, mocker):
+        """A stashed candidate for album 5, and the generation it carries."""
+        mocker.patch("beetdeck.routes.cover._init_beets")
+        mocker.patch("beetdeck.routes.cover._save_cover_to_album")
+        with state.identify_lock:
+            generation = state.next_stash_generation()
+        state.identify_tasks["cover_5"] = {
+            "candidate_path": "/tmp/candidate.jpg",
+            "source": "coverart",
+            "stash_generation": generation,
+        }
+        return generation
+
+    def test_a_matching_generation_writes(self, client, stashed, mocker):
+        mocker.patch("beetdeck.routes.cover.os.path.isfile", return_value=True)
+        resp = client.post("/api/album/5/cover/confirm", json={"expected_generation": stashed})
+        assert resp.status_code == 200
+
+    def test_a_replaced_stash_is_refused_with_409(self, client, stashed, mocker):
+        mocker.patch("beetdeck.routes.cover.os.path.isfile", return_value=True)
+        save = mocker.patch("beetdeck.routes.cover._save_cover_to_album")
+        with state.identify_lock:
+            state.identify_tasks["cover_5"]["stash_generation"] = state.next_stash_generation()
+
+        resp = client.post("/api/album/5/cover/confirm", json={"expected_generation": stashed})
+        assert resp.status_code == 409
+        assert "changed since the preview" in resp.get_json()["error"]
+        assert not save.called
+
+    def test_a_vanished_stash_is_refused_with_409_not_400(self, client, stashed):
+        state.identify_tasks.pop("cover_5")
+        resp = client.post("/api/album/5/cover/confirm", json={"expected_generation": stashed})
+        assert resp.status_code == 409
+
+    def test_a_bodyless_confirm_still_works(self, client, stashed, mocker):
+        """The SPA sends no body; omitting the precondition must keep the old
+        behaviour rather than becoming a 422."""
+        mocker.patch("beetdeck.routes.cover.os.path.isfile", return_value=True)
+        assert client.post("/api/album/5/cover/confirm").status_code == 200
+
+    def test_a_confirm_and_an_upload_cannot_interleave(self, client, stashed, mocker, app):
+        """The precondition is checked under `identify_lock`, which is released
+        long before the write finishes. Without a per-album write lock an upload
+        landing in that window is reverted by the confirm that already passed —
+        and the confirm still answers 200."""
+        import mimetypes
+        import threading
+        import time
+
+        # Werkzeug's multipart builder lazily initializes `mimetypes` on first
+        # use, and that initialization is not thread-safe — doing it here keeps
+        # the test measuring the lock rather than a CPython import race.
+        mimetypes.init()
+
+        mocker.patch("beetdeck.routes.cover.os.path.isfile", return_value=True)
+        order = []
+        order_guard = threading.Lock()
+
+        def slow_save(album, src_path):
+            with order_guard:
+                order.append("enter")
+            # Long enough that an unserialized second write would start here.
+            time.sleep(0.2)
+            with order_guard:
+                order.append("exit")
+
+        mocker.patch("beetdeck.routes.cover._save_cover_to_album", side_effect=slow_save)
+
+        upload_status = {}
+
+        def upload():
+            with app.test_client() as other:
+                upload_status["code"] = other.post(
+                    "/api/album/5/cover/upload",
+                    data={"file": (io.BytesIO(b"\xff\xd8\xff\xe0image"), "art.jpg")},
+                    content_type="multipart/form-data",
+                ).status_code
+
+        thread = threading.Thread(target=upload)
+        thread.start()
+        assert client.post("/api/album/5/cover/confirm").status_code == 200
+        thread.join(timeout=5)
+
+        assert upload_status.get("code") == 200
+        # Both routes write through _save_cover_to_album; mutual exclusion means
+        # the record never shows one entering while the other is inside.
+        assert order == ["enter", "exit", "enter", "exit"]
+
+    def test_an_upload_drops_the_stash_so_a_pending_token_cannot_revert_it(
+        self, client, stashed, mocker, db_path
+    ):
+        """An upload is the user overruling the fetched candidate. The stash has
+        to go with it: left in place it keeps its original generation, so a
+        confirm holding that generation passes its precondition and silently
+        writes the fetched cover over what was just uploaded."""
+        album_id = insert_album(db_path, album="Uploaded", albumartist="Artist")
+        with state.identify_lock:
+            state.identify_tasks[f"cover_{album_id}"] = {
+                "candidate_path": "/tmp/candidate.jpg",
+                "source": "coverart",
+                "stash_generation": state.next_stash_generation(),
+            }
+        generation = state.identify_tasks[f"cover_{album_id}"]["stash_generation"]
+        mocker.patch("beetdeck.routes.cover._init_beets")
+        save = mocker.patch("beetdeck.routes.cover._save_cover_to_album")
+
+        resp = client.post(
+            f"/api/album/{album_id}/cover/upload",
+            data={"file": (io.BytesIO(b"\xff\xd8\xff\xe0image"), "art.jpg")},
+            content_type="multipart/form-data",
+        )
+        assert resp.status_code == 200
+        assert save.called
+        assert f"cover_{album_id}" not in state.identify_tasks
+
+        # The pending token is now refused instead of reverting the upload.
+        refused = client.post(
+            f"/api/album/{album_id}/cover/confirm", json={"expected_generation": generation}
+        )
+        assert refused.status_code == 409
 
 
 # ---------------------------------------------------------------------------

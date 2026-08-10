@@ -10,10 +10,11 @@ Covers the five cover-art routes in ``routes/cover.py``:
 
 Request shapes (verified against the handlers):
 
-- ``fetch`` and ``confirm`` take **no request body** — they act purely on the
-  ``<int:album_id>`` path param plus server-side ``state.identify_tasks``. So no
-  ``json=`` model is added (forcing one would 422 the SPA's body-less POSTs);
-  these are documented response-only.
+- ``fetch`` takes **no request body** — it acts purely on the ``<int:album_id>``
+  path param, so it is documented response-only.
+- ``confirm`` takes an optional ``{"expected_generation": int}`` precondition
+  (``CoverConfirmBody``). Every field defaults, so a body-less POST stays valid
+  and the SPA is unaffected; ``extra="forbid"`` makes unknown fields a ``422``.
 - ``upload`` is **multipart/form-data** with a single ``file`` field, modeled via
   ``form=CoverUploadForm`` (NOT ``json=``). The field is kept optional so
   spectree does not pre-empt the handler's own ``400`` checks (missing file /
@@ -30,14 +31,37 @@ spec.
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class CoverConfirmBody(BaseModel):
+    """JSON body for ``POST /api/album/<id>/cover/confirm``.
+
+    An optional precondition on the fetch stash. When ``expected_generation`` is
+    sent, the handler compares it against the ``stash_generation`` of the
+    currently stashed candidate inside ``state.identify_lock`` and rejects a
+    mismatch with ``409`` — that is what stops a confirm from committing a cover
+    somebody else fetched into the same slot. Omitting it keeps the pre-existing
+    behaviour (the SPA does not send it).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_generation: int | None = Field(
+        default=None,
+        description=(
+            "Precondition: the ``stash_generation`` returned by the fetch whose "
+            "candidate this confirm intends to write. A mismatch yields 409."
+        ),
+    )
 
 
 class CoverFetchResponse(BaseModel):
     """``POST /api/album/<id>/cover/fetch`` — result of a cover-art lookup.
 
     When nothing is found the body is ``{"status": "ok", "found": false}``; on a
-    hit it additionally carries the ``source`` and a ``preview_url``.
+    hit it additionally carries the ``source``, a ``preview_url``, the
+    candidate's pixel dimensions and the stash generation to confirm against.
     """
 
     status: str = Field(description="Always ``ok`` on a successful lookup.")
@@ -48,6 +72,21 @@ class CoverFetchResponse(BaseModel):
     preview_url: str | None = Field(
         default=None,
         description="URL of the candidate preview image (present only when found).",
+    )
+    width: int | None = Field(
+        default=None,
+        description="Pixel width of the candidate; null when it cannot be read as an "
+        "image. Compare against ``cover_width`` from ``GET /api/album/<id>`` to decide "
+        "whether the candidate is an upgrade.",
+    )
+    height: int | None = Field(
+        default=None, description="Pixel height of the candidate (see width)."
+    )
+    stash_generation: int | None = Field(
+        default=None,
+        description="Generation of the stash slot this candidate was written into. "
+        "Pass it back as ``expected_generation`` on confirm to refuse a candidate "
+        "that a competing fetch replaced in the meantime.",
     )
 
 

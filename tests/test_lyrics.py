@@ -355,6 +355,23 @@ class TestConfirmTrackLyrics:
         resp = client.post("/api/album/1/track/1/lyrics/confirm")
         assert resp.status_code == 404
 
+    def test_a_replaced_stash_is_refused_with_409(self, client, mocker):
+        state.identify_tasks.clear()
+        with state.identify_lock:
+            previewed = state.next_stash_generation()
+            newer = state.next_stash_generation()
+        state.identify_tasks["lyrics_1"] = {
+            "_lyrics_obj": _make_lyrics_obj(mocker),
+            "stash_generation": newer,
+        }
+        init = mocker.patch("beetdeck.routes.lyrics._init_beets")
+
+        resp = client.post(
+            "/api/album/1/track/1/lyrics/confirm", json={"expected_generation": previewed}
+        )
+        assert resp.status_code == 409
+        assert not init.called
+
     def test_writes_lyrics_to_item(self, client, mocker):
         lyrics_obj = _make_lyrics_obj(mocker, text="Lyrics", full_text="Full lyrics")
         state.identify_tasks["lyrics_1"] = {"_lyrics_obj": lyrics_obj}
@@ -599,6 +616,58 @@ class TestEmbedAllLrc:
 
 
 class TestSaveTrackLyrics:
+    def test_a_manual_save_drops_the_stash_so_a_pending_token_cannot_revert_it(
+        self, client, mocker
+    ):
+        """A manual edit overrules any fetched result waiting in the slot. Left in
+        place the stash keeps its original generation, so a confirm holding that
+        generation passes its precondition and silently undoes the edit."""
+        state.identify_tasks.clear()
+        with state.identify_lock:
+            generation = state.next_stash_generation()
+        state.identify_tasks["lyrics_1"] = {
+            "_lyrics_obj": _make_lyrics_obj(mocker, text="Fetched", full_text="Fetched"),
+            "stash_generation": generation,
+        }
+        item = mocker.MagicMock()
+        item.album_id = 1
+        item.path = b"/music/t1.mp3"
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = item
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/album/1/track/1/lyrics/save", json={"lyrics": "Mine"})
+        assert resp.status_code == 200
+        assert "lyrics_1" not in state.identify_tasks
+
+        refused = client.post(
+            "/api/album/1/track/1/lyrics/confirm", json={"expected_generation": generation}
+        )
+        assert refused.status_code == 409
+
+    def test_an_lrc_embed_drops_the_stash_too(self, client, mocker, tmp_path):
+        """Every route that writes a track's lyrics owes the invalidation, not
+        just the manual save — an embed left the stash behind, so a pending
+        confirm passed its precondition and reverted the embedded text."""
+        state.identify_tasks.clear()
+        with state.identify_lock:
+            generation = state.next_stash_generation()
+        state.identify_tasks["lyrics_1"] = {
+            "_lyrics_obj": _make_lyrics_obj(mocker),
+            "stash_generation": generation,
+        }
+        lrc = tmp_path / "track.lrc"
+        lrc.write_text("[00:00]from the sidecar", encoding="utf-8")
+        item = mocker.MagicMock()
+        item.album_id = 1
+        item.path = str(tmp_path / "track.mp3").encode()
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = item
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+
+        assert client.post("/api/album/1/track/1/lyrics/embed").status_code == 200
+        assert "lyrics_1" not in state.identify_tasks
+
     def test_returns_404_when_track_not_found(self, client, mocker):
         mock_lib = mocker.MagicMock()
         mock_lib.get_item.return_value = None
@@ -941,6 +1010,151 @@ class TestConfirmAlbumLyrics:
         assert resp.status_code == 200
         assert resp.get_json()["written"] == 0
 
+    def test_carries_one_generation_for_the_whole_fetch(self, client, mocker):
+        """Every row a single fetch stashes shares its generation — the album
+        confirm writes the selection as a unit, so the precondition is per-fetch."""
+        state.identify_tasks.clear()
+
+        def _item(item_id, track):
+            item = mocker.MagicMock()
+            item.id, item.album_id, item.track, item.disc = item_id, 1, track, 1
+            item.title, item.artist, item.lyrics = f"Song {track}", "Artist", ""
+            item.path = f"/music/t{track}.mp3".encode()
+            return item
+
+        item1, item2 = _item(1, 1), _item(2, 2)
+        album = mocker.MagicMock()
+        album.items.return_value = [item1, item2]
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_album.return_value = album
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+        plugin = mocker.MagicMock()
+        plugin.name = "lyrics"
+        plugin.find_lyrics.return_value = _make_lyrics_obj(mocker, text="L", full_text="L")
+        mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+
+        data = client.post("/api/album/1/lyrics/fetch").get_json()
+
+        generation = data["stash_generation"]
+        assert generation is not None
+        assert state.identify_tasks["lyrics_1"]["stash_generation"] == generation
+        assert state.identify_tasks["lyrics_2"]["stash_generation"] == generation
+
+    def test_a_matching_generation_writes(self, client, mocker):
+        state.identify_tasks.clear()
+        with state.identify_lock:
+            generation = state.next_stash_generation()
+        state.identify_tasks["lyrics_1"] = {
+            "_lyrics_obj": _make_lyrics_obj(mocker, text="Verse", full_text="Verse 1"),
+            "stash_generation": generation,
+        }
+        item = mocker.MagicMock(album_id=1, path=b"/music/t1.mp3")
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = item
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+
+        resp = client.post(
+            "/api/album/1/lyrics/confirm",
+            json={"item_ids": [1], "expected_generation": generation},
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["written"] == 1
+
+    def test_one_replaced_stash_refuses_the_whole_selection(self, client, mocker):
+        """All-or-nothing: writing the untouched ids would commit a partial change
+        the caller never previewed."""
+        state.identify_tasks.clear()
+        with state.identify_lock:
+            generation = state.next_stash_generation()
+            newer = state.next_stash_generation()
+        state.identify_tasks["lyrics_1"] = {
+            "_lyrics_obj": _make_lyrics_obj(mocker),
+            "stash_generation": generation,
+        }
+        state.identify_tasks["lyrics_2"] = {
+            "_lyrics_obj": _make_lyrics_obj(mocker),
+            "stash_generation": newer,  # a competing fetch landed here
+        }
+        init = mocker.patch("beetdeck.routes.lyrics._init_beets")
+
+        resp = client.post(
+            "/api/album/1/lyrics/confirm",
+            json={"item_ids": [1, 2], "expected_generation": generation},
+        )
+        assert resp.status_code == 409
+        assert "changed since the preview" in resp.get_json()["error"]
+        # Refused before the library was even opened, so nothing was written.
+        assert not init.called
+
+    def test_a_vanished_stash_is_refused_with_409_not_silently_skipped(self, client, mocker):
+        state.identify_tasks.clear()
+        with state.identify_lock:
+            generation = state.next_stash_generation()
+
+        resp = client.post(
+            "/api/album/1/lyrics/confirm",
+            json={"item_ids": [1], "expected_generation": generation},
+        )
+        assert resp.status_code == 409
+
+    def test_a_fetch_landing_mid_apply_does_not_get_written(self, client, mocker):
+        """The precondition has to guard the entries that are actually written.
+        Re-reading the stash inside the write loop would let a fetch that lands
+        after the check — the loop spends a real file write per track, so that
+        window is seconds wide — be committed under a token that never saw it."""
+        state.identify_tasks.clear()
+        with state.identify_lock:
+            generation = state.next_stash_generation()
+        previewed = {
+            item_id: _make_lyrics_obj(mocker, text=f"P{item_id}", full_text=f"Previewed {item_id}")
+            for item_id in (1, 2)
+        }
+        for item_id, obj in previewed.items():
+            state.identify_tasks[f"lyrics_{item_id}"] = {
+                "_lyrics_obj": obj,
+                "stash_generation": generation,
+            }
+
+        items = {}
+        for item_id in (1, 2):
+            item = mocker.MagicMock()
+            item.album_id = 1
+            item.path = f"/music/t{item_id}.mp3".encode()
+            items[item_id] = item
+
+        def get_item(item_id):
+            # The competing fetch lands while track 1 is being written.
+            if item_id == 1:
+                with state.identify_lock:
+                    state.identify_tasks["lyrics_2"] = {
+                        "_lyrics_obj": _make_lyrics_obj(mocker, text="X", full_text="Intruder"),
+                        "stash_generation": state.next_stash_generation(),
+                    }
+            return items[item_id]
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.side_effect = get_item
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mock_lib)
+
+        resp = client.post(
+            "/api/album/1/lyrics/confirm",
+            json={"item_ids": [1, 2], "expected_generation": generation},
+        )
+        assert resp.status_code == 200
+        assert items[2].lyrics == "Previewed 2"
+        # The intruding stash is somebody else's pending fetch — not consumed.
+        assert "lyrics_2" in state.identify_tasks
+
+    def test_omitting_the_precondition_keeps_the_old_skip_behaviour(self, client, mocker):
+        """The SPA does not send it, so an unstashed id must still be skipped
+        rather than turning into a refusal."""
+        state.identify_tasks.clear()
+        mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=mocker.MagicMock())
+
+        resp = client.post("/api/album/1/lyrics/confirm", json={"item_ids": [1]})
+        assert resp.status_code == 200
+        assert resp.get_json()["written"] == 0
+
     def test_does_not_count_write_failures(self, client, mocker):
         lyrics_obj = _make_lyrics_obj(mocker, text="Verse", full_text="Verse 1")
         state.identify_tasks["lyrics_1"] = {"_lyrics_obj": lyrics_obj}
@@ -1113,12 +1327,15 @@ class TestLyricsOpenAPISpec:
         # Body-less POST — no requestBody documented.
         assert "requestBody" not in op
 
-    def test_track_confirm_in_spec(self, client):
+    def test_track_confirm_documents_the_optional_precondition(self, client):
         op = self._spec(client)["paths"]["/api/album/{album_id}/track/{item_id}/lyrics/confirm"][
             "post"
         ]
         assert "lyrics" in op["tags"]
-        assert "requestBody" not in op
+        assert "409" in op["responses"]
+        # Every field defaults, so the documented body stays optional in practice
+        # — the SPA's body-less POST is still valid (asserted below).
+        assert "application/json" in op["requestBody"]["content"]
 
     def test_track_embed_in_spec(self, client):
         op = self._spec(client)["paths"]["/api/album/{album_id}/track/{item_id}/lyrics/embed"][
@@ -1150,6 +1367,16 @@ class TestLyricsOpenAPISpec:
         assert "lyrics" in op["tags"]
         assert "200" in op["responses"]
         assert "application/json" in op["requestBody"]["content"]
+
+    def test_every_confirm_that_can_refuse_documents_409(self, client):
+        """This is the write path the MCP server always takes for lyrics, so an
+        undocumented refusal code is invisible to every generated client."""
+        paths = self._spec(client)["paths"]
+        for path in (
+            "/api/album/{album_id}/lyrics/confirm",
+            "/api/album/{album_id}/track/{item_id}/lyrics/confirm",
+        ):
+            assert "409" in paths[path]["post"]["responses"], path
 
 
 # ---------------------------------------------------------------------------

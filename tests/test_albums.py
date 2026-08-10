@@ -119,7 +119,73 @@ class TestAlbumDetail:
         album_id = insert_album(db_path, album="No Cover", albumartist="Artist D", artpath=None)
         resp = client.get(f"/api/album/{album_id}")
         assert resp.status_code == 200
-        assert resp.get_json()["has_cover"] is False
+        data = resp.get_json()
+        assert data["has_cover"] is False
+        assert data["cover_width"] is None
+        assert data["cover_height"] is None
+
+    def test_reports_the_current_cover_dimensions(self, client, db_path, tmp_path):
+        """Comparable against what a cover fetch reports for a candidate, so
+        "is this an upgrade" is answerable from the API alone."""
+        from PIL import Image
+
+        art = tmp_path / "cover.jpg"
+        Image.new("RGB", (500, 500), color="green").save(str(art), format="JPEG")
+        album_id = insert_album(
+            db_path, album="Covered", albumartist="Artist", artpath=str(art).encode()
+        )
+        data = client.get(f"/api/album/{album_id}").get_json()
+        assert data["has_cover"] is True
+        assert (data["cover_width"], data["cover_height"]) == (500, 500)
+
+    def test_an_unreadable_cover_still_counts_but_has_no_dimensions(
+        self, client, db_path, tmp_path
+    ):
+        art = tmp_path / "cover.jpg"
+        art.write_bytes(b"\xff\xd8\xff\xe0not-an-image")
+        album_id = insert_album(
+            db_path, album="Broken Cover", albumartist="Artist", artpath=str(art).encode()
+        )
+        data = client.get(f"/api/album/{album_id}").get_json()
+        assert data["has_cover"] is True
+        assert data["cover_width"] is None
+
+    def test_an_instrumental_verdict_is_visible_on_the_track(self, client, db_path):
+        """Without it a checked instrumental track looks exactly like one nobody
+        ever looked up: no lyrics either way."""
+        album_id = insert_album(db_path, album="Instrumentals", albumartist="Artist")
+        checked = insert_item(db_path, album_id, title="Interlude", track=1)
+        untouched = insert_item(db_path, album_id, title="Song", track=2)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO item_attributes (entity_id, key, value) VALUES (?, ?, ?)",
+                (checked, "lyrics_instrumental", "1"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        tracks = {t["id"]: t for t in client.get(f"/api/album/{album_id}").get_json()["tracks"]}
+        assert tracks[checked]["instrumental"] is True
+        assert tracks[checked]["has_lyrics"] is False
+        assert tracks[untouched]["instrumental"] is False
+
+    def test_a_falsy_instrumental_attribute_is_not_a_verdict(self, client, db_path):
+        album_id = insert_album(db_path, album="Instrumentals", albumartist="Artist")
+        item_id = insert_item(db_path, album_id, title="Song", track=1)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO item_attributes (entity_id, key, value) VALUES (?, ?, ?)",
+                (item_id, "lyrics_instrumental", "0"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        tracks = client.get(f"/api/album/{album_id}").get_json()["tracks"]
+        assert tracks[0]["instrumental"] is False
 
     def test_genre_formatted(self, client, db_path):
         album_id = insert_album(db_path, album="Genred", albumartist="Artist E", genre="Rock")
