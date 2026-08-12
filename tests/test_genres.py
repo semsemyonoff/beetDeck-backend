@@ -394,3 +394,144 @@ class TestGenresBehaviorUnchanged:
         resp = client.post("/api/album/9999/genre/confirm")
         assert resp.status_code == 404
         assert resp.get_json()["error"] == "Album not found"
+
+
+# ---------------------------------------------------------------------------
+# preview modes and a failed lookup
+# ---------------------------------------------------------------------------
+
+
+class TestGenrePreviewModes:
+    """`replace` vs `merge`, and the difference between "nothing" and "no answer"."""
+
+    class _Album:
+        """A real object, not a MagicMock: the route *writes* `genres` before the
+        lookup and reads it back afterwards, and a mock would keep answering the
+        old value through `get()` no matter what was assigned."""
+
+        albumartist = "Artist"
+        album = "Album"
+
+        def __init__(self, genres):
+            self.genres = list(genres)
+
+        def get(self, key, default=""):
+            return self.genres if key == "genres" else default
+
+        def store(self):
+            pass
+
+    def _lastgenre(self, mocker, *, current, fetched, error=None):
+        """A library album carrying `current`, and a lookup returning `fetched`."""
+        album = self._Album(current)
+        lib = mocker.MagicMock()
+        lib.get_album.return_value = album
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=lib)
+
+        plugin = mocker.MagicMock()
+        plugin.name = "lastgenre"
+
+        def process(target, write):
+            if error is not None:
+                # What lastgenre does with an upstream refusal: log it, write nothing.
+                import logging
+
+                logging.getLogger("beets.lastgenre").debug("last.fm error: {}", error)
+                return
+            target.genres = list(fetched)
+
+        plugin._process.side_effect = process
+        mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+        return album
+
+    def test_replace_is_the_default_and_proposes_only_what_was_fetched(self, client, mocker):
+        self._lastgenre(mocker, current=["Rock"], fetched=["Electronic"])
+        data = client.post("/api/album/1/genre").get_json()
+        assert data["mode"] == "replace"
+        assert data["old_genre"] == "Rock"
+        assert data["fetched_genre"] == "Electronic"
+        assert data["new_genre"] == "Electronic"
+
+    def test_merge_keeps_the_albums_genres_and_appends_the_new_ones(self, client, mocker):
+        self._lastgenre(mocker, current=["Rock", "Psychedelic Rock"], fetched=["Electronic"])
+        data = client.post("/api/album/1/genre?mode=merge").get_json()
+        assert data["mode"] == "merge"
+        assert data["new_genre"] == "Rock, Psychedelic Rock, Electronic"
+
+    def test_merge_does_not_duplicate_a_genre_that_differs_only_in_case(self, client, mocker):
+        self._lastgenre(mocker, current=["Rock"], fetched=["rock", "Electronic"])
+        data = client.post("/api/album/1/genre?mode=merge").get_json()
+        assert data["new_genre"] == "Rock, Electronic"
+
+    def test_merge_on_an_album_with_no_genres_equals_replace(self, client, mocker):
+        self._lastgenre(mocker, current=[], fetched=["Electronic"])
+        data = client.post("/api/album/1/genre?mode=merge").get_json()
+        assert data["new_genre"] == "Electronic"
+
+    def test_an_unknown_mode_is_rejected_rather_than_silently_replacing(self, client, mocker):
+        self._lastgenre(mocker, current=["Rock"], fetched=["Electronic"])
+        assert client.post("/api/album/1/genre?mode=append").status_code == 422
+
+    def test_a_preview_on_a_legacy_album_leaves_its_genre_alone(self, client, db_path, mocker):
+        """A pre-2.10 album reads its genre through the model's `genres` (beets
+        maps the singular column), and merge must show it — while the preview
+        itself leaves the album's genre exactly as it found it."""
+        import sqlite3
+
+        from beetdeck.utils import _genre_names
+        from tests.conftest import insert_album
+
+        album_id = insert_album(db_path, album="Old", albumartist="A", genre="Rock")
+        plugin = mocker.MagicMock()
+        plugin.name = "lastgenre"
+
+        def process(target, write):
+            target.genres = ["Electronic"]
+
+        plugin._process.side_effect = process
+        mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+
+        data = client.post(f"/api/album/{album_id}/genre?mode=merge").get_json()
+        assert data["old_genre"] == "Rock"
+        assert data["new_genre"] == "Rock, Electronic"
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT genre, genres FROM albums WHERE id = ?", (album_id,)
+            ).fetchone()
+        finally:
+            conn.close()
+        # The genre is untouched: the previewed Electronic was never written and
+        # the album still reads as Rock.
+        assert row[0] == "Rock"
+        assert _genre_names(row[1]) == ["Rock"]
+        # The legacy column now also appears in `genres` — that copy is beets'
+        # own migration, run by `_init_beets` on every route that opens the
+        # library, not a write this preview performed.
+
+    def test_a_failed_lookup_is_a_502_not_an_empty_genre(self, client, mocker):
+        """The old shape claimed the album had no genre when Last.fm had refused."""
+        self._lastgenre(
+            mocker, current=["Rock"], fetched=[], error="Access Denied - You cannot access"
+        )
+        resp = client.post("/api/album/1/genre")
+        assert resp.status_code == 502
+        error = resp.get_json()["error"]
+        assert "Access Denied" in error
+        assert "says nothing about the album" in error
+
+    def test_a_successful_lookup_with_no_tags_stays_a_200(self, client, mocker):
+        """Last.fm answering "I have nothing" is a fact; it is not an error."""
+        self._lastgenre(mocker, current=["Rock"], fetched=[])
+        resp = client.post("/api/album/1/genre")
+        assert resp.status_code == 200
+        assert resp.get_json()["fetched_genre"] == ""
+        assert resp.get_json()["new_genre"] == ""
+
+    def test_the_capture_handler_is_removed_afterwards(self, client, mocker):
+        import logging
+
+        self._lastgenre(mocker, current=["Rock"], fetched=["Electronic"])
+        client.post("/api/album/1/genre")
+        assert logging.getLogger("beets.lastgenre").handlers == []

@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+import threading
 
 from flask import Blueprint, current_app, jsonify, request, send_file
 from spectree import Response
@@ -27,12 +28,32 @@ from beetdeck.utils import (
     _get_ro_conn,
     _image_size,
     _init_beets,
+    _plugin_reasons,
     _resolve_path,
     _save_cover_to_album,
     log,
 )
 
 bp = Blueprint("cover", __name__)
+
+# Serialize every `art_for_album` call: the relaxed retry below narrows the
+# plugin's own `minwidth`/`enforce_ratio` attributes, and fetchart reads them
+# off the singleton at validation time. Without this lock a concurrent ordinary
+# fetch would validate against the relaxed values and silently accept art its
+# caller never agreed to. The first pass is inside the lock for that reason —
+# not because it needs one of its own.
+_fetchart_plugin_lock = threading.Lock()
+
+#: fetchart log lines worth repeating to the caller. Its rejections are `debug`
+#: and then discarded, so `found: false` otherwise cannot say whether the art is
+#: missing or merely refused.
+_FETCHART_REASONS = (
+    "image too small",
+    "image size out of bounds",
+    "not a supported image",
+    "error receiving response",
+    "Could not get size of image",
+)
 
 
 # NOTE: the two binary cover routes (``album_cover`` / ``cover_preview``) are
@@ -83,6 +104,87 @@ def album_cover(album_id):
     return send_file(src)
 
 
+def _current_cover_size(album_id, artpath_raw):
+    """``(width, height)`` of the cover the album already has, or ``None``.
+
+    Answered exactly the way `GET /api/album/<id>` and `album_cover` answer it —
+    the stored `artpath` first, then a probe of the album directory with the
+    per-disc subdirs as fallbacks — so a caller comparing the candidate against
+    what it would replace gets both numbers from one request instead of two, and
+    gets the same answer either endpoint would give.
+
+    Two details are what make it agree with them: library paths are stored
+    *relative* to the DB root and must go through `_resolve_path`, and a
+    multi-disc album often keeps its cover only inside `CD1/`.
+    """
+    artpath = _resolve_path(artpath_raw) if artpath_raw else None
+    if artpath and os.path.isfile(artpath):
+        return _image_size(artpath)
+    try:
+        conn = _get_ro_conn()
+        try:
+            album_dir = _album_dir_from_items(conn, album_id)
+            items = conn.execute(
+                "SELECT disc, path, length FROM items WHERE album_id = ?", (album_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.OperationalError:
+        return None
+    disc_dirs = [d["dir"] for d in _detect_disc_subdirs(items) if d["dir"]]
+    return _image_size(_find_cover(album_dir, fallback_dirs=disc_dirs))
+
+
+def _relaxed_art(fetchart, album):
+    """Retry the lookup with the size filters off.
+
+    Returns `(candidate, constraints)` — the constraints being the values that
+    were lifted, so the caller can check the candidate against them. Whether the
+    retry *succeeded because* of the lifting is not knowable here: a first pass
+    can also come back empty from a timeout, and calling that a policy rejection
+    would be a made-up reason.
+
+    `(None, None)` when there is nothing to retry: `minwidth` and `enforce_ratio`
+    are the only two checks in fetchart's validation that reject a candidate
+    outright (everything else — `maxwidth`, `max_filesize`, `cover_format` — is
+    a resize instruction), so with both off the retry is a byte-identical
+    duplicate of the sweep that just failed, at the cost of a second one.
+    """
+    if not (fetchart.minwidth or fetchart.enforce_ratio):
+        return None, None
+
+    saved = {"min_width": fetchart.minwidth, "enforce_ratio": bool(fetchart.enforce_ratio)}
+    fetchart.minwidth, fetchart.enforce_ratio = 0, False
+    try:
+        candidate = fetchart.art_for_album(album, paths=[], local_only=False)
+    finally:
+        fetchart.minwidth = saved["min_width"]
+        fetchart.enforce_ratio = saved["enforce_ratio"]
+    return (candidate, saved) if candidate is not None else (None, None)
+
+
+def _violated_constraints(size, constraints):
+    """The lifted constraints this candidate actually fails, in words.
+
+    Empty when it meets all of them — which happens when the first pass failed
+    for a reason that has nothing to do with size, and is exactly when the
+    response must *not* claim a filter refused the image.
+
+    An unmeasurable candidate also yields nothing: fetchart skips its own size
+    checks when it cannot read the dimensions, so size was not the reason there
+    either.
+    """
+    if not size:
+        return []
+    width, height = size
+    violated = []
+    if constraints["min_width"] and width < constraints["min_width"]:
+        violated.append(f"the configured minimum width of {constraints['min_width']} px")
+    if constraints["enforce_ratio"] and width != height:
+        violated.append("the configured aspect-ratio requirement")
+    return violated
+
+
 @bp.route("/api/album/<int:album_id>/cover/fetch", methods=["POST"])
 @api.validate(
     resp=Response(
@@ -120,11 +222,31 @@ def fetch_cover(album_id):
             album.album,
         )
 
-        candidate = fetchart.art_for_album(album, paths=[], local_only=False)
+        current_size = _current_cover_size(album_id, album.artpath)
+
+        # Both passes share one lock — see `_fetchart_plugin_lock`.
+        with _fetchart_plugin_lock, _plugin_reasons("beets.fetchart", _FETCHART_REASONS) as capture:
+            candidate = fetchart.art_for_album(album, paths=[], local_only=False)
+            relaxed_from = None
+            if not candidate or not candidate.path:
+                candidate, relaxed_from = _relaxed_art(fetchart, album)
+        # Deduplicated in first-seen order: the retry walks the same sources and
+        # re-reports every rejection the first pass already reported.
+        reasons = list(dict.fromkeys(capture.reasons))
 
         if not candidate or not candidate.path:
-            log.info("No cover art found for album_id=%d", album_id)
-            return jsonify({"status": "ok", "found": False})
+            log.info("No cover art found for album_id=%d (%s)", album_id, "; ".join(reasons) or "-")
+            return jsonify(
+                {
+                    "status": "ok",
+                    "found": False,
+                    "current_width": current_size[0] if current_size else None,
+                    "current_height": current_size[1] if current_size else None,
+                    # The plugin's own words for why each candidate was dropped:
+                    # an empty list means no source offered anything at all.
+                    "reasons": reasons,
+                }
+            )
 
         candidate_path = _decode_path(candidate.path)
         size = _image_size(candidate_path)
@@ -149,17 +271,41 @@ def fetch_cover(album_id):
             candidate_path,
         )
 
-        return jsonify(
-            {
-                "status": "ok",
-                "found": True,
-                "source": getattr(candidate, "source_name", "unknown"),
-                "preview_url": f"/api/album/{album_id}/cover/preview",
-                "width": size[0] if size else None,
-                "height": size[1] if size else None,
-                "stash_generation": generation,
-            }
-        )
+        result = {
+            "status": "ok",
+            "found": True,
+            "source": getattr(candidate, "source_name", "unknown"),
+            "preview_url": f"/api/album/{album_id}/cover/preview",
+            "width": size[0] if size else None,
+            "height": size[1] if size else None,
+            "current_width": current_size[0] if current_size else None,
+            "current_height": current_size[1] if current_size else None,
+            "stash_generation": generation,
+        }
+        if relaxed_from is not None:
+            # Only a candidate that actually fails a lifted constraint is
+            # reported as relaxed. One that meets them all came back on the
+            # retry for some other reason — a timed-out source, a flaky host —
+            # and calling that a policy rejection would invent the very kind of
+            # reason this endpoint exists to stop inventing.
+            violated = _violated_constraints(size, relaxed_from)
+            if violated:
+                measured = f"{size[0]}×{size[1]}"
+                result["relaxed"] = True
+                if relaxed_from["min_width"]:
+                    result["min_width"] = relaxed_from["min_width"]
+                result["warning"] = (
+                    f"this cover ({measured}) does not meet {' and '.join(violated)}, and was "
+                    "only found once that was lifted for a second lookup — take it only if it "
+                    "beats the cover you have"
+                )
+            elif reasons:
+                result["retried"] = True
+                result["warning"] = (
+                    "the first lookup came back empty and a second one found this cover, which "
+                    f"does meet the configured filters — the sources reported: {'; '.join(reasons)}"
+                )
+        return jsonify(result)
 
     except Exception as e:
         log.exception("Cover fetch failed for album_id=%d", album_id)

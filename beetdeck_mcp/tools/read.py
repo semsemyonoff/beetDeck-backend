@@ -13,6 +13,13 @@ Three facts about the REST side shape these:
 Failures come back as `{"error": …}` rather than as a raise: the REST client
 never raises, and a tool that reported an unreachable backend as an empty
 library would be worse than one that says what went wrong.
+
+An empty result while a rescan is in flight is the same class of problem one
+level down: `GET /api/library` answers `200` with whatever the library holds at
+that instant, and a `beet import` still running makes that a *partial* library,
+not an empty one. Nothing in the payload says so, and an agent reasonably reads
+"no such artist". Both listing tools therefore ask `…/rescan/status` when they
+come back empty and say what is going on — see `_rescan_note`.
 """
 
 from __future__ import annotations
@@ -71,6 +78,26 @@ def _window(
     return page, note
 
 
+def _rescan_note(client: BeetdeckClient) -> str | None:
+    """ "the library is mid-import", or `None` when no scan is running.
+
+    Asked only on an empty result, so the extra round trip is paid exactly when
+    the answer would otherwise be misleading. A failed status call yields `None`:
+    the result itself is valid and must not be downgraded because the
+    supplementary question could not be answered.
+    """
+    response = client.get("/api/rescan/status")
+    if not response.ok or response.data.get("status") != "running":
+        return None
+    run_id = response.data.get("run_id")
+    scope = f" (run {run_id})" if run_id else ""
+    return (
+        f"a rescan is running{scope} — the library is mid-import, so this empty result "
+        "means 'not imported yet', not 'not in the library'; poll get_rescan_status and "
+        "repeat this call once it reports done"
+    )
+
+
 def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], ...]:
     """The read tools bound to `client`.
 
@@ -92,6 +119,10 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
         unless the band's name is also part of an album title. `artists` entries
         are bare names — feed one to `list_albums(artist=…)` to get that artist's
         albums with their ids.
+
+        A result with all three groups empty carries a `notes` entry when a
+        rescan is in flight: mid-import, "no hit" does not yet mean "not in the
+        library".
         """
         bad = _bad_window(limit, 0)
         if bad is not None:
@@ -109,6 +140,10 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
             result[group] = [compact(row) if isinstance(row, dict) else row for row in page]
             if note is not None:
                 notes.append(note)
+        if not any(result[group] for group in ("artists", "albums", "tracks")):
+            scanning = _rescan_note(client)
+            if scanning is not None:
+                notes.append(scanning)
         if result["artists"] and not result["albums"]:
             # The dead end this tool used to leave an agent in: a name, no id,
             # and no obvious next call. Name the next call.
@@ -149,6 +184,10 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
 
         `filter` and `artist` combine: `filter="untagged", artist="Pink Floyd"`
         is that artist's share of the work queue.
+
+        An empty result carries a `notes` entry when a rescan is in flight: the
+        library is being imported, so "nothing here" is not yet a fact about the
+        library.
         """
         bad = _bad_window(limit, offset)
         if bad is not None:
@@ -201,6 +240,10 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
         if wanted:
             result["artist"] = wanted
         notes = [note] if note is not None else []
+        if not rows:
+            scanning = _rescan_note(client)
+            if scanning is not None:
+                notes.append(scanning)
         if wanted and not rows:
             # An empty page under an artist filter is ambiguous — no such artist,
             # or none matching `filter` — and the difference decides the next call.
@@ -262,6 +305,10 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
         These are the input to `identify_untagged_items`; they are not part of
         any properly tagged album yet, so they do not show up in `list_albums`
         under a real artist name.
+
+        An empty queue carries a `notes` entry when a rescan is in flight: loose
+        tracks appear as they are imported, so "nothing to do" mid-import is a
+        statement about the clock, not about the library.
         """
         bad = _bad_window(limit, offset)
         if bad is not None:
@@ -278,8 +325,13 @@ def build_tools(client: BeetdeckClient) -> tuple[Callable[..., dict[str, Any]], 
             "offset": offset,
             "items": [compact(item) if isinstance(item, dict) else item for item in page],
         }
-        if note is not None:
-            result["notes"] = [note]
+        notes = [note] if note is not None else []
+        if not items:
+            scanning = _rescan_note(client)
+            if scanning is not None:
+                notes.append(scanning)
+        if notes:
+            result["notes"] = notes
         return result
 
     return (search_library, list_albums, get_album, list_untagged_items)

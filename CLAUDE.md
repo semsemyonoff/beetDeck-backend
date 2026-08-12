@@ -98,6 +98,18 @@ shared `common.py`). Do not maintain an endpoint table here — read the spec.
 - `POST …/bpm/compute` always recomputes (`force=True`). The plugin swallows
   librosa errors internally and never raises, so failure is detected **by value**
   (pre-clear `item.bpm`, require a non-null value afterwards) → `400`.
+- `POST /api/album/<id>/genre` takes `?mode=replace|merge`. Both run the same
+  lookup; `mode` only decides what the previewed `new_genre` is made of, and
+  `fetched_genre` always reports Last.fm's own answer. A lookup that **could not
+  run** (lastgenre logged an error and produced nothing) is a `502`, never a
+  `200` with an empty genre — see *Absence is not a fact* below.
+- `POST …/cover/fetch` retries with `fetchart`'s `minwidth`/`enforce_ratio`
+  lifted when the first pass finds nothing, and marks such a hit `relaxed: true`
+  with a `warning`. Both outcomes carry `current_width`/`current_height`, and
+  `found: false` carries `reasons` — the art plugin's own rejection lines.
+- Both lyrics fetches carry `reasons` on a miss — the lyrics plugin's own words
+  for a source that failed. Empty means every source answered and none had the
+  track, which is the only case where `found: false` is a fact about the track.
 - `POST /api/album/<id>/lyrics/confirm` silently skips ids with no stashed fetch
   or from another album, so `written_item_ids` can be shorter than the request
   with `failed` empty. `retained_lrc_item_ids` is the subset that was written but
@@ -114,6 +126,35 @@ shared `common.py`). Do not maintain an endpoint table here — read the spec.
   still stash the result, so confirming it stores beets' `lyrics_instrumental`
   flag (and clears the file tag) instead of lyrics text.
 
+## Absence is not a fact
+
+beets plugins swallow their own failures: `fetchart` drops a candidate with a
+`debug` line and returns `None`, `lastgenre` logs `last.fm error: …` and returns
+nothing. What reaches a route is an absence, and a route that forwards it as
+`found: false` / an empty genre states something about the *library* that nobody
+established — which is how an agent ends up filing "this album has no cover" over
+an image its own size filter rejected.
+
+`_plugin_reasons(logger, markers)` in `beetdeck/utils.py` is the one mechanism:
+it captures the plugin's marker-matching log lines for the duration of the call
+and hands them back. Three properties are load-bearing, all of them because a
+logger is process-wide while a capture is per-request:
+
+- **Propagation is off** for the duration — beets formats with `{}`, which the
+  app's (and pytest's) `%`-style handlers raise on. A handler that blows up while
+  explaining why a lookup found nothing would turn the diagnosis into a `500`.
+- **Records are filtered to the capturing thread.** The album lyrics flow runs
+  six fetches at once from the SPA, and without this a blocked backend's line
+  would be attributed to whichever track happened to be capturing.
+- **The level/propagate change is refcounted** across overlapping captures. Saved
+  per capture, the second one would record the already-lowered level as the
+  original and leave the logger at `DEBUG` for the rest of the process.
+
+Used by `…/cover/fetch` (`beets.fetchart`), `…/genre` (`beets.lastgenre`) and both
+lyrics fetches (`beets.lyrics`). The rule for a new plugin-backed route: report
+*why*, and keep "the plugin found nothing" distinct from "the plugin could not
+look".
+
 ## Error contract: 422 vs 400/404
 
 Request validation is spectree/pydantic; every validation failure returns `422`
@@ -128,6 +169,12 @@ not found → `400`/`404` (handler body). Clients branch on the status code.
 `409` is the third handler-owned class — an optimistic-concurrency refusal, same
 `{"error": …}` body: `POST …/confirm` with a mismatched (or in-flight)
 `expected_generation`, and `POST …/identify` when a run is already in flight.
+
+`502` is the fourth: an **upstream** service could not be reached, so the request
+established nothing about the library. `POST /api/album/<id>/genre` answers it
+when the Last.fm lookup itself failed — reporting that as a `200` with an empty
+genre would state something about the album that nobody checked (see *Absence is
+not a fact*). Same `{"error": …}` body.
 
 ## Architecture constraints
 
@@ -210,6 +257,17 @@ also what makes the tests possible: they drive the real app in-process through
 exercised for real instead of against mocks. Everything in the package is
 **synchronous** for the same reason — an async client cannot use a WSGI transport.
 
+### An empty read during a rescan is not a fact about the library
+
+`GET /api/library` answers `200` with whatever is committed at that instant, so a
+running `beet import` makes it a *partial* library and nothing in the payload says
+so. `list_albums` and `search_library` therefore ask `…/rescan/status` **when they
+come back empty** and add a note naming the run. The extra round trip is paid only
+on the answer that would otherwise mislead, and a failed status call adds no note
+rather than downgrading a valid result (issue #21 was filed against exactly this
+shape: rows imported seconds earlier, an empty result, and no way to tell it from
+"not in the library").
+
 ### Two-phase writes and the per-kind guarantee
 
 Every mutating capability is split: a `preview_*` tool returns the diff plus a
@@ -278,7 +336,7 @@ deliberate exception is `PATCH …/tags`: it is keyed by item, has no album in i
 route, and taking an album lock for every tag edit would serialize unrelated
 writes; it invalidates the stash but does not serialize against a confirm.
 
-### Genres commit through `save`, not `confirm`
+### Genres commit through `save`, not `confirm` — and so does the SPA
 
 `POST …/genre/confirm` performs a **second, independent Last.fm lookup** before
 writing, so it can commit a different value than the preview showed. `apply_change`
@@ -287,6 +345,12 @@ old value is read from `GET /api/album/<id>` (which falls back to the legacy sin
 `genre` column) and not from the lookup's `old_genre` (which reads only the native
 `genres` list) — otherwise the drift check would refuse every album tagged before
 beets 2.10.
+
+`merge` mode makes this binding mandatory rather than merely correct: the merged
+value exists only in the preview, and `confirm` — which re-looks-up — cannot
+express it at all. The SPA moved to `…/genre/save` for the same reason, so
+`…/genre/confirm` now has no caller left in this repo and is kept only for
+compatibility.
 
 ### What `BEETDECK_MCP_READONLY` does and does not disable
 

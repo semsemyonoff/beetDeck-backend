@@ -112,8 +112,53 @@ class TestPreviewGenres:
         assert result["target"] == f"album {album}"
         assert result["changes"]["genre"] == {"old": "Rock", "new": "Electronic"}
         assert result["changes"]["source"] == "lastgenre"
+        assert result["changes"]["mode"] == "replace"
         assert "re-read" in result["guarantee"]
         assert len(store) == 1
+
+    def test_merge_keeps_what_the_album_has_and_says_what_was_fetched(
+        self, tools, album, suggestion, store
+    ):
+        """The album's genre may be better sourced than Last.fm's; merge keeps it."""
+        suggestion("Electronic")
+        result = tools["preview_genres"](album, mode="merge")
+
+        assert result["changes"]["genre"] == {"old": "Rock", "new": "Rock, Electronic"}
+        assert result["changes"]["mode"] == "merge"
+        assert result["changes"]["fetched"] == "Electronic"
+        assert len(store) == 1
+
+    def test_an_override_ignores_the_mode_and_never_looks_anything_up(
+        self, tools, album, mocker, store
+    ):
+        mocker.patch("beets.plugins.find_plugins", return_value=[])
+        result = tools["preview_genres"](album, genre="Doom Metal", mode="merge")
+
+        assert result["changes"]["genre"] == {"old": "Rock", "new": "Doom Metal"}
+        assert result["changes"]["source"] == "override"
+        assert "mode" not in result["changes"]
+
+    def test_a_failed_lookup_is_reported_as_a_failure_not_as_no_genre(
+        self, tools, album, mocker, store
+    ):
+        """A 502 from the backend means the lookup never happened."""
+        plugin = mocker.MagicMock()
+        plugin.name = "lastgenre"
+
+        def process(target, write):
+            import logging
+
+            logging.getLogger("beets.lastgenre").debug(
+                "last.fm error: {}", "Access Denied - You cannot access this service"
+            )
+
+        plugin._process.side_effect = process
+        mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+
+        result = tools["preview_genres"](album)
+        assert "Access Denied" in result["error"]
+        assert "has no genre" not in result["error"]
+        assert len(store) == 0
 
     def test_the_token_commits_through_save_not_confirm(self, tools, album, suggestion, store):
         """`…/genre/confirm` looks Last.fm up a second time and can write a

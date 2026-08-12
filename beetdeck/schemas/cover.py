@@ -82,11 +82,47 @@ class CoverFetchResponse(BaseModel):
     height: int | None = Field(
         default=None, description="Pixel height of the candidate (see width)."
     )
+    current_width: int | None = Field(
+        default=None,
+        description="Pixel width of the cover the album already has; null when it has "
+        "none. Returned on both outcomes so a caller can weigh the candidate against "
+        "what it would replace without a second request.",
+    )
+    current_height: int | None = Field(
+        default=None, description="Pixel height of the current cover (see current_width)."
+    )
     stash_generation: int | None = Field(
         default=None,
         description="Generation of the stash slot this candidate was written into. "
         "Pass it back as ``expected_generation`` on confirm to refuse a candidate "
         "that a competing fetch replaced in the meantime.",
+    )
+    relaxed: bool | None = Field(
+        default=None,
+        description="Present and true when the candidate was found only after the "
+        "configured size filters (``minwidth``/``enforce_ratio``) were lifted for a "
+        "second lookup — i.e. the configuration rejects this image.",
+    )
+    min_width: int | None = Field(
+        default=None,
+        description="The configured ``fetchart.minwidth`` the candidate falls short of "
+        "(present only alongside ``relaxed``).",
+    )
+    retried: bool | None = Field(
+        default=None,
+        description="Present and true when the first lookup came back empty but a second "
+        "one found a candidate that *does* meet the configured filters — i.e. the first "
+        "pass failed for another reason, which ``reasons`` names in the ``warning``.",
+    )
+    warning: str | None = Field(
+        default=None,
+        description="Why the candidate needed the relaxed lookup, in one sentence "
+        "(present only alongside ``relaxed``).",
+    )
+    reasons: list[str] | None = Field(
+        default=None,
+        description="fetchart's own reasons for dropping every candidate it saw "
+        "(present when ``found`` is false). Empty means no source offered anything.",
     )
 
 
