@@ -167,6 +167,13 @@ class TrackLyricsFetchResponse(BaseModel):
         "when nothing was stashed). Pass it back as ``expected_generation`` on confirm "
         "to refuse lyrics that a competing fetch replaced in the meantime.",
     )
+    reasons: list[str] | None = Field(
+        default=None,
+        description="Why a lyrics source failed, in the plugin's own words (blocked "
+        "address, request error, disabled backend). Present on a miss; empty when every "
+        "source answered and none had the track — only then is ``found: false`` a fact "
+        "about the track rather than about the network.",
+    )
 
 
 class LyricsStatusResponse(BaseModel):
@@ -251,6 +258,13 @@ class AlbumLyricsFetchTrack(BaseModel):
     new_lyrics: str = Field(description="Fetched lyrics text ('' when not found).")
     new_synced: bool = Field(description="Whether the fetched lyrics are time-synced.")
     new_backend: str = Field(description="Backend the lyrics were fetched from ('' when none).")
+    reasons: list[str] | None = Field(
+        default=None,
+        description="Why a lyrics source failed, in the plugin's own words (blocked "
+        "address, request error, disabled backend). Present on a miss; empty when every "
+        "source answered and none had the track — only then is ``found: false`` a fact "
+        "about the track rather than about the network.",
+    )
 
 
 class AlbumLyricsFetchResponse(BaseModel):

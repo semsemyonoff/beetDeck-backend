@@ -1,5 +1,6 @@
 """Shared helpers and constants for beetDeek routes."""
 
+import contextlib
 import logging
 import os
 import re
@@ -188,6 +189,101 @@ def _find_cover(album_dir, fallback_dirs=None):
             if found:
                 return found
     return None
+
+
+class _PluginReasons(logging.Handler):
+    """Collects a beets plugin's own log lines while it works.
+
+    beets plugins swallow their reasons: `fetchart` drops a candidate with a
+    `debug` line and returns `None`, `lastgenre` logs `last.fm error: …` and
+    returns nothing. What reaches a route is an absence, and an absence reported
+    as fact ("no cover art", "no genre") is the bug — the library did not say
+    that, the plugin did.
+
+    Only lines carrying one of `markers` are kept, so an interesting reason is
+    not buried under the plugin's ordinary chatter. beets formats with `{}`, so
+    the record is rendered here rather than by a stdlib formatter.
+
+    A logger is process-wide while these captures are per-request, so records
+    are also filtered to the thread that opened the capture. Every plugin call
+    involved runs its fetch synchronously in the caller's thread, and without
+    the filter a parallel fetch's failure would be reported against whichever
+    track happened to be capturing — an attributed reason nobody established,
+    which is the very thing this class exists to stop.
+    """
+
+    def __init__(self, markers):
+        super().__init__(level=logging.DEBUG)
+        self.markers = markers
+        self.reasons = []
+        self.thread = threading.get_ident()
+
+    def emit(self, record):
+        if record.thread != self.thread:
+            return
+        try:
+            message = str(record.msg).format(*record.args)
+        except Exception:  # noqa: BLE001 - a reason is never worth an exception
+            message = str(record.msg)
+        if any(marker in message for marker in self.markers):
+            self.reasons.append(message)
+
+
+#: Per-logger propagation state shared by overlapping captures:
+#: `{name: [depth, propagate]}`. Guarded by `_capture_lock`. The *level* is
+#: deliberately not in here — see `_plugin_reasons`.
+_capture_state = {}
+_capture_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _plugin_reasons(logger_name, markers):
+    """Capture `markers`-matching log lines from `logger_name` for the block.
+
+    Yields the handler; read `.reasons` after the block. The logger's level is
+    lowered for the duration because beets' interesting lines are `debug`, and
+    restored when the last capture leaves — a plugin logger left at DEBUG would
+    flood the app log for every later request.
+
+    Propagation is switched off for the same duration. beets formats with `{}`
+    and passes the arguments through, which every ordinary `%`-style handler
+    upstream (this app's, pytest's) fails to render — and a handler that raises
+    while reporting *why* a lookup found nothing would turn the diagnosis into a
+    500. Nothing is lost: at their normal level these records were being
+    discarded anyway.
+
+    The two settings are restored differently because beets scopes them
+    differently. Its loggers are `ThreadLocalLevelLogger`s, so `level` is
+    per-thread state that only this capture can see and is saved and put back
+    per capture. `propagate` is an ordinary attribute shared by every thread, so
+    it is refcounted: captures on one logger genuinely overlap — the SPA fetches
+    lyrics six tracks at a time — and restoring it when the first of them leaves
+    would un-silence the others mid-flight.
+    """
+    logger = logging.getLogger(logger_name)
+    handler = _PluginReasons(markers)
+    previous_level = logger.level  # thread-local on beets loggers
+    with _capture_lock:
+        entry = _capture_state.get(logger_name)
+        if entry is None:
+            entry = _capture_state[logger_name] = [0, logger.propagate]
+        entry[0] += 1
+    logger.addHandler(handler)
+    logger.propagate = False
+    if previous_level > logging.DEBUG or previous_level == logging.NOTSET:
+        logger.setLevel(logging.DEBUG)
+    try:
+        yield handler
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+        with _capture_lock:
+            entry = _capture_state.get(logger_name)
+            if entry is not None:
+                entry[0] -= 1
+                if entry[0] <= 0:
+                    _capture_state.pop(logger_name, None)
+                    logger.propagate = entry[1]
 
 
 def _image_size(path):
@@ -473,17 +569,26 @@ def _detect_disc_subdirs(items):
 # ---------------------------------------------------------------------------
 
 
-def _format_genre(val):
-    """Normalize a genre value (str with null-bytes or list) to a comma-separated string."""
+def _genre_names(val):
+    """A genre value as a list of names — the one rule for the list/string duality.
+
+    `genres` is a native list on beets ≥2.10 but reaches us as a separator-joined
+    string on rows written before it, and both spellings come out of the same
+    `get("genres")`. Anything that iterates a genre value must go through here:
+    `list()` on the string form yields one entry per *character*.
+    """
     if isinstance(val, (list, tuple)):
-        return ", ".join(str(v) for v in val)
+        return [str(v).strip() for v in val if str(v).strip()]
     if isinstance(val, bytes):
         val = val.decode("utf-8", errors="replace")
     if not val:
-        return ""
-    val = str(val)
-    parts = re.split(r"\\?\u2400|\x00", val)
-    return ", ".join(p.strip() for p in parts if p.strip())
+        return []
+    return [part.strip() for part in re.split(r"\\?\u2400|\x00", str(val)) if part.strip()]
+
+
+def _format_genre(val):
+    """Normalize a genre value (str with null-bytes or list) to a comma-separated string."""
+    return ", ".join(_genre_names(val))
 
 
 # ---------------------------------------------------------------------------

@@ -514,6 +514,33 @@ class TestFetchCover:
         )
         assert (data["width"], data["height"]) == (600, 587)
 
+    def test_reports_the_current_cover_size_next_to_the_candidate(self, client, tmp_path, mocker):
+        """One request answers "is this an upgrade", not two."""
+        from PIL import Image
+
+        current = tmp_path / "cover.jpg"
+        Image.new("RGB", (500, 500), color="green").save(str(current), format="JPEG")
+        candidate_file = tmp_path / "candidate.jpg"
+        Image.new("RGB", (1200, 1200), color="blue").save(str(candidate_file), format="JPEG")
+
+        album = mocker.MagicMock()
+        album.artpath = str(current).encode()
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_album.return_value = album
+        mocker.patch("beetdeck.routes.cover._init_beets", return_value=mock_lib)
+        candidate = mocker.MagicMock()
+        candidate.path = str(candidate_file).encode()
+        candidate.source_name = "coverart"
+        plugin = mocker.MagicMock()
+        plugin.name = "fetchart"
+        plugin.art_for_album.return_value = candidate
+        mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+
+        data = client.post("/api/album/80/cover/fetch").get_json()
+        assert (data["current_width"], data["current_height"]) == (500, 500)
+        assert (data["width"], data["height"]) == (1200, 1200)
+        assert "relaxed" not in data
+
     def test_an_unreadable_candidate_reports_null_dimensions_not_an_error(
         self, client, tmp_path, mocker
     ):
@@ -600,14 +627,26 @@ class TestConfirmCoverPrecondition:
         long before the write finishes. Without a per-album write lock an upload
         landing in that window is reverted by the confirm that already passed —
         and the confirm still answers 200."""
-        import mimetypes
         import threading
         import time
 
-        # Werkzeug's multipart builder lazily initializes `mimetypes` on first
-        # use, and that initialization is not thread-safe — doing it here keeps
-        # the test measuring the lock rather than a CPython import race.
-        mimetypes.init()
+        from werkzeug.test import EnvironBuilder
+
+        # Build the multipart request *here*, on the main thread, and let the
+        # thread below send the finished bytes. Werkzeug's builder reaches into
+        # `mimetypes`, whose lazy global initialization is not thread-safe: under
+        # load the parse could come back without the file part and the upload
+        # answered 400, failing this test for a reason that has nothing to do
+        # with the lock it exists to measure.
+        builder = EnvironBuilder(
+            path="/api/album/5/cover/upload",
+            method="POST",
+            data={"file": (io.BytesIO(b"\xff\xd8\xff\xe0image"), "art.jpg")},
+            content_type="multipart/form-data",
+        )
+        environ = builder.get_environ()
+        upload_body = environ["wsgi.input"].read()
+        upload_content_type = environ["CONTENT_TYPE"]
 
         mocker.patch("beetdeck.routes.cover.os.path.isfile", return_value=True)
         order = []
@@ -627,18 +666,23 @@ class TestConfirmCoverPrecondition:
 
         def upload():
             with app.test_client() as other:
-                upload_status["code"] = other.post(
+                resp = other.post(
                     "/api/album/5/cover/upload",
-                    data={"file": (io.BytesIO(b"\xff\xd8\xff\xe0image"), "art.jpg")},
-                    content_type="multipart/form-data",
-                ).status_code
+                    data=upload_body,
+                    content_type=upload_content_type,
+                )
+                upload_status["code"] = resp.status_code
+                # Kept for the assertion below: a bare status code turns any
+                # failure here into a bisect, and this one runs in a thread.
+                upload_status["body"] = resp.get_json()
 
         thread = threading.Thread(target=upload)
         thread.start()
         assert client.post("/api/album/5/cover/confirm").status_code == 200
         thread.join(timeout=5)
 
-        assert upload_status.get("code") == 200
+        assert not thread.is_alive(), "the upload never finished — the lock is held"
+        assert upload_status.get("code") == 200, upload_status.get("body")
         # Both routes write through _save_cover_to_album; mutual exclusion means
         # the record never shows one entering while the other is inside.
         assert order == ["enter", "exit", "enter", "exit"]
@@ -722,6 +766,170 @@ class TestCoverOpenAPISpec:
         assert cover.get("responses", {}) == {}
         assert preview.get("tags", []) == []
         assert preview.get("responses", {}) == {}
+
+
+class TestRelaxedCoverLookup:
+    """The retry that separates "there is no art" from "you told us not to take it".
+
+    `minwidth` rejects on *width alone*, so a portrait cover that the Cover Art
+    Archive stores at its original 495×500 fails a 500 px floor by five pixels
+    and the album is reported as having no art at all.
+    """
+
+    def _plugin(self, mocker, *, first, second, minwidth=500):
+        plugin = mocker.MagicMock()
+        plugin.name = "fetchart"
+        plugin.minwidth = minwidth
+        plugin.enforce_ratio = False
+        seen = []
+
+        def art_for_album(album, paths, local_only=False):
+            seen.append((plugin.minwidth, plugin.enforce_ratio))
+            return first if len(seen) == 1 else second
+
+        plugin.art_for_album.side_effect = art_for_album
+        mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+        return plugin, seen
+
+    def _album(self, mocker):
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_album.return_value = mocker.MagicMock()
+        mocker.patch("beetdeck.routes.cover._init_beets", return_value=mock_lib)
+
+    def test_a_candidate_below_minwidth_is_returned_with_a_warning(self, client, tmp_path, mocker):
+        from PIL import Image
+
+        art = tmp_path / "small.jpg"
+        Image.new("RGB", (495, 500), color="blue").save(str(art), format="JPEG")
+        candidate = mocker.MagicMock()
+        candidate.path = str(art).encode()
+        candidate.source_name = "coverart"
+        self._album(mocker)
+        self._plugin(mocker, first=None, second=candidate)
+
+        data = client.post("/api/album/81/cover/fetch").get_json()
+        assert data["found"] is True
+        assert data["relaxed"] is True
+        assert data["min_width"] == 500
+        assert (data["width"], data["height"]) == (495, 500)
+        assert "495×500" in data["warning"]
+        assert "minimum width of 500 px" in data["warning"]
+        assert "aspect-ratio" not in data["warning"]
+
+    def test_the_retry_runs_with_the_filters_off_and_puts_them_back(self, client, tmp_path, mocker):
+        """The plugin is a process-wide singleton — a leaked 0 would silently
+        accept undersized art for every later fetch."""
+        from PIL import Image
+
+        art = tmp_path / "small.jpg"
+        Image.new("RGB", (495, 500), color="blue").save(str(art), format="JPEG")
+        candidate = mocker.MagicMock()
+        candidate.path = str(art).encode()
+        candidate.source_name = "coverart"
+        self._album(mocker)
+        plugin, seen = self._plugin(mocker, first=None, second=candidate)
+
+        client.post("/api/album/82/cover/fetch")
+        assert seen == [(500, False), (0, False)]
+        assert plugin.minwidth == 500
+        assert plugin.enforce_ratio is False
+
+    def test_a_retry_hit_that_meets_the_filters_is_not_called_a_rejection(
+        self, client, tmp_path, mocker
+    ):
+        """A first pass can also come back empty from a timed-out source; calling
+        that a policy rejection would invent a reason."""
+        import logging
+
+        from PIL import Image
+
+        art = tmp_path / "big.jpg"
+        Image.new("RGB", (1000, 1000), color="blue").save(str(art), format="JPEG")
+        candidate = mocker.MagicMock()
+        candidate.path = str(art).encode()
+        candidate.source_name = "coverart"
+        self._album(mocker)
+        plugin = mocker.MagicMock()
+        plugin.name = "fetchart"
+        plugin.minwidth = 500
+        plugin.enforce_ratio = False
+        calls = []
+
+        def art_for_album(album, paths, local_only=False):
+            calls.append(1)
+            if len(calls) == 1:
+                logging.getLogger("beets.fetchart").debug(
+                    "{}: error receiving response", "coverart"
+                )
+                return None
+            return candidate
+
+        plugin.art_for_album.side_effect = art_for_album
+        mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+
+        data = client.post("/api/album/86/cover/fetch").get_json()
+        assert data["found"] is True
+        assert "relaxed" not in data
+        assert data["retried"] is True
+        assert "error receiving response" in data["warning"]
+
+    def test_no_active_filter_means_no_second_sweep(self, client, mocker):
+        """With nothing to lift, the retry is a byte-identical duplicate of the
+        sweep that just failed — and costs a second round of source requests."""
+        self._album(mocker)
+        plugin, seen = self._plugin(mocker, first=None, second=None, minwidth=0)
+        plugin.enforce_ratio = False
+
+        data = client.post("/api/album/87/cover/fetch").get_json()
+        assert data["found"] is False
+        assert len(seen) == 1
+
+    def test_a_first_pass_hit_never_pays_for_the_retry(self, client, tmp_path, mocker):
+        from PIL import Image
+
+        art = tmp_path / "big.jpg"
+        Image.new("RGB", (1000, 1000), color="blue").save(str(art), format="JPEG")
+        candidate = mocker.MagicMock()
+        candidate.path = str(art).encode()
+        candidate.source_name = "coverart"
+        self._album(mocker)
+        _, seen = self._plugin(mocker, first=candidate, second=candidate)
+
+        data = client.post("/api/album/83/cover/fetch").get_json()
+        assert len(seen) == 1
+        assert "relaxed" not in data
+        assert "warning" not in data
+
+    def test_nothing_anywhere_reports_the_plugins_own_reasons(self, client, mocker):
+        """`found: false` used to be silent about whether art existed at all."""
+        import logging
+
+        self._album(mocker)
+        plugin = mocker.MagicMock()
+        plugin.name = "fetchart"
+        plugin.minwidth = 500
+        plugin.enforce_ratio = False
+
+        def art_for_album(album, paths, local_only=False):
+            logging.getLogger("beets.fetchart").debug("image too small ({} < {})", 495, 500)
+            return None
+
+        plugin.art_for_album.side_effect = art_for_album
+        mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+
+        data = client.post("/api/album/84/cover/fetch").get_json()
+        assert data["found"] is False
+        # Once, not twice: the retry walks the same sources and re-reports every
+        # rejection the first pass already made.
+        assert data["reasons"] == ["image too small (495 < 500)"]
+        assert logging.getLogger("beets.fetchart").handlers == []
+
+    def test_no_source_offering_anything_reports_an_empty_reason_list(self, client, mocker):
+        self._album(mocker)
+        self._plugin(mocker, first=None, second=None)
+        data = client.post("/api/album/85/cover/fetch").get_json()
+        assert data["found"] is False
+        assert data["reasons"] == []
 
 
 class TestCoverBehaviorUnchanged:

@@ -28,6 +28,7 @@ from beetdeck.utils import (
     _get_ro_conn,
     _init_beets,
     _is_instrumental,
+    _plugin_reasons,
     _read_lrc_file,
     _resolve_path,
     _try_write_item,
@@ -35,6 +36,26 @@ from beetdeck.utils import (
 )
 
 bp = Blueprint("lyrics", __name__)
+
+#: `beets.lyrics` log lines worth repeating to the caller. The plugin walks its
+#: backends and swallows each failure, so a blocked address or an unreachable
+#: source arrives as a plain "no lyrics" — indistinguishable from a track that
+#: genuinely has none. Every entry is a *source* failure; a backend that simply
+#: had no match logs nothing and leaves this list empty, which is the case that
+#: really is a fact about the track.
+_LYRICS_REASONS = (
+    "Request error:",
+    "Could not decode response JSON data",
+    "Blocked IP address",
+    "Disabling Google source",
+)
+
+
+def _find_lyrics_with_reasons(lyrics_plugin, item):
+    """`(result, reasons)` — the lookup plus why any source failed."""
+    with _plugin_reasons("beets.lyrics", _LYRICS_REASONS) as capture:
+        result = lyrics_plugin.find_lyrics(item)
+    return result, capture.reasons
 
 
 @bp.route("/api/album/<int:album_id>/track/<int:item_id>/lyrics")
@@ -153,7 +174,7 @@ def fetch_track_lyrics(album_id, item_id):
         current_lyrics = old_lyrics or lrc_text or ""
         current_source = "embedded" if old_lyrics else ("lrc_file" if lrc_text else None)
 
-        result = lyrics_plugin.find_lyrics(item)
+        result, reasons = _find_lyrics_with_reasons(lyrics_plugin, item)
         # beets 2.13.0+ blanks .text for an instrumental match and raises a flag
         # instead, so testing text alone would report a positive answer from the
         # source as a miss. `found` stays "there is text to show", and the
@@ -161,7 +182,7 @@ def fetch_track_lyrics(album_id, item_id):
         instrumental = bool(result) and getattr(result, "instrumental", False)
 
         if not result or (not result.text and not instrumental):
-            log.info("No lyrics found for item_id=%d", item_id)
+            log.info("No lyrics found for item_id=%d (%s)", item_id, "; ".join(reasons) or "-")
             return jsonify(
                 {
                     "status": "ok",
@@ -169,6 +190,9 @@ def fetch_track_lyrics(album_id, item_id):
                     "new_instrumental": False,
                     "current_lyrics": current_lyrics,
                     "current_source": current_source,
+                    # Empty when every source answered and none had the track:
+                    # that is the only case where "no lyrics" is about the track.
+                    "reasons": reasons,
                 }
             )
 
@@ -534,7 +558,7 @@ def fetch_album_lyrics(album_id):
             current_lyrics = item.lyrics or lrc_text or ""
             current_source = "embedded" if item.lyrics else ("lrc_file" if lrc_text else None)
 
-            found_lyrics = lyrics_plugin.find_lyrics(item)
+            found_lyrics, reasons = _find_lyrics_with_reasons(lyrics_plugin, item)
 
             entry = {
                 "item_id": item.id,
@@ -549,6 +573,9 @@ def fetch_album_lyrics(album_id):
                 "new_lyrics": "",
                 "new_synced": False,
                 "new_backend": "",
+                # Per track, not per fetch: one blocked source can fail some
+                # tracks and not others, and the caller decides per track.
+                "reasons": reasons,
             }
 
             # Same instrumental handling as the single-track fetch above.

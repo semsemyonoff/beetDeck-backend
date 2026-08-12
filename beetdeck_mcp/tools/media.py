@@ -36,7 +36,7 @@ answer from the source.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from beetdeck_mcp.client import BeetdeckClient
@@ -105,6 +105,22 @@ def _fetched(row: Mapping[str, Any]) -> bool:
     return bool(row.get("found")) or bool(row.get("new_instrumental"))
 
 
+def _source_failures(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """Every distinct source failure the backend reported across `rows`.
+
+    Deduplicated in first-seen order: one blocked backend produces the same line
+    for every track it was asked about, and repeating it per track would bury
+    the one thing the agent has to act on.
+    """
+    seen: list[str] = []
+    for row in rows:
+        for reason in row.get("reasons") or []:
+            text = str(reason)
+            if text not in seen:
+                seen.append(text)
+    return seen
+
+
 def _track_summary(row: Mapping[str, Any]) -> dict[str, Any]:
     """One previewed track, trimmed to what a decision needs."""
     text = row.get("new_lyrics") or ""
@@ -141,10 +157,16 @@ def build_tools(
         Nothing is written until you pass that token to `apply_change`, which
         saves the image into the album directory and embeds it into every track.
 
-        Compare `width`/`height` against `cover_width`/`cover_height` from
-        `get_album` to decide whether the candidate is an upgrade over the cover
-        the album already has; both come from the API, so this needs no download
+        The summary carries both sizes — `width`/`height` for the candidate and
+        `current_width`/`current_height` for the cover already on the album — so
+        "is this an upgrade" is answerable from this one call, with no download
         and no external image tool.
+
+        When the art sources only offer an image the backend's size filter
+        rejects, the lookup is repeated with that filter lifted and the result
+        comes back with `relaxed: true` and a `warning` naming the shortfall.
+        Such a candidate is deliberately *offered, not applied*: it is below the
+        configured minimum, so weigh it against `current_width` before applying.
 
         The fetched image sits in a single stash slot per album, so a cover
         fetched afterwards from the web UI replaces it — but this token carries
@@ -157,11 +179,16 @@ def build_tools(
 
         data = response.data
         if not data.get("found"):
+            # The backend forwards the art plugin's own rejection lines. Without
+            # them "nothing was found" reads as "no such art exists", which is
+            # exactly the wrong conclusion when a filter dropped a real image.
+            reasons = [str(reason) for reason in data.get("reasons") or []]
+            detail = f" — the art sources reported: {'; '.join(reasons)}" if reasons else ""
             return {
                 "error": (
-                    f"no cover art was found online for album {album_id} — nothing was stashed "
-                    "and no preview was created; upload an image from the web UI, or fix the "
-                    "album's identification first so the art sources can find it"
+                    f"no usable cover art was found online for album {album_id}{detail}. Nothing "
+                    "was stashed and no preview was created; upload an image from the web UI, or "
+                    "fix the album's identification first so the art sources can find it"
                 )
             }
 
@@ -182,11 +209,17 @@ def build_tools(
                     "preview_url": data.get("preview_url"),
                     "width": data.get("width"),
                     "height": data.get("height"),
+                    "current_width": data.get("current_width"),
+                    "current_height": data.get("current_height"),
+                    "relaxed": data.get("relaxed"),
                 }
             ),
         )
         described = store.describe(preview)
-        described["notes"] = [RACE_NOTE]
+        notes = [RACE_NOTE]
+        if data.get("relaxed"):
+            notes.insert(0, str(data.get("warning") or "below the configured minimum width"))
+        described["notes"] = notes
         return described
 
     def preview_lyrics(album_id: int, item_id: int | None = None) -> dict[str, Any]:
@@ -212,6 +245,10 @@ def build_tools(
         generation of that fetch, and applying it after a replacement is refused
         (as a whole, for every track in the selection) rather than writing the
         other result.
+
+        A miss caused by a failing source (a blocked address, an unreachable
+        backend) is reported as such rather than as "these tracks have no
+        lyrics" — the sources were never able to answer.
         """
         if item_id is None:
             response = client.post(f"/api/album/{album_id}/lyrics/fetch", timeout=FETCH_TIMEOUT)
@@ -235,7 +272,29 @@ def build_tools(
         fetched = [row for row in rows if _fetched(row)]
         missing = [row for row in rows if not _fetched(row)]
 
+        # The plugin walks its backends and swallows each failure, so a blocked
+        # or unreachable source arrives as a plain miss. Repeating its own words
+        # keeps "nobody has these lyrics" apart from "nobody could be asked".
+        #
+        # Two lists, because attribution cuts both ways. `reasons` are the
+        # failures the missing tracks reported themselves — those explain *these*
+        # misses. `elsewhere` are failures seen only on tracks that did get
+        # lyrics: a source disabled once for the whole run leaves its line on
+        # whichever track happened to trigger it, so dropping them would hide a
+        # degraded run, while attributing them to the misses would overclaim.
+        reasons = _source_failures(missing)
+        elsewhere = [r for r in _source_failures(rows) if r not in reasons]
+
         if not fetched:
+            if reasons:
+                return {
+                    "error": (
+                        f"no lyrics could be fetched for {subject} ({len(rows)} track(s) "
+                        f"searched) because a source failed: {'; '.join(reasons)}. Nothing was "
+                        "stashed and no preview was created — this says nothing about whether "
+                        "these tracks have lyrics; retry once the source is reachable"
+                    )
+                }
             return {
                 "error": (
                     f"no lyrics were found for {subject} ({len(rows)} track(s) searched) — "
@@ -272,6 +331,17 @@ def build_tools(
             notes.append(
                 f"no lyrics found for {len(missing)} track(s), left out of this change: {named}"
             )
+            if reasons:
+                notes.append(
+                    "at least one of those misses is a failed source, not an absent lyric: "
+                    + "; ".join(reasons)
+                )
+            elif elsewhere:
+                notes.append(
+                    "a source failed elsewhere in this run (" + "; ".join(elsewhere) + "), so "
+                    "those misses are not certain to be absences — re-run the fetch for them "
+                    "once it is reachable"
+                )
         described["notes"] = notes
         return described
 

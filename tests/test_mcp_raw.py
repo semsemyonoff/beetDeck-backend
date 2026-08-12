@@ -208,10 +208,15 @@ class TestResourceRegistration:
         content = read_resource(resource_server, WORKFLOW_URI)
         assert content.mime_type == "text/markdown"
         text = content.content
-        # The three things a tool description cannot carry on its own.
+        # The things a tool description cannot carry on its own.
         assert "apply_change" in text
         assert "Enforced by the backend" in text
         assert "mb_release_id" in text
+        # Why an empty answer may not be one — the guide is where an agent that
+        # has not hit the case yet can learn it exists.
+        assert "An empty answer is rarely a fact" in text
+        assert "relaxed" in text
+        assert 'mode="merge"' in text
 
     def test_resources_are_registered_outside_register_all(self, mcp_config, beetdeck_client):
         """`register_all` is the tool registry; resources are wired in `server.py`."""

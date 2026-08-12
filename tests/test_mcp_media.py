@@ -231,9 +231,32 @@ class TestPreviewCover:
         mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
 
         result = tools["preview_cover"](album)
-        assert "no cover art was found" in result["error"]
+        assert "no usable cover art was found" in result["error"]
         assert "no preview was created" in result["error"]
         assert len(store) == 0
+
+    def test_a_rejected_candidate_is_offered_with_the_shortfall_named(
+        self, tools, album, tmp_path, mocker, store
+    ):
+        """A filter dropping a real image must not read as "no art exists"."""
+        from PIL import Image
+
+        art = tmp_path / "small.jpg"
+        Image.new("RGB", (495, 500), color="blue").save(str(art), format="JPEG")
+        candidate = mocker.MagicMock()
+        candidate.path = str(art).encode()
+        candidate.source_name = "coverart"
+        plugin = fake_plugin(mocker, "fetchart")
+        plugin.minwidth = 500
+        plugin.enforce_ratio = False
+        plugin.art_for_album.side_effect = [None, candidate]
+        mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+
+        result = tools["preview_cover"](album)
+        assert result["changes"]["relaxed"] is True
+        assert result["changes"]["width"] == 495
+        assert any("minimum width of 500 px" in note for note in result["notes"])
+        assert len(store) == 1
 
     def test_a_backend_error_is_reported_not_swallowed(self, tools, album, mocker, store):
         """No fetchart plugin ⇒ the route 500s; that must not read as "no art"."""
@@ -369,9 +392,19 @@ def lyrics_result(mocker, text="Verse one\nVerse two", *, synced=False, instrume
 def lyrics_source(mocker):
     """The `lyrics` plugin, answering per item id from a mapping."""
 
-    def _install(by_item_id):
+    def _install(by_item_id, source_error=None):
         plugin = fake_plugin(mocker, "lyrics")
-        plugin.find_lyrics.side_effect = lambda item: by_item_id.get(item.id)
+
+        def find_lyrics(item):
+            if source_error is not None and item.id not in by_item_id:
+                # What the beets plugin does with an unreachable backend: log the
+                # reason at its own logger, return nothing.
+                import logging
+
+                logging.getLogger("beets.lyrics").warning("{}", source_error)
+            return by_item_id.get(item.id)
+
+        plugin.find_lyrics.side_effect = find_lyrics
         mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
         return plugin
 
@@ -423,6 +456,74 @@ class TestPreviewLyricsAlbum:
         assert found[0]["chars"] == len("Verse one\nVerse two")
         assert found[1]["synced"] is True
         assert len(store) == 1
+
+    def test_a_failing_source_is_not_reported_as_absent_lyrics(
+        self, tools, tracks, lyrics_source, store, mocker
+    ):
+        """ "nobody has these lyrics" and "nobody could be asked" are different."""
+        album_id, _ = tracks
+        lyrics_source({}, source_error="Genius: Failed: Blocked IP address")
+
+        result = tools["preview_lyrics"](album_id)
+
+        assert "Blocked IP address" in result["error"]
+        assert "says nothing about whether" in result["error"]
+        assert "check the artist and title tags" not in result["error"]
+        assert len(store) == 0
+
+    def test_a_partial_failure_is_named_next_to_the_missed_tracks(
+        self, tools, tracks, lyrics_source, store, mocker
+    ):
+        album_id, ids = tracks
+        lyrics_source(
+            {ids[0]: lyrics_result(mocker)}, source_error="Genius: Request error: timed out"
+        )
+
+        result = tools["preview_lyrics"](album_id)
+
+        assert len(store) == 1
+        assert any("failed source" in note for note in result["notes"])
+        assert any("Request error: timed out" in note for note in result["notes"])
+
+    def test_a_failure_seen_only_on_a_found_track_still_qualifies_the_misses(
+        self, tools, tracks, lyrics_source, store, mocker
+    ):
+        """A source disabled once for the whole run leaves its line on whichever
+        track happened to trigger it — dropping it would hide a degraded run."""
+        album_id, ids = tracks
+        plugin = mocker.MagicMock()
+        plugin.name = "lyrics"
+        found = {ids[0]: lyrics_result(mocker)}
+
+        def find_lyrics(item):
+            if item.id == ids[0]:
+                import logging
+
+                logging.getLogger("beets.lyrics").warning(
+                    "{}", "Disabling Google source: no API key configured."
+                )
+            return found.get(item.id)
+
+        plugin.find_lyrics.side_effect = find_lyrics
+        mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+
+        result = tools["preview_lyrics"](album_id)
+
+        note = next(note for note in result["notes"] if "elsewhere in this run" in note)
+        assert "Disabling Google source" in note
+        # Not attributed to the misses — it was never reported against them.
+        assert not any("at least one of those misses" in n for n in result["notes"])
+
+    def test_a_genuine_miss_still_reads_as_one(self, tools, tracks, lyrics_source, store):
+        """Every source answered and none had the track — the one case where the
+        empty result really is about the track."""
+        album_id, _ = tracks
+        lyrics_source({})
+
+        result = tools["preview_lyrics"](album_id)
+
+        assert "check the artist and title tags" in result["error"]
+        assert "source failed" not in result["error"]
 
     def test_tracks_without_lyrics_are_named_and_left_out(
         self, tools, tracks, lyrics_source, store, mocker

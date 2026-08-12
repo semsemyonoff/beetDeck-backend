@@ -9,6 +9,7 @@ import sqlite3
 import httpx
 import pytest
 
+from beetdeck import state
 from beetdeck_mcp.client import BeetdeckClient
 from beetdeck_mcp.tools import client_for
 from beetdeck_mcp.tools.read import TOOL_NAMES, build_tools
@@ -415,3 +416,72 @@ class TestListUntaggedItems:
         result = dead_tools(mcp_config)["list_untagged_items"]()
         assert "could not reach the beetDeck API" in result["error"]
         assert "items" not in result
+
+
+# ---------------------------------------------------------------------------
+# an empty result while the library is being imported
+# ---------------------------------------------------------------------------
+
+
+class TestRescanAwareness:
+    """A mid-import library answers `200` with a *partial* library.
+
+    Without the note, "not imported yet" and "not in the library" are the same
+    payload — which is how an agent ends up filing a search bug against rows that
+    simply had not landed yet.
+    """
+
+    def test_an_empty_album_list_says_a_rescan_is_running(self, tools, db_path):
+        insert_album(db_path, album="Kid A", albumartist="Radiohead")
+        state.rescan_phase = "importing"
+        state.rescan_run_id = "run-1"
+
+        result = tools["list_albums"](artist="Yanka")
+        assert result["total"] == 0
+        assert any("a rescan is running (run run-1)" in note for note in result["notes"])
+
+    def test_an_empty_search_says_a_rescan_is_running(self, tools, db_path):
+        insert_album(db_path, album="Kid A", albumartist="Radiohead")
+        state.rescan_phase = "importing"
+        state.rescan_run_id = "run-1"
+
+        result = tools["search_library"]("yanka")
+        assert any("a rescan is running" in note for note in result["notes"])
+
+    def test_a_hit_during_a_rescan_is_left_alone(self, tools, db_path):
+        insert_album(db_path, album="Kid A", albumartist="Radiohead")
+        state.rescan_phase = "importing"
+
+        assert "notes" not in tools["list_albums"]()
+        found = tools["search_library"]("radiohead")
+        assert found["artists"] == ["Radiohead"]
+        assert not any("rescan" in note for note in found["notes"])
+
+    def test_an_empty_untagged_queue_says_a_rescan_is_running(self, tools, db_path):
+        """The queue fills as tracks are imported — "nothing to do" can be early."""
+        state.rescan_phase = "importing"
+        state.rescan_run_id = "run-1"
+
+        result = tools["list_untagged_items"]()
+        assert result["total"] == 0
+        assert any("a rescan is running" in note for note in result["notes"])
+
+    def test_an_idle_library_adds_nothing(self, tools, db_path):
+        insert_album(db_path, album="Kid A", albumartist="Radiohead")
+        result = tools["list_albums"](artist="Yanka")
+        assert not any("rescan" in note for note in result["notes"])
+        assert "notes" not in tools["search_library"]("yanka")
+
+    def test_an_unanswerable_status_call_does_not_spoil_the_result(self, mcp_config):
+        """The result is valid; only the supplementary question failed."""
+
+        def handler(request):
+            if request.url.path == "/api/rescan/status":
+                return httpx.Response(500, json={"error": "boom"})
+            return httpx.Response(200, json=[])
+
+        client = BeetdeckClient(mcp_config, transport=httpx.MockTransport(handler))
+        result = {tool.__name__: tool for tool in build_tools(client)}["list_albums"]()
+        assert result["total"] == 0
+        assert "notes" not in result
+        assert "error" not in result

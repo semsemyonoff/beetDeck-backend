@@ -29,7 +29,7 @@ Two consequences worth stating:
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from beetdeck_mcp.client import BeetdeckClient
 from beetdeck_mcp.preview import PreviewStore, default_store, values_equal
@@ -41,6 +41,8 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from beetdeck_mcp.config import Config
 
 TOOL_NAMES = ("preview_genres",)
+
+GenreMode = Literal["replace", "merge"]
 
 
 def read_path(album_id: int) -> str:
@@ -74,19 +76,33 @@ def build_tools(
 ) -> tuple[Callable[..., dict[str, Any]], ...]:
     """The genre preview tool bound to `client` and `store`."""
 
-    def preview_genres(album_id: int, genre: str = "") -> dict[str, Any]:
+    def preview_genres(
+        album_id: int, genre: str = "", mode: GenreMode = "replace"
+    ) -> dict[str, Any]:
         """Show what setting an album's genre would change.
 
         Omit `genre` to have the backend look one up from Last.fm without
         writing it; pass `genre` to set a value of your own — one name or several
         as a comma-separated string (`"Rock, Post-Punk"`), written verbatim. An
-        override does not query Last.fm at all.
+        override does not query Last.fm at all, and `mode` does not apply to it.
+
+        `mode` decides what a looked-up genre is combined with:
+
+        * `replace` (default) — the album's genres become exactly what Last.fm
+          returned.
+        * `merge` — the album keeps its current genres and gains the fetched ones
+          it does not already carry (case-insensitive, current ones first). Use
+          this when the existing genre came from MusicBrainz or from the files
+          and is worth keeping.
 
         The genre is written to the album and to every one of its tracks.
         Returns the old → new diff plus a single-use `preview_token`; nothing is
         written until you pass that token to `apply_change`, which re-reads the
         album's current genre first and refuses if it changed in the meantime.
         The value it writes is exactly the one shown here.
+
+        A Last.fm lookup that could not be performed is reported as a failure,
+        never as "this album has no genre" — the two are different facts.
         """
         override = _clean(genre)
         if genre and not override:
@@ -103,18 +119,23 @@ def build_tools(
             return failure(current)
         old = current.data.get("genre") or ""
 
+        fetched = ""
         if override:
             new, source = override, "override"
         else:
-            lookup = client.post(lookup_path(album_id))
+            lookup = client.post(lookup_path(album_id), params={"mode": mode})
+            # A 502 here is the backend saying the lookup never happened; passing
+            # it through as a failure is the whole point of that status.
             if not lookup.ok:
                 return failure(lookup)
-            new, source = lookup.data.get("new_genre") or "", "lastgenre"
+            new = lookup.data.get("new_genre") or ""
+            fetched = lookup.data.get("fetched_genre") or ""
+            source = "lastgenre"
             if not new:
                 return {
                     "error": (
-                        f"Last.fm has no genre for album {album_id} — nothing was previewed; "
-                        "pass the genre argument to set one yourself"
+                        f"Last.fm returned no genre for album {album_id} — nothing was "
+                        "previewed; pass the genre argument to set one yourself"
                     )
                 }
 
@@ -138,6 +159,10 @@ def build_tools(
                 "album_id": album_id,
                 "genre": {"old": old, "new": new},
                 "source": source,
+                # In merge mode `new` is old+fetched, so without these two the
+                # agent cannot see what Last.fm actually contributed.
+                **({"mode": mode} if not override else {}),
+                **({"fetched": fetched} if fetched and fetched != new else {}),
             },
         )
         return store.describe(preview)

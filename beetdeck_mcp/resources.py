@@ -84,6 +84,43 @@ Two consequences worth knowing:
   database was written but at least one audio file was not. The `detail` list
   names what was missed.
 
+## An empty answer is rarely a fact about the library
+
+Several tools can come back with nothing for a reason that has nothing to do
+with the album you asked about, and each says so rather than leaving you to
+guess:
+
+* **A rescan is running.** `list_albums`, `search_library` and
+  `list_untagged_items` ask the backend for the scan status whenever they are
+  about to return empty, and add a note naming the run. Mid-import, "no such
+  artist" means "not imported yet" — poll `get_rescan_status` and ask again.
+* **The art sources offered something and the backend's size filter refused
+  it.** `preview_cover` retries with that filter lifted and returns the
+  candidate with `relaxed: true` and a `warning`. Such a cover is *offered, not
+  recommended*: compare `width`/`height` against `current_width`/`current_height`
+  in the same response before applying. When nothing is found at all, the error
+  repeats the art sources' own reasons.
+* **The Last.fm lookup could not run.** `preview_genres` reports that as a
+  failure with the upstream message, never as "this album has no genre". A
+  successful lookup that simply had no tags is the other case, and says so.
+* **A lyrics source failed.** `preview_lyrics` separates "every source answered
+  and none had the track" (check the artist and title tags) from "a source was
+  blocked or unreachable" (retry later, and do not conclude the track has no
+  lyrics). On a partial album fetch the failing source is named next to the
+  tracks it cost.
+
+The rule these follow is worth applying to your own conclusions: report what was
+established, not what was absent.
+
+## Genres: replace or merge
+
+`preview_genres(album_id)` proposes what Last.fm returned. `mode="merge"` keeps
+the genres the album already has and appends the fetched ones it does not carry —
+use it when the existing value came from MusicBrainz or from the file tags and is
+worth keeping. The preview shows the fetched value separately from the proposed
+one, so the difference between the two modes is visible before you apply either.
+Passing `genre=` sets a value verbatim and queries nothing.
+
 ## When identification returns the wrong album
 
 `identify_album` runs the backend's autotagger and returns up to five candidates.

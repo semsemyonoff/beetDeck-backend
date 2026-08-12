@@ -24,7 +24,29 @@ models' all-optional fields keep real payloads conformant. ``resp=`` also feeds 
 spec.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class GenrePreviewQuery(BaseModel):
+    """Query string for ``POST /api/album/<id>/genre``.
+
+    ``mode`` decides what the previewed value is made of, not what is fetched —
+    the Last.fm lookup is identical either way and is returned separately as
+    ``fetched_genre``. Extra query keys are tolerated (no ``extra="forbid"``):
+    the SPA appends cache-busters, and a rejected preview over a stray parameter
+    would be a worse failure than an ignored one.
+    """
+
+    mode: Literal["replace", "merge"] = Field(
+        default="replace",
+        description=(
+            "``replace`` (default) previews the fetched genre on its own; ``merge`` "
+            "previews the album's current genres followed by the fetched ones it does "
+            "not already carry (case-insensitive, order preserved)."
+        ),
+    )
 
 
 class GenreSaveBody(BaseModel):
@@ -48,11 +70,28 @@ class GenreSaveBody(BaseModel):
 
 
 class GenrePreviewResponse(BaseModel):
-    """``POST /api/album/<id>/genre`` — old vs newly-fetched genre (no write)."""
+    """``POST /api/album/<id>/genre`` — old vs proposed genre (no write).
+
+    A failed lookup is **not** this shape: when Last.fm cannot be reached the
+    route answers ``502`` with an ``error``, because an empty ``new_genre`` would
+    otherwise read as "this album has no genre" — a statement about the library
+    that the failed lookup never established.
+    """
 
     status: str = Field(description="Always ``ok`` on success.")
+    mode: str | None = Field(
+        default=None, description="The mode the preview was built with: ``replace`` or ``merge``."
+    )
     old_genre: str = Field(description="Current genre(s), comma-formatted.")
-    new_genre: str = Field(description="Genre(s) fetched from Last.fm, comma-formatted.")
+    fetched_genre: str | None = Field(
+        default=None,
+        description="What Last.fm returned, comma-formatted, before the mode was applied. "
+        "Empty means the lookup succeeded and had nothing for this album.",
+    )
+    new_genre: str = Field(
+        description="The genre(s) this preview proposes, comma-formatted: the fetched "
+        "value in ``replace`` mode, current-plus-fetched in ``merge``."
+    )
 
 
 class GenreWriteResponse(BaseModel):
