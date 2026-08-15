@@ -40,6 +40,22 @@ permanently — the image file already exists, so it is never measured again.
 measures the file *outside* the lock, then takes it once to merge the measurement
 into `dims`. Reaching for `read_index` / `replace_metadata` from inside it would
 be a second acquisition of a non-reentrant lock the caller already holds.
+
+Eviction. Only the **cache** root is bounded — TTL first, then oldest-`mtime`
+first until it fits `max_bytes`; the storage root is a permanent mirror and the
+sweep never looks at it. Two things about *when* it runs:
+
+* it is **amortised behind a byte counter**, not run after every write. A cold
+  40-tile gallery would otherwise stat and sort the whole cache root forty times,
+  which is quadratic in cache size for no gain;
+* it runs **inline**, on the storing thread. The app is `-w 1 --threads N` by
+  architecture, so a background sweeper thread would buy nothing but a second
+  place for the same failure to happen.
+
+The sweep evicts image files and nothing else. An `index.json` is kilobytes, and
+dropping one would discard the `dims` measured for files still on disk —
+measurements that never come back, because an existing file is never measured
+twice.
 """
 
 from __future__ import annotations
@@ -50,6 +66,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -63,6 +80,12 @@ DEFAULT_META_TTL = 86400
 #: How long a cached *file* survives; the storage root ignores this entirely.
 DEFAULT_CACHE_TTL = 604800
 DEFAULT_CACHE_MAX_BYTES = 512 * 1024 * 1024
+#: Fraction of `max_bytes` that has to be written into the cache before a sweep
+#: is worth its own cost. A sweep is O(files) in stats plus a sort, so running it
+#: per tile makes a cold gallery quadratic in cache size.
+_SWEEP_FRACTION = 16
+#: …but never less than this, so a tiny `max_bytes` still sweeps promptly.
+_MIN_SWEEP_BYTES = 1024 * 1024
 
 STORAGE = "storage"
 CACHE = "cache"
@@ -221,6 +244,20 @@ class StoredImage:
     size: tuple[int, int] | None = None
 
 
+@dataclass(frozen=True)
+class CacheSweep:
+    """What one :meth:`ArtworkStore.sweep_cache` pass did.
+
+    `total_bytes` is what the cache root holds *after* the pass, so a caller can
+    assert the budget actually held rather than that the sweep ran.
+    """
+
+    expired: int = 0
+    evicted: int = 0
+    freed_bytes: int = 0
+    total_bytes: int = 0
+
+
 class ArtworkStore:
     """The two roots and the index operations over them."""
 
@@ -232,6 +269,7 @@ class ArtworkStore:
         meta_ttl: float = DEFAULT_META_TTL,
         cache_ttl: float = DEFAULT_CACHE_TTL,
         max_bytes: int = DEFAULT_CACHE_MAX_BYTES,
+        sweep_every_bytes: int | None = None,
     ) -> None:
         self.storage_dir = (storage_dir or "").strip() or None
         self.cache_dir = (cache_dir or "").strip() or os.path.join(
@@ -240,6 +278,16 @@ class ArtworkStore:
         self.meta_ttl = meta_ttl
         self.cache_ttl = cache_ttl
         self.max_bytes = max_bytes
+        self.sweep_every_bytes = (
+            sweep_every_bytes
+            if sweep_every_bytes is not None
+            else max(_MIN_SWEEP_BYTES, int(max_bytes) // _SWEEP_FRACTION)
+        )
+
+        #: Bytes written to the cache since the last sweep. Its own lock: it is
+        #: touched on every cache write and has nothing to do with the index.
+        self._sweep_lock = threading.Lock()
+        self._unswept_bytes = 0
 
         self.storage_error: str | None = None
         self.cache_error: str | None = None
@@ -447,12 +495,113 @@ class ArtworkStore:
                 payload["dims"] = dims
                 self._write_index_unlocked(mbid, payload)
 
+        if kind == CACHE and self._note_cache_write(len(data)):
+            self.sweep_cache()
+
         return StoredImage(
             path=path,
             source=kind,
             content_type=content_type_for(path),
             size=(int(measured[0]), int(measured[1])) if measured is not None else None,
         )
+
+    def _note_cache_write(self, nbytes: int) -> bool:
+        """Account `nbytes` written to the cache; `True` when a sweep is due.
+
+        The counter is reset by whichever caller is handed the sweep, under the
+        lock, so a burst of concurrent writers produces one sweep rather than
+        one per thread that happened to cross the threshold.
+        """
+        with self._sweep_lock:
+            self._unswept_bytes += max(0, int(nbytes))
+            if self._unswept_bytes < self.sweep_every_bytes:
+                return False
+            self._unswept_bytes = 0
+        return True
+
+    def sweep_cache(self) -> CacheSweep:
+        """Bring the **cache** root back inside its TTL and byte budget.
+
+        TTL first (an expired file is gone regardless of pressure), then
+        oldest-`mtime` first until the total fits `max_bytes`. The storage root
+        is never read, let alone unlinked: it is a permanent mirror, and the
+        whole point of `ARTWORK_STORAGE_DIR` is that nothing evicts from it.
+
+        A non-positive `cache_ttl` or `max_bytes` disables that half of the
+        sweep rather than expiring everything immediately — a zero budget would
+        delete each tile as it landed and turn the proxy into a pass-through.
+        """
+        if self.cache_error is not None:
+            return CacheSweep()
+
+        entries = self._scan_cache_files()
+        total = sum(size for _mtime, size, _path in entries)
+        expired = 0
+        freed = 0
+
+        if self.cache_ttl and self.cache_ttl > 0:
+            cutoff = time.time() - float(self.cache_ttl)
+            survivors: list[tuple[float, int, str]] = []
+            for mtime, size, path in entries:
+                if mtime < cutoff and _unlink(path):
+                    expired += 1
+                    freed += size
+                    total -= size
+                else:
+                    survivors.append((mtime, size, path))
+            entries = survivors
+
+        evicted = 0
+        if self.max_bytes and self.max_bytes > 0 and total > self.max_bytes:
+            for mtime, size, path in sorted(entries):
+                if total <= self.max_bytes:
+                    break
+                if _unlink(path):
+                    evicted += 1
+                    freed += size
+                    total -= size
+
+        if expired or evicted:
+            log.info(
+                "artwork cache sweep: %d expired, %d evicted, %d bytes freed, %d bytes left",
+                expired,
+                evicted,
+                freed,
+                total,
+            )
+        return CacheSweep(expired=expired, evicted=evicted, freed_bytes=freed, total_bytes=total)
+
+    def _scan_cache_files(self) -> list[tuple[float, int, str]]:
+        """`(mtime, size, path)` for every image file under the cache root.
+
+        Image files only. An `index.json` is kilobytes and carries the `dims`
+        measured for files that are still here — dropping it would lose
+        measurements permanently, since an existing file is never measured twice.
+        """
+        entries: list[tuple[float, int, str]] = []
+        try:
+            releases = list(os.scandir(self.cache_dir))
+        except OSError as exc:
+            log.warning("artwork cache dir %s is unreadable: %s", self.cache_dir, exc)
+            return entries
+        for release in releases:
+            if not release.is_dir(follow_symlinks=False):
+                continue
+            try:
+                files = list(os.scandir(release.path))
+            except OSError:
+                continue
+            for entry in files:
+                if os.path.splitext(entry.name)[1].lower() not in _OWNED_EXTENSIONS:
+                    continue
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                entries.append((info.st_mtime, info.st_size, entry.path))
+        return entries
 
     def _to_index(self, mbid: str, source: str, payload: dict[str, Any]) -> ArtworkIndex:
         fetched_at = payload.get("fetched_at")
@@ -498,6 +647,23 @@ def _prepare_root(path: str) -> str | None:
         except OSError:
             pass
     return None
+
+
+def _unlink(path: str) -> bool:
+    """Remove `path`; `False` (with a line in the log) when it could not go.
+
+    A file that resists deletion is not a request failure — the sweep runs on
+    whoever happened to store the tile that crossed the threshold — so it is
+    counted as still present and the budget stays honest.
+    """
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        log.warning("artwork cache entry %s could not be evicted: %s", path, exc)
+        return False
+    return True
 
 
 def _clean_dims(value: Any) -> dict[str, dict[str, list[int]]]:

@@ -20,6 +20,7 @@ Two of these tests assert on the *protocol* rather than on a result:
 import json
 import os
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -30,6 +31,7 @@ from beetdeck.artwork_store import (
     INDEX_FILENAME,
     STORAGE,
     ArtworkStore,
+    CacheSweep,
     content_type_for,
     extension_for,
     sanitize_image_id,
@@ -101,6 +103,13 @@ def plant_image(root, name, mbid=MBID, data=b"planted"):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as handle:
         handle.write(data)
+    return path
+
+
+def age(path, seconds):
+    """Backdate a file's mtime — the only input the sweep's ordering reads."""
+    stamp = time.time() - seconds
+    os.utime(path, (stamp, stamp))
     return path
 
 
@@ -873,3 +882,246 @@ def test_a_metadata_refresh_racing_a_store_image_loses_neither(tmp_path):
     index = store.read_index(MBID)
     assert [image["image_id"] for image in index.images] == ["222"]
     assert index.dims == {"222": {"full": [1425, 1425]}}
+
+
+# --------------------------------------------------------------------------- #
+# sweep_cache
+# --------------------------------------------------------------------------- #
+
+
+def test_sweep_cache_removes_entries_past_the_ttl(tmp_path):
+    store = make_store(tmp_path, storage=False, cache_ttl=100)
+    cache = tmp_path / "cache"
+    stale = age(plant_image(cache, "111-250.jpg", data=b"x" * 40), 500)
+    fresh = plant_image(cache, "222-250.jpg", data=b"x" * 40)
+
+    result = store.sweep_cache()
+
+    assert not os.path.exists(stale)
+    assert os.path.exists(fresh)
+    assert result == CacheSweep(expired=1, evicted=0, freed_bytes=40, total_bytes=40)
+
+
+def test_sweep_cache_trims_the_oldest_first_until_it_fits(tmp_path):
+    """Four 100-byte files against a 250-byte budget: the two oldest go and the
+    sweep stops as soon as the total fits, rather than emptying the root."""
+    store = make_store(tmp_path, storage=False, max_bytes=250)
+    cache = tmp_path / "cache"
+    planted = [
+        age(plant_image(cache, f"{n}-250.jpg", data=b"x" * 100), seconds)
+        for n, seconds in ((1, 400), (2, 300), (3, 200), (4, 100))
+    ]
+
+    result = store.sweep_cache()
+
+    assert [os.path.exists(path) for path in planted] == [False, False, True, True]
+    assert result == CacheSweep(expired=0, evicted=2, freed_bytes=200, total_bytes=200)
+
+
+def test_sweep_cache_applies_the_ttl_before_the_budget(tmp_path):
+    """An expired file is gone regardless of pressure, and the bytes it frees
+    count against the budget — so a TTL drop can spare a newer file entirely."""
+    store = make_store(tmp_path, storage=False, cache_ttl=100, max_bytes=150)
+    cache = tmp_path / "cache"
+    expired = age(plant_image(cache, "111-250.jpg", data=b"x" * 100), 500)
+    recent = age(plant_image(cache, "222-250.jpg", data=b"x" * 100), 50)
+
+    result = store.sweep_cache()
+
+    assert not os.path.exists(expired)
+    assert os.path.exists(recent)
+    assert result == CacheSweep(expired=1, evicted=0, freed_bytes=100, total_bytes=100)
+
+
+def test_sweep_cache_never_touches_the_storage_root(tmp_path):
+    """The storage root is a permanent mirror: neither half of the sweep may
+    look at it, no matter how old or how large what it holds is."""
+    store = make_store(tmp_path, cache_ttl=100, max_bytes=50)
+    storage = tmp_path / "storage"
+    ancient = age(plant_image(storage, "111-250.jpg", data=b"x" * 5000), 10_000)
+    indexed = write_index(storage, {"fetched_at": utc_now_iso(), "images": [record()]})
+    doomed = age(plant_image(tmp_path / "cache", "222-250.jpg", data=b"x" * 5000), 10_000)
+
+    result = store.sweep_cache()
+
+    assert os.path.exists(ancient)
+    assert os.path.exists(indexed)
+    assert not os.path.exists(doomed)
+    assert result.total_bytes == 0
+
+
+def test_sweep_cache_never_evicts_an_index(tmp_path):
+    """`index.json` carries the dims measured for files that are still here, and
+    an existing file is never measured twice — dropping it loses them for good."""
+    store = make_store(tmp_path, storage=False, cache_ttl=100, max_bytes=1)
+    cache = tmp_path / "cache"
+    store.replace_metadata(MBID, [record("111")])
+    age(index_file(cache), 10_000)
+    tile = age(plant_image(cache, "111-250.jpg", data=b"x" * 100), 10_000)
+
+    store.sweep_cache()
+
+    assert not os.path.exists(tile)
+    assert store.read_index(MBID) is not None
+
+
+def test_sweep_cache_leaves_a_concurrent_writers_tmp_file_alone(tmp_path):
+    """The `.tmp` belongs to a write in flight; unlinking it would turn another
+    thread's `os.replace` into a failure the sweep never reports."""
+    store = make_store(tmp_path, storage=False, cache_ttl=100, max_bytes=1)
+    tmp = age(plant_image(tmp_path / "cache", "111-250.jpg.99.1.tmp", data=b"x" * 100), 10_000)
+
+    store.sweep_cache()
+
+    assert os.path.exists(tmp)
+
+
+@pytest.mark.parametrize("ttl", [0, -1, None])
+def test_a_non_positive_ttl_expires_nothing(tmp_path, ttl):
+    """A zero budget would delete each tile as it landed and turn the proxy into
+    a pass-through — disabling that half of the sweep is the honest reading."""
+    store = make_store(tmp_path, storage=False, cache_ttl=ttl, max_bytes=0)
+    ancient = age(plant_image(tmp_path / "cache", "111-250.jpg", data=b"x" * 100), 10_000)
+
+    result = store.sweep_cache()
+
+    assert os.path.exists(ancient)
+    assert result == CacheSweep(expired=0, evicted=0, freed_bytes=0, total_bytes=100)
+
+
+@pytest.mark.parametrize("max_bytes", [0, -1])
+def test_a_non_positive_max_bytes_evicts_nothing(tmp_path, max_bytes):
+    store = make_store(tmp_path, storage=False, cache_ttl=0, max_bytes=max_bytes)
+    planted = plant_image(tmp_path / "cache", "111-250.jpg", data=b"x" * 100)
+
+    result = store.sweep_cache()
+
+    assert os.path.exists(planted)
+    assert result == CacheSweep(expired=0, evicted=0, freed_bytes=0, total_bytes=100)
+
+
+def test_sweep_cache_does_nothing_when_the_cache_root_is_unusable(tmp_path):
+    blocker = tmp_path / "cache"
+    blocker.write_text("not a directory")
+    store = ArtworkStore(storage_dir=str(tmp_path / "storage"), cache_dir=str(blocker))
+
+    assert store.cache_error is not None
+    assert store.sweep_cache() == CacheSweep()
+
+
+def test_sweep_cache_survives_an_entry_that_cannot_be_unlinked(tmp_path, monkeypatch, caplog):
+    """The sweep runs on whoever happened to store the tile that crossed the
+    threshold, so a file that resists deletion is a log line, not a 500 — and it
+    still counts towards the total, which keeps the budget honest."""
+    store = make_store(tmp_path, storage=False, max_bytes=50)
+    cache = tmp_path / "cache"
+    stubborn = age(plant_image(cache, "111-250.jpg", data=b"x" * 100), 400)
+    evictable = age(plant_image(cache, "222-250.jpg", data=b"x" * 100), 300)
+
+    real_unlink = os.unlink
+
+    def refuse(path, *args, **kwargs):
+        if path == stubborn:
+            raise PermissionError("nope")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(store_mod.os, "unlink", refuse)
+    with caplog.at_level("WARNING", logger="beetdeck"):
+        result = store.sweep_cache()
+
+    assert os.path.exists(stubborn)
+    assert not os.path.exists(evictable)
+    assert result == CacheSweep(expired=0, evicted=1, freed_bytes=100, total_bytes=100)
+    assert any("could not be evicted" in message for message in caplog.messages)
+
+
+# --------------------------------------------------------------------------- #
+# when the sweep runs
+# --------------------------------------------------------------------------- #
+
+
+def counting_sweep(store):
+    """Replace `sweep_cache` with a counter; returns the list of call markers."""
+    calls = []
+
+    def sweep():
+        calls.append(True)
+        return CacheSweep()
+
+    store.sweep_cache = sweep
+    return calls
+
+
+def test_store_image_does_not_sweep_on_every_write(tmp_path):
+    """A cold 40-tile gallery must not stat and sort the whole cache root forty
+    times — the sweep is amortised behind a byte counter, not per write."""
+    store = make_store(tmp_path, storage=False, sweep_every_bytes=10 * 1024 * 1024)
+    calls = counting_sweep(store)
+
+    for n in range(8):
+        store.store_image(MBID, str(n), "250", image_bytes(), "image/jpeg")
+
+    assert calls == []
+
+
+def test_store_image_sweeps_once_the_threshold_is_crossed(tmp_path):
+    data = image_bytes()
+    store = make_store(tmp_path, storage=False, sweep_every_bytes=len(data) * 3)
+    calls = counting_sweep(store)
+
+    for n in range(3):
+        store.store_image(MBID, str(n), "250", data, "image/jpeg")
+    assert len(calls) == 1
+
+    # …and the counter starts over, so the next sweep needs another threshold's
+    # worth of writes rather than firing on each one that follows.
+    store.store_image(MBID, "4", "250", data, "image/jpeg")
+    assert len(calls) == 1
+
+
+def test_a_write_into_the_storage_root_never_triggers_a_sweep(tmp_path):
+    """Storage writes are not cache pressure; counting them would sweep the
+    cache on behalf of files that will never be evicted."""
+    store = make_store(tmp_path, sweep_every_bytes=1)
+    calls = counting_sweep(store)
+
+    store.store_image(MBID, "111", "250", image_bytes(), "image/jpeg")
+
+    assert calls == []
+    assert store._unswept_bytes == 0
+
+
+def test_a_burst_of_writers_is_handed_exactly_one_sweep(tmp_path):
+    """The counter is reset under its own lock by whichever caller is handed the
+    sweep, so eight threads crossing the threshold together produce one pass."""
+    store = make_store(tmp_path, storage=False, sweep_every_bytes=800)
+    owed = []
+    barrier = threading.Barrier(8)
+
+    def worker():
+        barrier.wait(timeout=5)
+        if store._note_cache_write(100):
+            owed.append(True)
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+        assert not thread.is_alive()
+
+    assert owed == [True]
+    assert store._unswept_bytes == 0
+
+
+def test_the_sweep_threshold_defaults_to_a_fraction_of_the_budget(tmp_path):
+    store = make_store(tmp_path, max_bytes=512 * 1024 * 1024)
+    assert store.sweep_every_bytes == 32 * 1024 * 1024
+
+
+def test_the_sweep_threshold_has_a_floor_so_a_tiny_budget_still_sweeps(tmp_path):
+    """A 4 MB cache would otherwise wait for 256 KB — that part is fine — but a
+    budget below the floor must not compute a threshold of zero and sweep per
+    write, which is the cost this counter exists to avoid."""
+    store = make_store(tmp_path, max_bytes=1024)
+    assert store.sweep_every_bytes == 1024 * 1024
