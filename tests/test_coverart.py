@@ -318,10 +318,28 @@ class TestNormalizeImages:
                 {"image": "https://x/b.jpg"},
                 {"id": True, "image": "https://x/c.jpg"},
                 "garbage",
+                # Arabic-Indic digits: `isdigit()` alone accepts them and `int()`
+                # transliterates them into a *different* id than CAA sent, so the
+                # record would be written under an id nothing can address again.
+                {"id": "١٢٣", "image": "https://x/e.jpg"},
+                {"id": -7, "image": "https://x/f.jpg"},
                 {"id": 7, "image": "https://x/d.jpg"},
             ]
         }
         assert [r["image_id"] for r in normalize_images(payload)] == ["7"]
+
+    def test_a_non_ascii_digit_thumbnail_key_is_not_transliterated(self):
+        """Same rule as the id, on the other axis: `"٢٥٠"` is not `"250"`.
+
+        Accepting it would put a key in `urls` that `thumb_sizes` advertises and
+        the binary route then rejects, and one CAA never published.
+        """
+        payload = {
+            "images": [
+                {"id": 5, "image": "https://x/5.jpg", "thumbnails": {"٢٥٠": "https://x/5-x.jpg"}}
+            ]
+        }
+        assert normalize_images(payload)[0]["urls"] == {"full": "https://x/5.jpg"}
 
     def test_a_non_string_thumbnail_url_is_skipped(self):
         payload = {

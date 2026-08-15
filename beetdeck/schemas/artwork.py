@@ -90,11 +90,12 @@ class ArtworkImage(BaseModel):
     thumb_sizes: list[int] = Field(
         default_factory=list,
         description=(
-            "Thumbnail widths available for this image, **ascending ints** derived "
-            "from the numeric CAA thumbnail keys (250/500/1200). The ``small`` / "
-            "``large`` aliases are filtered out — the binary route rejects any size "
-            "outside this set with a 400, so advertising an alias would make the API "
-            "contradict itself."
+            "Thumbnail widths available for this image, **ascending ints** and "
+            "always a subset of 250/500/1200. CAA's ``small`` / ``large`` keys are "
+            "translated to 250 / 500 upstream of this field; any other key CAA "
+            "publishes is filtered out — the binary route rejects a size outside "
+            "this set with a 400, so advertising one would make the API contradict "
+            "itself."
         ),
     )
     mb_url: str = Field(

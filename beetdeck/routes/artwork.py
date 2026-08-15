@@ -67,9 +67,26 @@ DEFAULT_IMAGE_SIZE = "250"
 #: image as the album's cover art, which no caller ever means.
 FULL_IMAGE_SIZE = "full"
 
+#: The renditions `thumb_sizes` may advertise — `IMAGE_SIZES` minus the original.
+#: Derived from the set `sanitize_size` enforces, so the menu the grid picks from
+#: and the answers the binary route accepts cannot drift apart: a rendition CAA
+#: starts publishing under a key this build does not know would otherwise be
+#: advertised here and then `400`ed on request, the API contradicting itself
+#: rather than a tile simply not offering a size.
+THUMBNAIL_SIZES = tuple(size for size in IMAGE_SIZES if size != FULL_IMAGE_SIZE)
+
 #: How long a browser may keep a proxied image. The bytes behind one
 #: `(image_id, size)` never change — CAA gives a new id to a new scan.
 IMAGE_CACHE_CONTROL = "public, max-age=86400"
+
+#: What a caller is told when the disk layer itself failed. `ArtworkStore` writes
+#: and re-raises rather than swallowing, and neither root is guaranteed writable
+#: for the life of the process — a permanent mirror fills up, and a remounted
+#: volume goes read-only under a running app. Uncaught, that surfaces as Flask's
+#: HTML 500 on a blueprint whose every other answer is `{"error": …}`, so the
+#: SPA's `r.json()` yields null and the gallery hangs on its loading state with
+#: nothing to retry. The operator's detail goes to the log, not to the client.
+STORAGE_FAILED = "the artwork store could not be written"
 
 
 def _album_row(album_id):
@@ -149,9 +166,7 @@ def _project(record, dims, mb_url):
 
     urls = record.get("urls")
     thumb_sizes = sorted(
-        int(key)
-        for key in (urls if isinstance(urls, dict) else {})
-        if str(key).isascii() and str(key).isdigit()
+        int(key) for key in (urls if isinstance(urls, dict) else {}) if key in THUMBNAIL_SIZES
     )
     types = record.get("types")
     comment = record.get("comment")
@@ -230,7 +245,11 @@ def album_artwork(album_id):
         # `not_found` is persisted like any other listing: CAA answering "no art
         # for this release" is a fact with a shelf life, and re-asking it on
         # every page load would spend the courtesy budget on a known answer.
-        stored = store.replace_metadata(mbid, result.images)
+        try:
+            stored = store.replace_metadata(mbid, result.images)
+        except OSError as exc:
+            log.error("artwork index for %s could not be written: %s", mbid, exc)
+            return jsonify({"error": STORAGE_FAILED}), 500
         source, fetched_at = REMOTE, None
         records, dims = stored.images, stored.dims
 
@@ -341,15 +360,24 @@ def album_artwork_image(album_id, image_id):
         # serve. The listing route is where that is explained in words.
         return jsonify({"error": "Image not found"}), 404
 
-    stored, error, status = _resolve_image(store, mbid, image_id, size)
-    if stored is None:
-        return jsonify({"error": error}), status
+    # `send_file` is inside the same guard as the resolve: `find_image` hands
+    # back a path, and the inline cache sweep runs on whichever thread crossed
+    # the byte threshold — so the file can be evicted between the two, and
+    # `send_file` opens it eagerly.
+    try:
+        stored, error, status = _resolve_image(store, mbid, image_id, size)
+        if stored is None:
+            return jsonify({"error": error}), status
 
-    response = (
-        send_file(stored.path, mimetype=stored.content_type)
-        if stored.content_type
-        else send_file(stored.path)
-    )
+        response = (
+            send_file(stored.path, mimetype=stored.content_type)
+            if stored.content_type
+            else send_file(stored.path)
+        )
+    except OSError as exc:
+        log.error("artwork image %s/%s (%s) could not be served: %s", mbid, image_id, size, exc)
+        return jsonify({"error": STORAGE_FAILED}), 500
+
     response.headers["Cache-Control"] = IMAGE_CACHE_CONTROL
     return response
 
@@ -397,7 +425,11 @@ def apply_artwork_image(album_id, image_id):
     except ValueError:
         return jsonify({"error": "Image not found"}), 404
 
-    stored, error, status = _resolve_image(store, mbid, image_id, FULL_IMAGE_SIZE)
+    try:
+        stored, error, status = _resolve_image(store, mbid, image_id, FULL_IMAGE_SIZE)
+    except OSError as exc:
+        log.error("artwork original %s/%s could not be stored: %s", mbid, image_id, exc)
+        return jsonify({"error": STORAGE_FAILED}), 500
     if stored is None:
         return jsonify({"error": error}), status
 

@@ -148,6 +148,15 @@ shared `common.py`). Do not maintain an endpoint table here — read the spec.
   be reached, so nothing was established). `source` (`storage`/`cache`/`remote`)
   and `fetched_at` say where the listing came from and how old it is; `?refresh=1`
   bypasses `ARTWORK_META_TTL`.
+- All three artwork routes answer `500 {"error": "the artwork store could not be
+  written"}` when the **disk layer** fails — a permanent mirror that filled up, a
+  volume remounted read-only under a running app. `ArtworkStore` re-raises rather
+  than swallowing, and an uncaught `OSError` would surface as Flask's HTML 500 on
+  a blueprint whose every other answer is JSON: the SPA's `r.json()` then yields
+  null, which it reads as "still loading", and the gallery sits on its skeleton
+  with nothing to retry. The operator's detail goes to the log, not to the
+  client. On the binary route the guard spans `send_file` too, not just the
+  resolve — the inline cache sweep can evict the file between the two.
 - `width`/`height` on an artwork image are the **original's** measured pixel
   size and are `null` until the original has actually been fetched (fullscreen
   or apply). CAA publishes no dimensions at all, so anything reported here was
@@ -296,6 +305,12 @@ Behaviours this app works around:
   enabled, re-embeds the album and can delete the art file, which from inside our
   embed would be re-entrant. It also chmods the resized file: `tempfile` hands
   out 0600 regardless of umask, and `move()` carries that mode into the library.
+  It **resizes before it removes**, and the order is load-bearing: nothing
+  upstream proves `src_path` is a decodable image (`…/cover/upload` checks only
+  the filename extension, and the artwork apply route stores an unrecognised
+  `Content-Type` under `.bin` rather than dropping the bytes), so deleting the
+  album's existing `cover/folder/front.*` first would mean a PIL failure answers
+  `500` with the user's cover already gone and `artpath` pointing at nothing.
 - An instrumental verdict lives in the `lyrics_instrumental` flex attr and has
   more than one truthy spelling (`'1'` from the 2.13.0 migration, `1` from a
   `types.BOOLEAN` write) — `_is_instrumental()` is the single rule. It is surfaced

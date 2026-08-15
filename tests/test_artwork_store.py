@@ -680,6 +680,35 @@ def test_find_image_ignores_a_concurrent_writers_tmp_file(tmp_path):
     assert store.find_image(MBID, "111", "250") is None
 
 
+def test_find_image_works_under_a_root_whose_path_has_glob_metacharacters(tmp_path):
+    """The roots come from `BEETS_ARTWORK_*_DIR` (or `$TMPDIR`), not from us.
+
+    A `[` anywhere in that path is a character class to `glob`, so an unescaped
+    pattern matches nothing: every request re-downloads, the mirror is dead
+    weight, and nothing in the log says so.
+    """
+    root = tmp_path / "music [2026]"
+    store = ArtworkStore(storage_dir=str(root / "storage"), cache_dir=str(root / "cache"))
+    plant_image(root / "storage", "111-250.jpg")
+
+    found = store.find_image(MBID, "111", "250")
+
+    assert found is not None
+    assert found.path.endswith("111-250.jpg")
+
+
+def test_store_image_replaces_a_stale_file_under_a_glob_metacharacter_root(tmp_path):
+    """Same escape, the other call site: an unescaped sweep leaves both files
+    behind and lets glob order decide which one is served."""
+    root = tmp_path / "music [2026]"
+    store = ArtworkStore(storage_dir=str(root / "storage"), cache_dir=str(root / "cache"))
+    store.store_image(MBID, "111", "full", image_bytes(fmt="PNG"), "image/png")
+    store.store_image(MBID, "111", "full", image_bytes(fmt="JPEG"), "image/jpeg")
+
+    entries = sorted(os.listdir(os.path.join(str(root / "storage"), MBID)))
+    assert [name for name in entries if name.startswith("111-full")] == ["111-full.jpg"]
+
+
 def test_find_image_sanitizes_its_inputs(tmp_path):
     store = make_store(tmp_path)
     with pytest.raises(ValueError):

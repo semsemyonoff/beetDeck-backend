@@ -1,5 +1,6 @@
 """Shared test fixtures for beetDeek tests."""
 
+import atexit
 import sqlite3
 
 import httpx
@@ -250,7 +251,14 @@ def app(db_path, tmp_path, artwork_dirs, caa_transport):
             **artwork_dirs,
         }
     )
-    return application
+    yield application
+    # `create_app` registers `caa_client.close` with `atexit` — right for a
+    # process that builds one app, but the suite builds one per test, so without
+    # this every `httpx.Client` is kept alive by its own atexit entry until the
+    # interpreter exits.
+    caa_client = application.extensions["beetdeck_caa"]
+    atexit.unregister(caa_client.close)
+    caa_client.close()
 
 
 @pytest.fixture()

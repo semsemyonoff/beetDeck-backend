@@ -149,11 +149,13 @@ def sanitize_mbid(value: Any) -> str:
 def sanitize_image_id(value: Any) -> str:
     """The CAA image id as a **decimal string**, or `ValueError`.
 
-    Same canonical spelling as `beetdeck.coverart._coerce_image_id`: CAA sends a
-    number, beets flex attrs are TEXT, and one representation on both sides is
-    what keeps `current_image_id === image_id` true in the browser after a
-    reload. Here it doubles as path-traversal protection — the id becomes a
-    filename, and a value made of digits has no filesystem surface at all.
+    The **single** spelling of the rule: `beetdeck.coverart.normalize_images`
+    calls this too, so the id written into the index is the one every later
+    request re-sanitizes. CAA sends a number, beets flex attrs are TEXT, and one
+    representation on both sides is what keeps `current_image_id === image_id`
+    true in the browser after a reload. Here it doubles as path-traversal
+    protection — the id becomes a filename, and a value made of digits has no
+    filesystem surface at all.
     """
     if isinstance(value, bool):
         raise ValueError(f"{value!r} is not a Cover Art Archive image id")
@@ -423,7 +425,14 @@ class ArtworkStore:
         image_id = sanitize_image_id(image_id)
         size = sanitize_size(size)
         for root, kind in self.read_roots:
-            pattern = os.path.join(self.release_dir(root, mbid), f"{image_id}-{size}.*")
+            # `glob.escape` the directory, never the pattern: the roots come from
+            # `BEETS_ARTWORK_*_DIR` (or `$TMPDIR`), and a `[` anywhere in that
+            # path would be read as a character class — the glob would then match
+            # nothing, every request would re-download, and the mirror would be
+            # dead weight with nothing in the log to say so.
+            pattern = os.path.join(
+                glob.escape(self.release_dir(root, mbid)), f"{image_id}-{size}.*"
+            )
             for path in sorted(glob.glob(pattern)):
                 if os.path.splitext(path)[1].lower() not in _OWNED_EXTENSIONS:
                     continue
@@ -472,7 +481,7 @@ class ArtworkStore:
 
         # A re-store whose Content-Type changed would otherwise leave the old
         # file beside the new one and let glob order decide which is served.
-        for stale in glob.glob(os.path.join(directory, f"{image_id}-{size}.*")):
+        for stale in glob.glob(os.path.join(glob.escape(directory), f"{image_id}-{size}.*")):
             if stale == path or os.path.splitext(stale)[1].lower() not in _OWNED_EXTENSIONS:
                 continue
             try:

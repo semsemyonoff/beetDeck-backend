@@ -50,6 +50,7 @@ from typing import Any
 
 import httpx
 
+from beetdeck.artwork_store import sanitize_image_id
 from beetdeck.utils import log
 
 CAA_BASE_URL = "https://coverartarchive.org"
@@ -153,22 +154,6 @@ class CaaImageResult:
 THUMBNAIL_ALIASES = {"small": "250", "large": "500"}
 
 
-def _coerce_image_id(value: Any) -> str | None:
-    """A CAA image id as a **decimal string**, or `None` when it is not one.
-
-    CAA sends a number and beets flex attrs are TEXT; one canonical spelling on
-    both sides is what keeps `current_image_id === image_id` true in the browser
-    after a reload.
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, str) and value.strip().isdigit():
-        return str(int(value.strip()))
-    return None
-
-
 def normalize_images(payload: Any) -> list[dict[str, Any]]:
     """The CAA payload projected onto the **internal** record.
 
@@ -197,8 +182,14 @@ def normalize_images(payload: Any) -> list[dict[str, Any]]:
     for entry in images:
         if not isinstance(entry, dict):
             continue
-        image_id = _coerce_image_id(entry.get("id"))
-        if image_id is None:
+        # `sanitize_image_id` rather than a second spelling of the same rule:
+        # the id this writes into the index is the one every later request
+        # sanitizes again, and two implementations that drift produce a record
+        # nothing can ever address. It rejects rather than returns `None`, and a
+        # rejected entry is simply not a CAA image — drop it and move on.
+        try:
+            image_id = sanitize_image_id(entry.get("id"))
+        except ValueError:
             continue
 
         urls: dict[str, str] = {}
@@ -209,7 +200,7 @@ def normalize_images(payload: Any) -> list[dict[str, Any]]:
                 if not isinstance(url, str) or not url:
                     continue
                 size = str(key).strip()
-                if size.isdigit():
+                if size.isascii() and size.isdigit():
                     urls[str(int(size))] = url
                 elif size.lower() in THUMBNAIL_ALIASES:
                     aliased[THUMBNAIL_ALIASES[size.lower()]] = url

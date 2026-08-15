@@ -424,10 +424,17 @@ def _save_cover_to_album(album, src_path):
 
     items = list(album.items())
     album_dir = _common_parent_dir([_resolve_path(it.path) for it in items]) if items else None
-    _remove_cover_files(album_dir)
 
+    # Decode and resize **before** deleting anything: this is the first
+    # destructive step, and ``src_path`` is not guaranteed to be a decodable
+    # image. The Cover Art Archive apply route hands over whatever the archive
+    # served — an HTML error page under a 200, or a truncated body, is stored
+    # with a ``.bin`` extension and reaches here intact. With the removal first,
+    # PIL raising would answer 500 having already deleted the album's existing
+    # cover files and left ``artpath`` pointing at nothing.
     hires_path = _resize_image(src_path, COVER_HIRES_MAX, quality=95)
     try:
+        _remove_cover_files(album_dir)
         hires_bytes = bytestring_path(hires_path)
         if album_dir:
             artdest = album.art_destination(hires_bytes, item_dir=bytestring_path(album_dir))
