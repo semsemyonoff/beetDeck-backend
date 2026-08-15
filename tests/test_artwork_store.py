@@ -806,12 +806,15 @@ def test_store_image_keeps_a_real_image_sent_under_an_unknown_content_type(tmp_p
     assert store.read_index(MBID).dims == {"111": {"full": [300, 200]}}
 
 
-def test_store_image_refuses_bytes_that_are_not_an_image(tmp_path):
-    """Neither a type this store knows nor anything PIL can decode — an upstream
-    error page under a `200`, not artwork. In storage mode there is no TTL and no
-    sweep, so mirroring one would break the rendition permanently."""
+@pytest.mark.parametrize("content_type", ["text/html", "image/jpeg"])
+def test_store_image_refuses_bytes_that_are_not_an_image(tmp_path, content_type):
+    """Nothing PIL can decode is an upstream error page under a `200`, not
+    artwork — and the `Content-Type` does not get a say. A CDN claiming
+    `image/jpeg` over an HTML body would otherwise be mirrored under a name
+    `find_image` answers with; in storage mode there is no TTL and no sweep, so
+    that breaks the rendition permanently."""
     store = make_store(tmp_path)
-    stored = store.store_image(MBID, "111", "full", b"<html>gone</html>", "text/html")
+    stored = store.store_image(MBID, "111", "full", b"<html>gone</html>", content_type)
 
     assert stored is None
     assert store.find_image(MBID, "111", "full") is None

@@ -459,6 +459,59 @@ def test_a_stale_index_is_refreshed(client, album_id, caa, app):
     assert [i["image_id"] for i in body["images"]] == ["1234567890", "9876543210"]
 
 
+def test_a_stale_index_is_served_when_the_refresh_cannot_be_made(client, album_id, caa, app):
+    """An expired TTL is not a reason to fail a gallery the disk can answer.
+
+    The images this listing names are mirrored beside it, so a `502` here would
+    take the whole page down at the one moment the permanent mirror exists for.
+    The age is reported (`source` / `fetched_at` are the index's own), not hidden.
+    """
+    write_index(
+        app,
+        {
+            "fetched_at": "2001-01-01T00:00:00Z",
+            "images": [
+                stored_record(FRONT_IMAGE, {"250": "https://coverartarchive.org/release/x/old.jpg"})
+            ],
+            "dims": {"1234567890": {"full": [1425, 1425]}},
+        },
+    )
+    caa.raises = httpx.ConnectError("down")
+
+    resp = client.get(f"/api/album/{album_id}/artwork")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["source"] == "storage"
+    assert body["fetched_at"] == "2001-01-01T00:00:00Z"
+    assert [i["image_id"] for i in body["images"]] == ["1234567890"]
+    assert body["images"][0]["width"] == 1425
+    # The failed lookup established nothing, so it rewrote nothing either.
+    assert read_index(app)["fetched_at"] == "2001-01-01T00:00:00Z"
+
+
+def test_a_refresh_over_a_stale_index_still_reports_an_unreachable_caa(client, album_id, caa, app):
+    """`?refresh=1` asks for fresh metadata; answering from disk would ignore it.
+
+    The fallback above is for the ordinary page load. An explicit refresh that
+    could not run is an outage the user asked about and must be told about.
+    """
+    write_index(
+        app,
+        {
+            "fetched_at": "2001-01-01T00:00:00Z",
+            "images": [stored_record(FRONT_IMAGE, {"250": "https://coverartarchive.org/x.jpg"})],
+            "dims": {},
+        },
+    )
+    caa.raises = httpx.ConnectError("down")
+
+    resp = client.get(f"/api/album/{album_id}/artwork?refresh=1")
+
+    assert resp.status_code == 502
+    assert "unreachable" in resp.get_json()["error"]
+
+
 def test_a_refresh_keeps_the_dims_already_measured(client, album_id, app):
     """`replace_metadata`, not a blind overwrite — a tile download races this."""
     write_index(
@@ -804,6 +857,28 @@ def test_an_image_transport_failure_is_502(client, album_id, caa):
 
     assert resp.status_code == 502
     assert "unreachable" in resp.get_json()["error"]
+
+
+def test_a_non_image_under_an_image_content_type_is_502_and_is_not_mirrored(
+    client, album_id, caa, app
+):
+    """The header is a claim; the decode is the test.
+
+    An error page served as `image/jpeg` would otherwise be published under a
+    name `find_image` answers with — and in storage mode nothing expires it, so
+    the tile would be broken and the apply route would `500` forever.
+    """
+    caa.image_content_type = "image/jpeg"
+    caa.image_data = b"<html><body>Item not available</body></html>"
+
+    resp = client.get(image_url(album_id, size=250))
+
+    assert resp.status_code == 502
+    release_dir = os.path.join(app.config["ARTWORK_STORAGE_DIR"], MBID)
+    assert [name for name in os.listdir(release_dir) if name.startswith("1234567890")] == []
+    # And the next request is free to try again rather than serving the refusal.
+    caa.image_data = image_bytes()
+    assert client.get(image_url(album_id, size=250)).status_code == 200
 
 
 def test_a_stored_url_off_the_archive_is_refused_rather_than_fetched(client, album_id, caa):

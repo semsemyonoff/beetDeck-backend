@@ -241,17 +241,35 @@ def album_artwork(album_id):
     else:
         result = current_app.extensions["beetdeck_caa"].fetch_release(mbid)
         if not result.ok:
-            return jsonify({"error": result.message}), 502
-        # `not_found` is persisted like any other listing: CAA answering "no art
-        # for this release" is a fact with a shelf life, and re-asking it on
-        # every page load would spend the courtesy budget on a known answer.
-        try:
-            stored = store.replace_metadata(mbid, result.images)
-        except OSError as exc:
-            log.error("artwork index for %s could not be written: %s", mbid, exc)
-            return jsonify({"error": STORAGE_FAILED}), 500
-        source, fetched_at = REMOTE, None
-        records, dims = stored.images, stored.dims
+            if index is None:
+                # Nothing on disk and nothing upstream: nothing about this
+                # release was ever established, which is what a 502 says.
+                return jsonify({"error": result.message}), 502
+            # A stale index, on the other hand, *is* an answer — and in storage
+            # mode the images it lists are mirrored beside it, so failing the
+            # whole gallery over an expired `ARTWORK_META_TTL` would break it
+            # exactly when the permanent mirror is what should carry it. Served
+            # as it stands, with its own `source`/`fetched_at`: the age is
+            # reported rather than papered over, and `?refresh=1` (which never
+            # reads the index) still surfaces the outage as a 502.
+            log.warning(
+                "artwork listing for %s could not be refreshed, serving the stale index: %s",
+                mbid,
+                result.message,
+            )
+            source, fetched_at = index.source, index.fetched_at
+            records, dims = index.images, index.dims
+        else:
+            # `not_found` is persisted like any other listing: CAA answering "no
+            # art for this release" is a fact with a shelf life, and re-asking it
+            # on every page load would spend the courtesy budget on a known answer.
+            try:
+                stored = store.replace_metadata(mbid, result.images)
+            except OSError as exc:
+                log.error("artwork index for %s could not be written: %s", mbid, exc)
+                return jsonify({"error": STORAGE_FAILED}), 500
+            source, fetched_at = REMOTE, None
+            records, dims = stored.images, stored.dims
 
     images = [_project(record, dims, f"{MB_RELEASE_URL}{mbid}") for record in records]
     return jsonify(

@@ -450,16 +450,18 @@ class ArtworkStore:
     ) -> StoredImage | None:
         """Write one fetched image into the write root and measure it.
 
-        `None` when the bytes are **not an image**: neither a `Content-Type` this
-        store recognises nor something `_image_size` can decode. An unrecognised
-        header alone is still stored (under `.bin`) — losing a real scan over a
-        header nobody knows is the worse trade, and PIL sniffs content, not
-        extensions — but bytes that fail *both* tests are an upstream error page,
-        not artwork. Publishing one is not recoverable from inside the app: in
-        storage mode the write root has no TTL and the sweep never looks at it,
-        while `find_image` short-circuits every later request, so a single HTML
-        `200` would break that rendition forever. The caller turns this into the
-        same transient `502` every other bad upstream answer gets.
+        `None` when the bytes are **not an image** — nothing `_image_size` can
+        decode. The `Content-Type` is not part of that test in either direction:
+        an unrecognised header alone is still stored (under `.bin`), because
+        losing a real scan over a header nobody knows is the worse trade and PIL
+        sniffs content rather than extensions; and a *recognised* one does not
+        make an HTML error page under a `200` into artwork — a CDN that answers
+        `image/jpeg` with something else is exactly the case the decode catches.
+        Publishing one is not recoverable from inside the app: in storage mode
+        the write root has no TTL and the sweep never looks at it, while
+        `find_image` short-circuits every later request, so a single HTML `200`
+        would break that rendition forever. The caller turns this into the same
+        transient `502` every other bad upstream answer gets.
 
         The bytes are written atomically and measured **outside** the index
         lock; the lock is then taken exactly once to merge the measurement into
@@ -487,7 +489,7 @@ class ArtworkStore:
             # cleanup below never runs, leaving whatever good rendition is
             # already on disk exactly where it is.
             measured = _image_size(tmp)
-            if measured is None and os.path.splitext(path)[1].lower() == _FALLBACK_EXTENSION:
+            if measured is None:
                 os.unlink(tmp)
                 return None
             os.replace(tmp, path)

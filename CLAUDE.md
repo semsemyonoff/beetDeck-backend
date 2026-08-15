@@ -150,9 +150,15 @@ shared `common.py`). Do not maintain an endpoint table here — read the spec.
   album has no release MBID; still a `200`, the album exists), `available: true`
   with an empty `images` (CAA answered `404`, which is its normal way of saying
   this release has no art — a fact about the release), and `502` (CAA could not
-  be reached, so nothing was established). `source` (`storage`/`cache`/`remote`)
-  and `fetched_at` say where the listing came from and how old it is; `?refresh=1`
-  bypasses `ARTWORK_META_TTL`.
+  be reached **and** no index for the release is on disk, so nothing was ever
+  established). An unreachable CAA over an index that has merely gone stale is
+  *not* a `502`: the stale listing is served as it stands, because in storage
+  mode its images are mirrored beside it and an expired `ARTWORK_META_TTL` is no
+  reason to fail a gallery the disk can answer in full. `source`
+  (`storage`/`cache`/`remote`) and `fetched_at` say where the listing came from
+  and how old it is, so the age is reported rather than hidden; `?refresh=1`
+  bypasses `ARTWORK_META_TTL` — and, since it never reads the index, still
+  reports an outage as a `502`.
 - All three artwork routes answer `500 {"error": "the artwork store could not be
   written"}` when the **disk layer** fails — a permanent mirror that filled up, a
   volume remounted read-only under a running app. `ArtworkStore` re-raises rather
