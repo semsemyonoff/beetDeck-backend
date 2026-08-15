@@ -1,4 +1,4 @@
-"""`GET /api/album/<id>/artwork` — the Cover Art Archive listing route.
+"""`GET /api/album/<id>/artwork[/<image_id>]` — the Cover Art Archive routes.
 
 Only the outbound CAA HTTP is mocked, through the transport the app factory
 injects into the app-scoped `CaaClient` (`tests/conftest.py`). Everything else is
@@ -14,14 +14,22 @@ Three contracts these tests exist to pin, beyond the happy path:
 * the response never carries a `urls` map. `ArtworkImage` forbids extras, so a
   route that forgot to project would 500 here rather than leak an upstream URL
   into the page.
+
+The binary route adds two of its own: the mirror is **lazy** (one rendition per
+request, never a set), and a cold fetch reads its URL out of an `index.json` the
+*listing route* wrote — which is why the closing test drives both routes rather
+than hand-building a richer index than the code actually produces.
 """
 
 import json
 import os
+import re
 import sqlite3
+from io import BytesIO
 
 import httpx
 import pytest
+from PIL import Image
 
 from beetdeck.artwork_store import INDEX_FILENAME
 from beetdeck.coverart import RateGate
@@ -64,8 +72,28 @@ BOOKLET_IMAGE = {
 CAA_PAYLOAD = {"release": MB_URL, "images": [FRONT_IMAGE, BOOKLET_IMAGE]}
 
 
+def image_bytes(width=250, height=250, fmt="JPEG"):
+    """Real encoded image bytes — the store measures a header, not a mock."""
+    buffer = BytesIO()
+    Image.new("RGB", (width, height), "red").save(buffer, format=fmt)
+    return buffer.getvalue()
+
+
+#: What a *listing* URL looks like: `/release/<mbid>` and nothing after it.
+#: Deliberately not a `"/release/" in url` substring test — an image's original
+#: lives at `/release/<mbid>/<image_id>.jpg`, so the substring matches both and a
+#: request for `?size=full` would be answered with the JSON payload.
+LISTING_URL = re.compile(r"/release/[0-9a-fA-F-]{36}$")
+
+
 class FakeCaa:
-    """A scriptable Cover Art Archive, plus the record of what was asked of it."""
+    """A scriptable Cover Art Archive, plus the record of what was asked of it.
+
+    One handler serves both halves of the upstream: `/release/<mbid>` answers the
+    JSON listing, and every other URL is an image request. `calls` keeps them in
+    one list on purpose — several tests assert on *what* was fetched, not only on
+    how much.
+    """
 
     def __init__(self):
         self.calls = []
@@ -73,9 +101,23 @@ class FakeCaa:
         self.payload = CAA_PAYLOAD
         self.body = None
         self.raises = None
+        self.image_status = 200
+        self.image_content_type = "image/jpeg"
+        self.image_data = image_bytes()
+        self.image_raises = None
+
+    @property
+    def image_calls(self):
+        return [url for url in self.calls if not LISTING_URL.search(url)]
+
+    @property
+    def listing_calls(self):
+        return [url for url in self.calls if LISTING_URL.search(url)]
 
     def handler(self, request):
         self.calls.append(str(request.url))
+        if not LISTING_URL.search(str(request.url)):
+            return self._image()
         if self.raises is not None:
             raise self.raises
         if self.body is not None:
@@ -83,6 +125,17 @@ class FakeCaa:
         if self.status == 200:
             return httpx.Response(200, json=self.payload)
         return httpx.Response(self.status, json={"error": "no"})
+
+    def _image(self):
+        if self.image_raises is not None:
+            raise self.image_raises
+        if self.image_status != 200:
+            return httpx.Response(self.image_status, text="nope")
+        return httpx.Response(
+            200,
+            content=self.image_data,
+            headers={"Content-Type": self.image_content_type},
+        )
 
 
 @pytest.fixture()
@@ -476,3 +529,287 @@ def test_an_unknown_query_param_is_tolerated(client, album_id):
     resp = client.get(f"/api/album/{album_id}/artwork?_=1699999999")
 
     assert resp.status_code == 200
+
+
+# --- the binary route: resolution order -------------------------------------
+
+
+def plant_image(root, name, mbid=MBID, data=None):
+    """Drop an image straight into a root, bypassing the store's write path."""
+    path = os.path.join(str(root), mbid, name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(data if data is not None else image_bytes())
+    return path
+
+
+def image_url(album_id, image_id="1234567890", size=None):
+    url = f"/api/album/{album_id}/artwork/{image_id}"
+    return url if size is None else f"{url}?size={size}"
+
+
+def test_an_image_in_storage_is_served_without_a_network_call(client, album_id, caa, app):
+    planted = plant_image(app.config["ARTWORK_STORAGE_DIR"], "1234567890-250.jpg")
+
+    resp = client.get(image_url(album_id, size=250))
+
+    assert resp.status_code == 200
+    with open(planted, "rb") as handle:
+        assert resp.data == handle.read()
+    assert resp.headers["Content-Type"] == "image/jpeg"
+    assert resp.headers["Cache-Control"] == "public, max-age=86400"
+    assert caa.calls == []
+
+
+def test_a_cache_only_image_is_served_while_storage_is_enabled(client, album_id, caa, app):
+    """Flipping storage on must not orphan what the cache already holds."""
+    plant_image(app.config["ARTWORK_CACHE_DIR"], "1234567890-500.png")
+
+    resp = client.get(image_url(album_id, size=500))
+
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"] == "image/png"
+    assert caa.calls == []
+    # …and it is not promoted into the storage root behind the request's back.
+    assert not os.path.exists(
+        os.path.join(app.config["ARTWORK_STORAGE_DIR"], MBID, "1234567890-500.png")
+    )
+
+
+def test_omitting_the_size_serves_the_smallest_rendition(client, album_id, app):
+    plant_image(app.config["ARTWORK_STORAGE_DIR"], "1234567890-250.jpg")
+
+    resp = client.get(image_url(album_id))
+
+    assert resp.status_code == 200
+
+
+def test_a_miss_is_fetched_stored_and_served(client, album_id, caa, app):
+    caa.image_data = image_bytes(500, 400)
+
+    resp = client.get(image_url(album_id, size=500))
+
+    assert resp.status_code == 200
+    assert resp.data == caa.image_data
+    assert caa.image_calls == ["https://caa/1234567890-500.jpg"]
+    # The bytes landed in the write root under the Content-Type's extension…
+    stored = os.path.join(app.config["ARTWORK_STORAGE_DIR"], MBID, "1234567890-500.jpg")
+    assert os.path.isfile(stored)
+    # …and were measured on the way in, which is the only source of dimensions.
+    assert read_index(app)["dims"]["1234567890"]["500"] == [500, 400]
+
+
+def test_a_stored_image_is_not_fetched_twice(client, album_id, caa):
+    """The mirror is the point: the second request must not leave the disk."""
+    client.get(image_url(album_id, size=500))
+    resp = client.get(image_url(album_id, size=500))
+
+    assert resp.status_code == 200
+    assert len(caa.image_calls) == 1
+
+
+def test_the_content_type_survives_the_round_trip(client, album_id, caa):
+    """The stored extension is the only surviving record of the CAA header."""
+    caa.image_content_type = "image/png"
+    caa.image_data = image_bytes(fmt="PNG")
+
+    resp = client.get(image_url(album_id, size="full"))
+
+    assert resp.status_code == 200
+    assert resp.headers["Content-Type"] == "image/png"
+
+
+# --- the binary route: the lazy mirror --------------------------------------
+
+
+def test_asking_for_full_does_not_pre_fetch_the_thumbnails(client, album_id, caa, app):
+    client.get(image_url(album_id, size="full"))
+
+    assert caa.image_calls == ["https://coverartarchive.org/release/x/1234567890.jpg"]
+    release_dir = os.path.join(app.config["ARTWORK_STORAGE_DIR"], MBID)
+    assert sorted(os.listdir(release_dir)) == ["1234567890-full.jpg", INDEX_FILENAME]
+
+
+def test_asking_for_a_thumbnail_does_not_pre_fetch_the_original(client, album_id, caa, app):
+    client.get(image_url(album_id, size=250))
+
+    assert caa.image_calls == ["https://caa/1234567890-250.jpg"]
+    release_dir = os.path.join(app.config["ARTWORK_STORAGE_DIR"], MBID)
+    assert sorted(os.listdir(release_dir)) == ["1234567890-250.jpg", INDEX_FILENAME]
+
+
+def test_only_the_requested_image_is_mirrored(client, album_id, caa):
+    """One tile is one fetch — the other scans in the release stay untouched."""
+    client.get(image_url(album_id, size=250))
+
+    assert caa.image_calls == ["https://caa/1234567890-250.jpg"]
+
+
+# --- the binary route: the refusals -----------------------------------------
+
+
+def test_unknown_album_is_404_for_an_image_too(client):
+    resp = client.get(image_url(4242, size=250))
+
+    assert resp.status_code == 404
+    assert resp.get_json() == {"error": "Album not found"}
+
+
+def test_an_album_without_a_release_id_has_no_image(client, db_path, caa):
+    album = insert_album(db_path, mb_albumid="")
+
+    resp = client.get(image_url(album, size=250))
+
+    assert resp.status_code == 404
+    assert caa.calls == []
+
+
+def test_an_image_id_outside_the_release_is_404(client, album_id, caa):
+    resp = client.get(image_url(album_id, image_id="5555555555", size=250))
+
+    assert resp.status_code == 404
+    assert resp.get_json() == {"error": "Image not found"}
+    # The listing was established once; the unknown id did not buy a second one.
+    assert caa.image_calls == []
+    assert len(caa.calls) == 1
+
+
+def test_an_unknown_id_against_an_existing_index_does_not_go_upstream(client, album_id, caa):
+    """One CAA lookup per release, not one per bad request."""
+    client.get(f"/api/album/{album_id}/artwork")
+    caa.calls.clear()
+
+    resp = client.get(image_url(album_id, image_id="5555555555", size=250))
+
+    assert resp.status_code == 404
+    assert caa.calls == []
+
+
+@pytest.mark.parametrize("size", ["0", "251", "small", "large", "", "-250"])
+def test_a_size_outside_the_set_is_400(client, album_id, caa, size):
+    resp = client.get(image_url(album_id, size=size))
+
+    assert resp.status_code == 400
+    assert "size must be one of" in resp.get_json()["error"]
+    assert caa.calls == []
+
+
+@pytest.mark.parametrize("size", ["full ", " 250", "FULL"])
+def test_a_padded_or_uppercased_size_is_normalised_rather_than_refused(client, album_id, app, size):
+    """`sanitize_size` strips and lowercases, so a stray space is not a refusal.
+
+    The value only ever names one of four renditions; taking the gallery down
+    over whitespace would be a worse failure than reading through it.
+    """
+    plant_image(app.config["ARTWORK_STORAGE_DIR"], "1234567890-250.jpg")
+    plant_image(app.config["ARTWORK_STORAGE_DIR"], "1234567890-full.jpg")
+
+    resp = client.get(image_url(album_id, size=size))
+
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize("image_id", ["12a", r"..%5C..%5Cetc", "-12", "12.0", "%D9%A1%D9%A2"])
+def test_a_non_numeric_image_id_is_400(client, album_id, caa, image_id):
+    """The id becomes a filename, so it is checked before any path is built.
+
+    The traversal case uses backslashes: `%2F` decodes to a separator werkzeug
+    splits on, so that shape never reaches the handler to be refused by it — the
+    router answers `404` first. What is pinned here is the handler's own check.
+    """
+    resp = client.get(image_url(album_id, image_id=image_id, size=250))
+
+    assert resp.status_code == 400
+    assert "image_id" in resp.get_json()["error"]
+    assert caa.calls == []
+
+
+def test_a_traversal_shaped_path_never_reaches_the_route(client, caa):
+    """`%2F` is a separator to werkzeug, so `..%2F..%2Fetc` is not one segment."""
+    resp = client.get("/api/album/1/artwork/..%2F..%2Fetc")
+
+    assert resp.status_code == 404
+    assert caa.calls == []
+
+
+def test_a_size_the_release_does_not_offer_is_400(client, album_id, caa):
+    """CAA stopped generating `1200` for older uploads — ask for another size."""
+    resp = client.get(image_url(album_id, image_id="9876543210", size=1200))
+
+    assert resp.status_code == 400
+    assert "1200" in resp.get_json()["error"]
+    assert caa.image_calls == []
+
+
+def test_a_failed_image_fetch_is_502(client, album_id, caa):
+    caa.image_status = 503
+
+    resp = client.get(image_url(album_id, size=250))
+
+    assert resp.status_code == 502
+    assert "503" in resp.get_json()["error"]
+
+
+def test_an_image_transport_failure_is_502(client, album_id, caa):
+    caa.image_raises = httpx.ConnectError("no route to host")
+
+    resp = client.get(image_url(album_id, size=250))
+
+    assert resp.status_code == 502
+    assert "unreachable" in resp.get_json()["error"]
+
+
+def test_a_failed_listing_lookup_is_502_for_a_cold_image(client, album_id, caa):
+    """No index and no CAA: nothing about this image was established."""
+    caa.raises = httpx.ConnectError("down")
+
+    resp = client.get(image_url(album_id, size=250))
+
+    assert resp.status_code == 502
+    assert "unreachable" in resp.get_json()["error"]
+
+
+def test_db_failure_is_500_for_an_image_too(client, db_path, album_id, app):
+    app.config["LIBRARY_DB"] = str(db_path) + ".missing"
+
+    resp = client.get(image_url(album_id, size=250))
+
+    assert resp.status_code == 500
+    assert "error" in resp.get_json()
+
+
+# --- the binary route against a real listing --------------------------------
+
+
+def test_a_cold_fetch_works_against_the_index_the_listing_route_wrote(client, album_id, caa, app):
+    """The loop closed: listing → `index.json` → cold binary fetch.
+
+    Deliberately not a hand-built index. A richer fixture here would hide the
+    exact defect this contract depends on — a `urls` map the listing route
+    dropped on the way to disk leaves the binary route with nowhere to go, and
+    only a real round trip through both routes can see that.
+    """
+    listing = client.get(f"/api/album/{album_id}/artwork").get_json()
+    assert listing["images"][0]["width"] is None
+    assert len(caa.calls) == 1
+    caa.image_data = image_bytes(1425, 1425)
+
+    resp = client.get(image_url(album_id, size="full"))
+
+    assert resp.status_code == 200
+    assert caa.image_calls == ["https://coverartarchive.org/release/x/1234567890.jpg"]
+    # No second listing lookup: the index the first request wrote was enough.
+    assert len(caa.listing_calls) == 1
+    # …and the measurement now shows up on the listing, which had none before.
+    refreshed = client.get(f"/api/album/{album_id}/artwork").get_json()
+    assert refreshed["images"][0]["width"] == 1425
+    assert refreshed["images"][0]["height"] == 1425
+
+
+def test_a_cold_fetch_in_cache_only_mode_lands_in_the_cache(client, album_id, app):
+    app.extensions["beetdeck_artwork_store"].storage_dir = None
+
+    resp = client.get(image_url(album_id, size=250))
+
+    assert resp.status_code == 200
+    assert os.path.isfile(os.path.join(app.config["ARTWORK_CACHE_DIR"], MBID, "1234567890-250.jpg"))

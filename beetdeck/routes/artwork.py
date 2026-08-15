@@ -11,6 +11,11 @@ What comes back is persisted through `ArtworkStore.replace_metadata`, never
 through a blind index overwrite — a refresh racing a tile download must not
 discard the dimensions that download just measured.
 
+The binary route reads through the same three layers and mirrors **lazily**:
+nothing is pre-downloaded, and a rendition is written to disk the first time
+somebody asks the proxy for that exact `(image_id, size)`. The gallery's own
+traffic is the mirroring trigger.
+
 Three outcomes stay distinct, per *Absence is not a fact*:
 
 * `available: false` — no gallery is possible at all (the album has no release
@@ -24,11 +29,11 @@ Three outcomes stay distinct, per *Absence is not a fact*:
 
 import sqlite3
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, jsonify, request, send_file
 from spectree import Response
 
 from beetdeck.api import api
-from beetdeck.artwork_store import sanitize_image_id, sanitize_mbid
+from beetdeck.artwork_store import IMAGE_SIZES, sanitize_image_id, sanitize_mbid, sanitize_size
 from beetdeck.schemas.artwork import ArtworkListQuery, ArtworkListResponse
 from beetdeck.schemas.common import ErrorResponse
 from beetdeck.utils import _get_ro_conn, log
@@ -48,6 +53,15 @@ BAD_MBID_REASON = "album's MusicBrainz id is not a release id"
 
 #: `source` values, mirroring `ArtworkListResponse.source`.
 REMOTE = "remote"
+
+#: What a binary request with no `?size=` means. The grid always states its size,
+#: but a bare URL has to resolve to something, and the smallest rendition is the
+#: one that costs the least to be wrong about.
+DEFAULT_IMAGE_SIZE = "250"
+
+#: How long a browser may keep a proxied image. The bytes behind one
+#: `(image_id, size)` never change — CAA gives a new id to a new scan.
+IMAGE_CACHE_CONTROL = "public, max-age=86400"
 
 
 def _album_row(album_id):
@@ -223,3 +237,99 @@ def album_artwork(album_id):
             images=[image for image in images if image is not None],
         )
     )
+
+
+def _resolve_cold(store, mbid, image_id, size):
+    """Fetch one image CAA has and this disk does not; `(stored, error, status)`.
+
+    The URL comes from the internal record's `urls` map — the only reason the
+    index persists it, and the only way to reach a cold image without guessing
+    the original's extension by convention.
+
+    A **stale** index is used as it stands: `urls` does not expire, and the
+    listing route is what refreshes metadata. A **missing** one is established
+    first, so "this image is not in the release" is something that was checked.
+    An unknown id against an index that does exist is *not* a reason to go
+    upstream — that would spend the courtesy budget once per bad request.
+    """
+    caa = current_app.extensions["beetdeck_caa"]
+    index = store.read_index(mbid)
+    if index is None:
+        result = caa.fetch_release(mbid)
+        if not result.ok:
+            return None, result.message, 502
+        index = store.replace_metadata(mbid, result.images)
+
+    record = next(
+        (entry for entry in index.images if _marker(entry.get("image_id")) == image_id),
+        None,
+    )
+    if record is None:
+        return None, "Image not found", 404
+
+    urls = record.get("urls")
+    url = urls.get(size) if isinstance(urls, dict) else None
+    if not url:
+        # The size is a valid one, this image just does not have it — CAA stopped
+        # generating `1200` for older uploads. A 400 says "ask for another size",
+        # which a 404 ("no such image") would misstate.
+        return None, f"this image has no {size} rendition", 400
+
+    fetched = caa.fetch_image(url)
+    if not fetched.ok:
+        return None, fetched.message, 502
+    stored = store.store_image(mbid, image_id, size, fetched.data, fetched.content_type)
+    return stored, None, None
+
+
+# NOTE: **left undecorated**, for the reason `cover.py:59-64` spells out — this
+# route streams bytes through ``send_file``, which puts the response into
+# direct-passthrough mode, and spectree's response post-processing calls
+# ``response.get_data()`` unconditionally on every decorated view, which raises
+# ``RuntimeError`` on such a response. So it does not appear in the OpenAPI spec.
+@bp.route("/api/album/<int:album_id>/artwork/<image_id>")
+def album_artwork_image(album_id, image_id):
+    """One scan's bytes, served from `storage → cache → CAA`.
+
+    Nothing is pre-downloaded: a rendition lands on disk the first time somebody
+    asks the proxy for *that* `(image_id, size)`. The gallery's own traffic is
+    what mirrors the release, which is why a request for `full` never pulls the
+    thumbnails and a thumbnail never pulls the original.
+    """
+    try:
+        image_id = sanitize_image_id(image_id)
+    except ValueError:
+        return jsonify({"error": "image_id must be a Cover Art Archive image id"}), 400
+    try:
+        size = sanitize_size(request.args.get("size", DEFAULT_IMAGE_SIZE))
+    except ValueError:
+        return jsonify({"error": f"size must be one of {list(IMAGE_SIZES)}"}), 400
+
+    store = current_app.extensions["beetdeck_artwork_store"]
+    try:
+        row = _album_row(album_id)
+    except sqlite3.OperationalError as exc:
+        return jsonify({"error": str(exc)}), 500
+    if row is None:
+        return jsonify({"error": "Album not found"}), 404
+
+    try:
+        mbid = sanitize_mbid(row[0])
+    except ValueError:
+        # No usable release id means no gallery, so there is no image here to
+        # serve. The listing route is where that is explained in words.
+        return jsonify({"error": "Image not found"}), 404
+
+    stored = store.find_image(mbid, image_id, size)
+    if stored is None:
+        stored, error, status = _resolve_cold(store, mbid, image_id, size)
+        if stored is None:
+            return jsonify({"error": error}), status
+
+    response = (
+        send_file(stored.path, mimetype=stored.content_type)
+        if stored.content_type
+        else send_file(stored.path)
+    )
+    response.headers["Cache-Control"] = IMAGE_CACHE_CONTROL
+    return response
