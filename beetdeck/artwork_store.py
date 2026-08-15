@@ -35,10 +35,16 @@ Locking. `_index_lock` is module-level, following `_fetchart_plugin_lock`
 held across the whole operation: a metadata refresh runs while a tile download is
 recording the dimensions it just measured, and an overwrite would drop those
 permanently — the image file already exists, so it is never measured again.
+
+`store_image` is the second lock owner and follows the same rule: it writes and
+measures the file *outside* the lock, then takes it once to merge the measurement
+into `dims`. Reaching for `read_index` / `replace_metadata` from inside it would
+be a second acquisition of a non-reentrant lock the caller already holds.
 """
 
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
@@ -48,7 +54,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from beetdeck.utils import log
+from beetdeck.utils import _image_size, log
 
 INDEX_FILENAME = "index.json"
 
@@ -60,6 +66,38 @@ DEFAULT_CACHE_MAX_BYTES = 512 * 1024 * 1024
 
 STORAGE = "storage"
 CACHE = "cache"
+
+#: The sizes a stored file can be keyed by — the numeric CAA thumbnails plus the
+#: original. `size` ends up in a filename, so it is checked here rather than
+#: trusted; the route validates it again to turn a bad one into a `400`.
+IMAGE_SIZES = ("250", "500", "1200", "full")
+
+#: `Content-Type` → extension. Thumbnails are always JPEG; originals may be PNG
+#: or GIF, so the extension cannot be assumed and the response has to say.
+_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
+#: Anything unrecognised is still stored — losing the bytes over a header we do
+#: not know is worse than an opaque extension — but it is not given an image
+#: extension it might not have.
+_FALLBACK_EXTENSION = ".bin"
+#: The way back: a stored file's extension is the only surviving record of the
+#: `Content-Type` it arrived with. `image/jpg` is dropped from the reverse map —
+#: it is an alias nobody should be served.
+_CONTENT_TYPES = {
+    ".jpg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+#: Extensions this store owns, so a re-store under a different `Content-Type`
+#: can drop the file it replaces without ever touching a concurrent writer's
+#: `.tmp` — which the `<id>-<size>.*` glob would otherwise match too.
+_OWNED_EXTENSIONS = frozenset(_EXTENSIONS.values()) | {_FALLBACK_EXTENSION}
 
 #: A release id is turned into a directory name, so it is checked rather than
 #: trusted. The value comes from the beets DB, which is not a trust boundary the
@@ -83,6 +121,51 @@ def sanitize_mbid(value: Any) -> str:
     if not _MBID_RE.match(text):
         raise ValueError(f"{value!r} is not a MusicBrainz release id")
     return text.lower()
+
+
+def sanitize_image_id(value: Any) -> str:
+    """The CAA image id as a **decimal string**, or `ValueError`.
+
+    Same canonical spelling as `beetdeck.coverart._coerce_image_id`: CAA sends a
+    number, beets flex attrs are TEXT, and one representation on both sides is
+    what keeps `current_image_id === image_id` true in the browser after a
+    reload. Here it doubles as path-traversal protection — the id becomes a
+    filename, and a value made of digits has no filesystem surface at all.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"{value!r} is not a Cover Art Archive image id")
+    text = str(value if value is not None else "").strip()
+    # `isdigit()` alone accepts Arabic-Indic and other non-ASCII digits, which
+    # `int()` would silently transliterate into a different id than the one the
+    # request asked for.
+    if not (text.isascii() and text.isdigit()):
+        raise ValueError(f"{value!r} is not a Cover Art Archive image id")
+    return str(int(text))
+
+
+def sanitize_size(value: Any) -> str:
+    """One of :data:`IMAGE_SIZES` as a string, or `ValueError`."""
+    text = str(value if value is not None else "").strip().lower()
+    if text not in IMAGE_SIZES:
+        raise ValueError(f"{value!r} is not an artwork size")
+    return text
+
+
+def extension_for(content_type: Any) -> str:
+    """The file extension a response with this `Content-Type` is stored under."""
+    text = str(content_type or "").split(";", 1)[0].strip().lower()
+    return _EXTENSIONS.get(text, _FALLBACK_EXTENSION)
+
+
+def content_type_for(path: str) -> str | None:
+    """The `Content-Type` a stored file is served with, or `None`.
+
+    The extension is the only record of the upstream header, so it is read back
+    rather than re-guessed. `None` for a file stored under the fallback
+    extension: the route lets Flask decide rather than asserting a type nobody
+    reported.
+    """
+    return _CONTENT_TYPES.get(os.path.splitext(path)[1].lower())
 
 
 def utc_now_iso() -> str:
@@ -121,6 +204,21 @@ class ArtworkIndex:
     images: list[dict[str, Any]] = field(default_factory=list)
     dims: dict[str, dict[str, list[int]]] = field(default_factory=dict)
     fresh: bool = False
+
+
+@dataclass(frozen=True)
+class StoredImage:
+    """One image file on disk: where it is and which root it came from.
+
+    `size` is `[width, height]` when the file could be measured and `None` when
+    it could not — a size is only ever reported as a fact after `_image_size`
+    actually read the header.
+    """
+
+    path: str
+    source: str
+    content_type: str | None = None
+    size: tuple[int, int] | None = None
 
 
 class ArtworkStore:
@@ -265,6 +363,96 @@ class ArtworkStore:
             self._write_index_unlocked(mbid, payload)
         _root, write_kind = self.write_root
         return self._to_index(mbid, write_kind, payload)
+
+    def find_image(self, mbid: str, image_id: str, size: str) -> StoredImage | None:
+        """The stored file for one image at one size, or `None` on a miss.
+
+        Roots are consulted in :attr:`read_roots` order and the first hit wins,
+        so a file the other mode wrote is still served — but it is **not**
+        promoted into the write root. Copying it would be a duplicate nobody
+        asked for, and every *cold* fetch already lands in the write root.
+        """
+        image_id = sanitize_image_id(image_id)
+        size = sanitize_size(size)
+        for root, kind in self.read_roots:
+            pattern = os.path.join(self.release_dir(root, mbid), f"{image_id}-{size}.*")
+            for path in sorted(glob.glob(pattern)):
+                if os.path.splitext(path)[1].lower() not in _OWNED_EXTENSIONS:
+                    continue
+                if os.path.isfile(path):
+                    return StoredImage(path=path, source=kind, content_type=content_type_for(path))
+        return None
+
+    def store_image(
+        self,
+        mbid: str,
+        image_id: str,
+        size: str,
+        data: bytes,
+        content_type: Any,
+    ) -> StoredImage:
+        """Write one fetched image into the write root and measure it.
+
+        The bytes are written atomically and measured **outside** the index
+        lock; the lock is then taken exactly once to merge the measurement into
+        `dims`. Calling `read_index` / `replace_metadata` from here instead would
+        be a second acquisition of a non-reentrant lock this method already
+        holds — see the module docstring.
+
+        CAA reports no pixel dimensions, so this is the only place they can come
+        from. A file `_image_size` cannot read leaves no `dims` entry at all
+        rather than a guess.
+        """
+        image_id = sanitize_image_id(image_id)
+        size = sanitize_size(size)
+        root, kind = self.write_root
+        directory = self.release_dir(root, mbid)
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, f"{image_id}-{size}{extension_for(content_type)}")
+
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            with open(tmp, "wb") as handle:
+                handle.write(data)
+            os.replace(tmp, path)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+        # A re-store whose Content-Type changed would otherwise leave the old
+        # file beside the new one and let glob order decide which is served.
+        for stale in glob.glob(os.path.join(directory, f"{image_id}-{size}.*")):
+            if stale == path or os.path.splitext(stale)[1].lower() not in _OWNED_EXTENSIONS:
+                continue
+            try:
+                os.unlink(stale)
+            except OSError:
+                pass
+
+        measured = _image_size(path)
+        if measured is not None:
+            with _index_lock:
+                payload, _kind = self._read_index_unlocked(mbid)
+                if not isinstance(payload, dict):
+                    # Dims measured before any listing was persisted: keep them
+                    # anyway, with no timestamp, so the record reads as stale and
+                    # the next listing refreshes it rather than serving an empty
+                    # gallery from disk.
+                    payload = {"fetched_at": None, "images": []}
+                dims = _clean_dims(payload.get("dims"))
+                dims.setdefault(image_id, {})[size] = [int(measured[0]), int(measured[1])]
+                payload["dims"] = dims
+                self._write_index_unlocked(mbid, payload)
+
+        return StoredImage(
+            path=path,
+            source=kind,
+            content_type=content_type_for(path),
+            size=(int(measured[0]), int(measured[1])) if measured is not None else None,
+        )
 
     def _to_index(self, mbid: str, source: str, payload: dict[str, Any]) -> ArtworkIndex:
         fetched_at = payload.get("fetched_at")

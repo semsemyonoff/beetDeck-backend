@@ -30,7 +30,11 @@ from beetdeck.artwork_store import (
     INDEX_FILENAME,
     STORAGE,
     ArtworkStore,
+    content_type_for,
+    extension_for,
+    sanitize_image_id,
     sanitize_mbid,
+    sanitize_size,
     utc_now_iso,
 )
 
@@ -78,6 +82,26 @@ def write_index(root, payload, mbid=MBID):
 def iso_ago(seconds):
     stamp = datetime.now(timezone.utc) - timedelta(seconds=seconds)
     return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def image_bytes(width=250, height=250, fmt="JPEG"):
+    """Real encoded image bytes — `_image_size` parses a header, not a mock."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (width, height), "red").save(buffer, format=fmt)
+    return buffer.getvalue()
+
+
+def plant_image(root, name, mbid=MBID, data=b"planted"):
+    """Drop a file directly into a root, bypassing the store's write path."""
+    path = os.path.join(str(root), mbid, name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as handle:
+        handle.write(data)
+    return path
 
 
 def run_with_timeout(func, timeout=5.0):
@@ -492,3 +516,360 @@ def test_concurrent_metadata_replacements_leave_a_parseable_index(tmp_path):
     index = store.read_index(MBID)
     assert len(index.images) == 1
     assert index.images[0]["image_id"] in {str(n) for n in range(8)}
+
+
+# --------------------------------------------------------------------------- #
+# sanitize_image_id / sanitize_size / extensions
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("1234567890", "1234567890"),
+        (1234567890, "1234567890"),
+        (" 1234567890 ", "1234567890"),
+        ("0001234", "1234"),
+        (0, "0"),
+    ],
+)
+def test_sanitize_image_id_returns_a_decimal_string(value, expected):
+    """One canonical spelling on both sides of the boundary.
+
+    CAA sends a number and beets flex attrs are TEXT; anything less than a single
+    representation makes `current_image_id === image_id` false in the browser
+    after a reload and the *Current cover* marker vanish.
+    """
+    result = sanitize_image_id(value)
+    assert result == expected
+    assert isinstance(result, str)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "   ", None, "../../etc", "12a", "12.0", "-12", "1234/../..", True, "٣", "1_2"],
+)
+def test_sanitize_image_id_rejects_anything_that_is_not_a_number(value):
+    """The id becomes a filename, so the digits check is also the path guard."""
+    with pytest.raises(ValueError):
+        sanitize_image_id(value)
+
+
+@pytest.mark.parametrize(("value", "expected"), [("250", "250"), (500, "500"), ("FULL", "full")])
+def test_sanitize_size_accepts_the_known_sizes(value, expected):
+    assert sanitize_size(value) == expected
+
+
+@pytest.mark.parametrize("value", ["", None, "small", "large", "1000", "../250", "full.jpg"])
+def test_sanitize_size_rejects_everything_else(value):
+    with pytest.raises(ValueError):
+        sanitize_size(value)
+
+
+@pytest.mark.parametrize(
+    ("content_type", "extension"),
+    [
+        ("image/jpeg", ".jpg"),
+        ("image/jpeg; charset=binary", ".jpg"),
+        ("IMAGE/JPEG", ".jpg"),
+        ("image/jpg", ".jpg"),
+        ("image/png", ".png"),
+        ("image/gif", ".gif"),
+        ("image/webp", ".webp"),
+        ("application/octet-stream", ".bin"),
+        ("", ".bin"),
+        (None, ".bin"),
+    ],
+)
+def test_extension_for_maps_the_content_type(content_type, extension):
+    assert extension_for(content_type) == extension
+
+
+@pytest.mark.parametrize(
+    ("path", "content_type"),
+    [
+        ("/x/1-250.jpg", "image/jpeg"),
+        ("/x/1-full.PNG", "image/png"),
+        ("/x/1-full.gif", "image/gif"),
+        ("/x/1-full.bin", None),
+        ("/x/1-full", None),
+    ],
+)
+def test_content_type_for_reads_the_extension_back(path, content_type):
+    assert content_type_for(path) == content_type
+
+
+# --------------------------------------------------------------------------- #
+# find_image
+# --------------------------------------------------------------------------- #
+
+
+def test_find_image_returns_none_when_no_root_has_the_file(tmp_path):
+    store = make_store(tmp_path)
+    assert store.find_image(MBID, "111", "250") is None
+
+
+def test_find_image_matches_whatever_extension_was_stored(tmp_path):
+    store = make_store(tmp_path)
+    plant_image(tmp_path / "storage", "111-full.png")
+    found = store.find_image(MBID, "111", "full")
+    assert found.path.endswith("111-full.png")
+    assert found.content_type == "image/png"
+    assert found.source == STORAGE
+
+
+def test_find_image_does_not_confuse_sizes_or_ids(tmp_path):
+    store = make_store(tmp_path)
+    plant_image(tmp_path / "storage", "111-250.jpg")
+    plant_image(tmp_path / "storage", "1112-full.jpg")
+    assert store.find_image(MBID, "111", "full") is None
+    assert store.find_image(MBID, "1112", "250") is None
+    assert store.find_image(OTHER_MBID, "111", "250") is None
+
+
+def test_find_image_serves_storage_without_consulting_the_cache(tmp_path, monkeypatch):
+    """Storage wins, and the cache root is not even globbed."""
+    store = make_store(tmp_path)
+    plant_image(tmp_path / "storage", "111-250.jpg", data=b"from-storage")
+    plant_image(tmp_path / "cache", "111-250.png", data=b"from-cache")
+
+    patterns = []
+    real_glob = store_mod.glob.glob
+
+    def glob_with_a_witness(pattern, *args, **kwargs):
+        patterns.append(pattern)
+        return real_glob(pattern, *args, **kwargs)
+
+    monkeypatch.setattr(store_mod.glob, "glob", glob_with_a_witness)
+
+    found = store.find_image(MBID, "111", "250")
+    assert found.source == STORAGE
+    assert found.path == os.path.join(str(tmp_path / "storage"), MBID, "111-250.jpg")
+    assert all(str(tmp_path / "cache") not in pattern for pattern in patterns)
+
+
+def test_find_image_still_finds_what_the_other_mode_wrote_and_never_promotes_it(tmp_path):
+    """A cache-only file is served from the cache with storage enabled.
+
+    Flipping storage on must not orphan what the cache already holds — and must
+    not copy it over either: that is a duplicate nobody asked for.
+    """
+    store = make_store(tmp_path)
+    plant_image(tmp_path / "cache", "111-250.jpg")
+
+    found = store.find_image(MBID, "111", "250")
+    assert found.source == CACHE
+    assert found.path == os.path.join(str(tmp_path / "cache"), MBID, "111-250.jpg")
+    assert not os.path.exists(os.path.join(str(tmp_path / "storage"), MBID, "111-250.jpg"))
+
+
+def test_find_image_ignores_a_concurrent_writers_tmp_file(tmp_path):
+    """`<id>-<size>.*` matches `…-250.jpg.1234.tmp` too; serving one would hand
+    the browser a half-written file."""
+    store = make_store(tmp_path)
+    plant_image(tmp_path / "storage", "111-250.jpg.999.888.tmp")
+    assert store.find_image(MBID, "111", "250") is None
+
+
+def test_find_image_sanitizes_its_inputs(tmp_path):
+    store = make_store(tmp_path)
+    with pytest.raises(ValueError):
+        store.find_image(MBID, "../../etc/passwd", "250")
+    with pytest.raises(ValueError):
+        store.find_image(MBID, "111", "../../etc")
+
+
+# --------------------------------------------------------------------------- #
+# store_image
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("content_type", "fmt", "extension"),
+    [("image/jpeg", "JPEG", ".jpg"), ("image/png", "PNG", ".png"), ("image/gif", "GIF", ".gif")],
+)
+def test_store_image_picks_the_extension_from_the_content_type(
+    tmp_path, content_type, fmt, extension
+):
+    store = make_store(tmp_path)
+    stored = store.store_image(MBID, "111", "full", image_bytes(fmt=fmt), content_type)
+    assert stored.path.endswith(f"111-full{extension}")
+    assert os.path.isfile(stored.path)
+    assert store.find_image(MBID, "111", "full").path == stored.path
+
+
+def test_store_image_writes_into_the_storage_root_when_enabled(tmp_path):
+    store = make_store(tmp_path)
+    stored = store.store_image(MBID, "111", "250", image_bytes(), "image/jpeg")
+    assert stored.source == STORAGE
+    assert stored.path.startswith(str(tmp_path / "storage"))
+    assert not os.path.exists(os.path.join(str(tmp_path / "cache"), MBID))
+
+
+def test_store_image_writes_into_the_cache_when_storage_is_off(tmp_path):
+    store = make_store(tmp_path, storage=False)
+    stored = store.store_image(MBID, "111", "250", image_bytes(), "image/jpeg")
+    assert stored.source == CACHE
+    assert stored.path.startswith(str(tmp_path / "cache"))
+
+
+def test_store_image_records_the_measured_dims(tmp_path):
+    store = make_store(tmp_path)
+    store.replace_metadata(MBID, [record("111")])
+
+    stored = store.store_image(MBID, "111", "full", image_bytes(1425, 1200), "image/jpeg")
+    assert stored.size == (1425, 1200)
+
+    index = store.read_index(MBID)
+    assert index.dims == {"111": {"full": [1425, 1200]}}
+    # …and the listing it merged into is untouched.
+    assert [image["image_id"] for image in index.images] == ["111"]
+
+
+def test_store_image_keeps_dims_for_other_sizes_and_other_images(tmp_path):
+    store = make_store(tmp_path)
+    store.replace_metadata(MBID, [record("111")])
+    store.store_image(MBID, "111", "250", image_bytes(250, 250), "image/jpeg")
+    store.store_image(MBID, "111", "full", image_bytes(1000, 500), "image/jpeg")
+    store.store_image(MBID, "222", "250", image_bytes(250, 100), "image/jpeg")
+
+    assert store.read_index(MBID).dims == {
+        "111": {"250": [250, 250], "full": [1000, 500]},
+        "222": {"250": [250, 100]},
+    }
+
+
+def test_store_image_records_dims_even_before_a_listing_exists(tmp_path):
+    """No index yet is not a reason to lose a measurement — but the record it
+    creates carries no timestamp, so it reads as stale and the next listing
+    refreshes it instead of serving an empty gallery from disk."""
+    store = make_store(tmp_path)
+    store.store_image(MBID, "111", "250", image_bytes(), "image/jpeg")
+
+    index = store.read_index(MBID)
+    assert index.dims == {"111": {"250": [250, 250]}}
+    assert index.images == []
+    assert index.fresh is False
+
+
+def test_store_image_stores_unreadable_bytes_but_records_no_dims(tmp_path):
+    """Losing the bytes over a header we cannot parse is worse than an opaque
+    file; inventing a size for them would be worse than both."""
+    store = make_store(tmp_path)
+    stored = store.store_image(MBID, "111", "full", b"not an image", "application/octet-stream")
+
+    assert stored.path.endswith("111-full.bin")
+    assert stored.size is None
+    assert stored.content_type is None
+    assert store.read_index(MBID) is None
+
+
+def test_store_image_replaces_a_file_stored_under_another_content_type(tmp_path):
+    store = make_store(tmp_path)
+    store.store_image(MBID, "111", "full", image_bytes(fmt="PNG"), "image/png")
+    store.store_image(MBID, "111", "full", image_bytes(fmt="JPEG"), "image/jpeg")
+
+    entries = sorted(os.listdir(os.path.join(str(tmp_path / "storage"), MBID)))
+    assert [name for name in entries if name.startswith("111-full")] == ["111-full.jpg"]
+
+
+def test_store_image_leaves_no_tmp_files(tmp_path):
+    store = make_store(tmp_path)
+    store.store_image(MBID, "111", "250", image_bytes(), "image/jpeg")
+    entries = os.listdir(os.path.join(str(tmp_path / "storage"), MBID))
+    assert sorted(entries) == ["111-250.jpg", INDEX_FILENAME]
+
+
+def test_store_image_sanitizes_its_inputs(tmp_path):
+    store = make_store(tmp_path)
+    with pytest.raises(ValueError):
+        store.store_image(MBID, "../../etc/passwd", "250", image_bytes(), "image/jpeg")
+    with pytest.raises(ValueError):
+        store.store_image(MBID, "111", "small", image_bytes(), "image/jpeg")
+
+
+def test_store_image_never_reenters_the_index_lock(tmp_path):
+    """Run off the main thread: a second acquisition of the non-reentrant lock
+    would hang the suite rather than fail it."""
+    store = make_store(tmp_path)
+    run_with_timeout(lambda: store.store_image(MBID, "111", "250", image_bytes(), "image/jpeg"))
+    acquired = store_mod._index_lock.acquire(blocking=False)
+    assert acquired, "the index lock was still held after store_image returned"
+    store_mod._index_lock.release()
+
+
+def test_concurrent_store_image_calls_keep_every_measurement(tmp_path):
+    store = make_store(tmp_path)
+    store.replace_metadata(MBID, [record("111")])
+    errors = []
+    barrier = threading.Barrier(8)
+
+    def worker(n):
+        try:
+            barrier.wait(timeout=5)
+            store.store_image(MBID, str(n), "250", image_bytes(250, 100 + n), "image/jpeg")
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+        assert not thread.is_alive()
+
+    assert errors == []
+    # Parseable, and not one measurement lost to a read-modify-write race.
+    index = store.read_index(MBID)
+    assert index.dims == {str(n): {"250": [250, 100 + n]} for n in range(8)}
+    assert [image["image_id"] for image in index.images] == ["111"]
+
+
+def test_a_metadata_refresh_racing_a_store_image_loses_neither(tmp_path):
+    """The barrier test the merge protocol exists for.
+
+    Both writers are queued behind the lock held here, so they run back to back
+    in an order the test does not control — and the invariant has to hold either
+    way: `replace_metadata` merges the dims it re-reads, and `store_image` merges
+    its measurement into whatever listing it finds.
+    """
+    store = make_store(tmp_path)
+    store.replace_metadata(MBID, [record("111")])
+
+    errors = []
+
+    def guard(func):
+        def run():
+            try:
+                func()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        return run
+
+    refresher = threading.Thread(
+        target=guard(lambda: store.replace_metadata(MBID, [record("222")])), daemon=True
+    )
+    storer = threading.Thread(
+        target=guard(
+            lambda: store.store_image(MBID, "222", "full", image_bytes(1425, 1425), "image/jpeg")
+        ),
+        daemon=True,
+    )
+
+    with store_mod._index_lock:
+        storer.start()
+        refresher.start()
+        # Both must be parked on the lock before it is handed over; store_image
+        # does its file write and measurement before reaching for it.
+        storer.join(0.3)
+        refresher.join(0.3)
+
+    for thread in (storer, refresher):
+        thread.join(10)
+        assert not thread.is_alive()
+
+    assert errors == []
+    index = store.read_index(MBID)
+    assert [image["image_id"] for image in index.images] == ["222"]
+    assert index.dims == {"222": {"full": [1425, 1425]}}
