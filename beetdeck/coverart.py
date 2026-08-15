@@ -147,6 +147,12 @@ class CaaImageResult:
         return f"the Cover Art Archive returned HTTP {self.status_code}"
 
 
+#: CAA's named thumbnail keys and the numeric rendition each one is.
+#: Documented by the Cover Art Archive as aliases of the 250 px and 500 px
+#: thumbnails; some releases carry no numeric keys at all.
+THUMBNAIL_ALIASES = {"small": "250", "large": "500"}
+
+
 def _coerce_image_id(value: Any) -> str | None:
     """A CAA image id as a **decimal string**, or `None` when it is not one.
 
@@ -171,9 +177,17 @@ def normalize_images(payload: Any) -> list[dict[str, Any]]:
     original's extension.
 
     `urls` is keyed by the **numeric** thumbnail sizes plus `"full"` (the image's
-    own `image` URL). The `small` / `large` aliases CAA also ships are discarded —
-    `thumb_sizes` is derived from these keys, and advertising an alias would make
-    the binary route reject its own advertised size with a `400`.
+    own `image` URL). `thumb_sizes` is derived from those keys, so an alias key
+    left in place would make the binary route reject a size the API itself
+    advertised with a `400`.
+
+    The aliases are therefore **translated, not dropped**: `small` is the 250 px
+    rendition and `large` the 500 px one, and CAA ships some releases (older ones
+    especially) with the aliases *only* and no numeric keys at all. Discarding
+    them leaves `thumb_sizes` empty, which makes the gallery request the original
+    for every tile — the exact traffic the numeric-key filter exists to prevent,
+    reached from the other side. A numeric key already present wins; the alias
+    then points at the same file anyway.
     """
     images = payload.get("images") if isinstance(payload, dict) else None
     if not isinstance(images, list):
@@ -190,13 +204,17 @@ def normalize_images(payload: Any) -> list[dict[str, Any]]:
         urls: dict[str, str] = {}
         thumbnails = entry.get("thumbnails")
         if isinstance(thumbnails, dict):
+            aliased: dict[str, str] = {}
             for key, url in thumbnails.items():
                 if not isinstance(url, str) or not url:
                     continue
                 size = str(key).strip()
-                if not size.isdigit():
-                    continue
-                urls[str(int(size))] = url
+                if size.isdigit():
+                    urls[str(int(size))] = url
+                elif size.lower() in THUMBNAIL_ALIASES:
+                    aliased[THUMBNAIL_ALIASES[size.lower()]] = url
+            for size, url in aliased.items():
+                urls.setdefault(size, url)
         original = entry.get("image")
         if isinstance(original, str) and original:
             urls["full"] = original

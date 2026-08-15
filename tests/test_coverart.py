@@ -210,12 +210,70 @@ class TestNormalizeImages:
         assert [r["image_id"] for r in records] == ["1234567890", "9876543210"]
         assert all(isinstance(r["image_id"], str) for r in records)
 
-    def test_the_small_and_large_aliases_are_discarded(self):
-        """`thumb_sizes` is derived from these keys — an alias would make the binary
-        route reject a size the API itself advertised."""
+    def test_the_alias_keys_never_survive_as_keys(self):
+        """`thumb_sizes` is derived from these keys — an alias left in place would
+        make the binary route reject a size the API itself advertised."""
         for record in normalize_images(RELEASE_PAYLOAD):
             assert "small" not in record["urls"]
             assert "large" not in record["urls"]
+
+    def test_alias_only_thumbnails_are_translated_to_their_numeric_sizes(self):
+        """Not hypothetical: this is what CAA ships for the release Task 19 verified
+        against. Discarding the aliases leaves `thumb_sizes` empty, and every tile
+        then asks for the original."""
+        records = normalize_images(
+            {
+                "images": [
+                    {
+                        "id": 3514546977,
+                        "types": ["Front"],
+                        "image": "https://coverartarchive.org/release/x/3514546977.jpg",
+                        "thumbnails": {
+                            "small": "https://coverartarchive.org/release/x/3514546977-250.jpg",
+                            "large": "https://coverartarchive.org/release/x/3514546977-500.jpg",
+                        },
+                    }
+                ]
+            }
+        )
+        assert records[0]["urls"] == {
+            "250": "https://coverartarchive.org/release/x/3514546977-250.jpg",
+            "500": "https://coverartarchive.org/release/x/3514546977-500.jpg",
+            "full": "https://coverartarchive.org/release/x/3514546977.jpg",
+        }
+
+    def test_a_numeric_key_wins_over_its_alias(self):
+        """Both point at the same file, so the tie only decides which string is
+        stored — but it must be decided, not left to dict ordering."""
+        records = normalize_images(
+            {
+                "images": [
+                    {
+                        "id": 1,
+                        "image": "https://x/1.jpg",
+                        "thumbnails": {
+                            "small": "https://x/1-alias.jpg",
+                            "250": "https://x/1-numeric.jpg",
+                        },
+                    }
+                ]
+            }
+        )
+        assert records[0]["urls"]["250"] == "https://x/1-numeric.jpg"
+
+    def test_an_unknown_non_numeric_key_is_still_discarded(self):
+        records = normalize_images(
+            {
+                "images": [
+                    {
+                        "id": 1,
+                        "image": "https://x/1.jpg",
+                        "thumbnails": {"huge": "https://x/1-huge.jpg"},
+                    }
+                ]
+            }
+        )
+        assert records[0]["urls"] == {"full": "https://x/1.jpg"}
 
     def test_a_missing_1200_thumbnail_is_simply_absent(self):
         booklet = normalize_images(RELEASE_PAYLOAD)[1]
