@@ -207,7 +207,36 @@ def db_path(tmp_path):
 
 
 @pytest.fixture()
-def app(db_path, tmp_path):
+def artwork_dirs(tmp_path):
+    """Both artwork roots under `tmp_path`, so no test ever writes a real root.
+
+    Override in a module to exercise the cache-only mode:
+    `ARTWORK_STORAGE_DIR: None`.
+    """
+    return {
+        "ARTWORK_STORAGE_DIR": str(tmp_path / "artwork-storage"),
+        "ARTWORK_CACHE_DIR": str(tmp_path / "artwork-cache"),
+    }
+
+
+@pytest.fixture()
+def caa_handler():
+    """Override with `def caa_handler(): return lambda request: httpx.Response(…)`.
+
+    `None` leaves the CAA client on its real transport — which nothing in the
+    suite may actually use, since no test is allowed to reach the network.
+    """
+    return None
+
+
+@pytest.fixture()
+def caa_transport(caa_handler):
+    """The mock transport installed into the app-scoped CaaClient, if any."""
+    return httpx.MockTransport(caa_handler) if caa_handler is not None else None
+
+
+@pytest.fixture()
+def app(db_path, tmp_path, artwork_dirs, caa_transport):
     """Flask test app with a temporary library DB."""
     application = create_app(
         test_config={
@@ -216,7 +245,9 @@ def app(db_path, tmp_path):
             # Empty string: test paths are absolute; no library root resolution needed
             "LIBRARY_ROOT": "",
             "COVER_CACHE_DIR": str(tmp_path / "cover-cache"),
+            "ARTWORK_CAA_TRANSPORT": caa_transport,
             "TESTING": True,
+            **artwork_dirs,
         }
     )
     return application
