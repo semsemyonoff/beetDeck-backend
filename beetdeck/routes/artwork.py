@@ -306,6 +306,16 @@ def _resolve_cold(store, mbid, image_id, size):
     if not fetched.ok:
         return None, fetched.message, 502
     stored = store.store_image(mbid, image_id, size, fetched.data, fetched.content_type)
+    if stored is None:
+        # Answered, but with something that is not an image — an error page under
+        # a `200`. Same class as an unreachable CAA (nothing about this rendition
+        # was established), and deliberately *not* mirrored: in storage mode a
+        # stored non-image would be permanent and would short-circuit every
+        # later request. A `502` leaves the next one free to try again.
+        log.warning(
+            "CAA answered for %s/%s (%s) with something that is not an image", mbid, image_id, size
+        )
+        return None, "the Cover Art Archive did not answer with an image", 502
     return stored, None, None
 
 

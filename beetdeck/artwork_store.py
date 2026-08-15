@@ -447,8 +447,19 @@ class ArtworkStore:
         size: str,
         data: bytes,
         content_type: Any,
-    ) -> StoredImage:
+    ) -> StoredImage | None:
         """Write one fetched image into the write root and measure it.
+
+        `None` when the bytes are **not an image**: neither a `Content-Type` this
+        store recognises nor something `_image_size` can decode. An unrecognised
+        header alone is still stored (under `.bin`) — losing a real scan over a
+        header nobody knows is the worse trade, and PIL sniffs content, not
+        extensions — but bytes that fail *both* tests are an upstream error page,
+        not artwork. Publishing one is not recoverable from inside the app: in
+        storage mode the write root has no TTL and the sweep never looks at it,
+        while `find_image` short-circuits every later request, so a single HTML
+        `200` would break that rendition forever. The caller turns this into the
+        same transient `502` every other bad upstream answer gets.
 
         The bytes are written atomically and measured **outside** the index
         lock; the lock is then taken exactly once to merge the measurement into
@@ -471,6 +482,14 @@ class ArtworkStore:
         try:
             with open(tmp, "wb") as handle:
                 handle.write(data)
+            # Measured on the tmp file, *before* it is published, so a reply that
+            # is not an image never reaches the mirror at all — and the stale
+            # cleanup below never runs, leaving whatever good rendition is
+            # already on disk exactly where it is.
+            measured = _image_size(tmp)
+            if measured is None and os.path.splitext(path)[1].lower() == _FALLBACK_EXTENSION:
+                os.unlink(tmp)
+                return None
             os.replace(tmp, path)
         except OSError:
             try:
@@ -489,7 +508,6 @@ class ArtworkStore:
             except OSError:
                 pass
 
-        measured = _image_size(path)
         if measured is not None:
             with _index_lock:
                 payload, _kind = self._read_index_unlocked(mbid)

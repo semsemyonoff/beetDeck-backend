@@ -1239,16 +1239,17 @@ def test_a_failing_marker_store_is_500_and_still_invalidates_the_stash(
 
 
 def test_an_undecodable_original_leaves_the_existing_cover_untouched(
-    client, album_id, caa, tmp_path, library_on_disk, mocker
+    client, album_id, caa, app, library_on_disk, mocker
 ):
     """The one failure that must not be destructive.
 
-    Nothing upstream of `_save_cover_to_album` proves the bytes are an image:
-    `fetch_image` checks only the status and a non-empty body, and an
-    unrecognised `Content-Type` is stored under `.bin` rather than dropped. So
-    an archive.org HTML error page served with a `200` reaches the helper — and
-    a helper that cleared the album directory before asking PIL to decode would
-    answer `500` having already deleted the cover the user still had.
+    `fetch_image` checks only the status and a non-empty body, so an archive.org
+    HTML error page served with a `200` still arrives here. `store_image` is what
+    stops it: bytes that are neither a `Content-Type` the store knows nor
+    anything PIL can decode are refused rather than mirrored — which in storage
+    mode would be permanent — so they never reach `_save_cover_to_album` at all.
+    The album keeps the cover it had, and the answer is the transient `502` a bad
+    upstream reply earns rather than a `500` from inside the write.
     """
     caa.image_content_type = "text/html"
     caa.image_data = b"<html><body>Item not available</body></html>"
@@ -1260,8 +1261,10 @@ def test_an_undecodable_original_leaves_the_existing_cover_untouched(
 
     resp = client.post(apply_url(album_id))
 
-    assert resp.status_code == 500
+    assert resp.status_code == 502
     assert os.path.exists(existing)
+    release_dir = os.path.join(app.config["ARTWORK_STORAGE_DIR"], MBID)
+    assert not any(name.endswith(".bin") for name in os.listdir(release_dir))
 
 
 # --- the disk layer failing under a live app --------------------------------

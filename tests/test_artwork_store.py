@@ -790,16 +790,55 @@ def test_store_image_records_dims_even_before_a_listing_exists(tmp_path):
     assert index.fresh is False
 
 
-def test_store_image_stores_unreadable_bytes_but_records_no_dims(tmp_path):
-    """Losing the bytes over a header we cannot parse is worse than an opaque
-    file; inventing a size for them would be worse than both."""
+def test_store_image_keeps_a_real_image_sent_under_an_unknown_content_type(tmp_path):
+    """Losing a scan over a header we cannot parse is worse than an opaque file.
+    PIL sniffs content, so the bytes are still measured under `.bin`."""
     store = make_store(tmp_path)
-    stored = store.store_image(MBID, "111", "full", b"not an image", "application/octet-stream")
+    stored = store.store_image(
+        MBID, "111", "full", image_bytes(300, 200), "application/octet-stream"
+    )
 
     assert stored.path.endswith("111-full.bin")
-    assert stored.size is None
+    assert stored.size == (300, 200)
+    # No asserted type: the extension is the only record of the header, and
+    # `.bin` is not one worth asserting.
     assert stored.content_type is None
-    assert store.read_index(MBID) is None
+    assert store.read_index(MBID).dims == {"111": {"full": [300, 200]}}
+
+
+def test_store_image_refuses_bytes_that_are_not_an_image(tmp_path):
+    """Neither a type this store knows nor anything PIL can decode — an upstream
+    error page under a `200`, not artwork. In storage mode there is no TTL and no
+    sweep, so mirroring one would break the rendition permanently."""
+    store = make_store(tmp_path)
+    stored = store.store_image(MBID, "111", "full", b"<html>gone</html>", "text/html")
+
+    assert stored is None
+    assert store.find_image(MBID, "111", "full") is None
+    # The release directory is created before the write, so it survives; what
+    # must not survive is anything *in* it. Removing it here would race a
+    # concurrent store that has just made it and not yet opened its tmp file.
+    assert os.listdir(os.path.join(str(tmp_path / "storage"), MBID)) == []
+
+
+def test_store_image_refusal_leaves_the_rendition_already_on_disk_alone(tmp_path):
+    """The refusal happens before the tmp file is published, so the stale cleanup
+    never runs — a bad answer cannot cost a good scan that is already mirrored."""
+    store = make_store(tmp_path)
+    good = store.store_image(MBID, "111", "full", image_bytes(800, 800), "image/jpeg")
+
+    assert store.store_image(MBID, "111", "full", b"<html>gone</html>", "text/html") is None
+    assert store.find_image(MBID, "111", "full").path == good.path
+    assert os.path.isfile(good.path)
+
+
+def test_store_image_refusal_leaves_no_tmp_file(tmp_path):
+    store = make_store(tmp_path)
+    store.replace_metadata(MBID, [record("111")])
+    assert store.store_image(MBID, "111", "full", b"nope", "text/html") is None
+
+    entries = os.listdir(os.path.join(str(tmp_path / "storage"), MBID))
+    assert sorted(entries) == [INDEX_FILENAME]
 
 
 def test_store_image_replaces_a_file_stored_under_another_content_type(tmp_path):
