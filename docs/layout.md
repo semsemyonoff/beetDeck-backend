@@ -15,15 +15,20 @@ beetDeck/
 │   │                       #   is_editable(), is_album_level(), build_field_catalog(), coerce_value()
 │   ├── utils.py            # Shared helpers and constants (_init_beets, _resolve_path,
 │   │                       #   _format_genre, _try_write_item, embed_album import)
+│   ├── coverart.py         # Cover Art Archive client: CaaClient(transport, gate),
+│   │                       #   normalize_images(), RateGate on the JSON lookup only
+│   ├── artwork_store.py    # Two-root disk layer (storage → cache): index.json read/
+│   │                       #   replace, find_image/store_image, TTL+LRU sweep_cache()
 │   ├── schemas/            # spectree/pydantic request & response models, one module per blueprint
 │   │   ├── __init__.py     # re-exports shared models
 │   │   ├── common.py       # ErrorResponse + reusable nested types (AlbumSummary, ArtistGroup)
-│   │   ├── albums.py  bpm.py  cover.py  genres.py  identify.py
+│   │   ├── albums.py  artwork.py  bpm.py  cover.py  genres.py  identify.py
 │   │   └── items.py  library.py  lyrics.py  meta.py  scan.py
 │   ├── routes/             # One Flask blueprint per feature
 │   │   ├── library.py      # GET /, /api/library, /api/search, /api/artist
 │   │   ├── albums.py       # album detail + track tags
 │   │   ├── cover.py        # cover art CRUD (fetch / preview / confirm / upload)
+│   │   ├── artwork.py      # Cover Art Archive gallery: listing, image proxy, apply
 │   │   ├── genres.py       # genre fetch / confirm / save
 │   │   ├── lyrics.py       # lyrics CRUD, single + bulk
 │   │   ├── bpm.py          # per-track BPM compute (autobpm plugin)
@@ -51,11 +56,14 @@ beetDeck/
 │       └── media.py  genres.py  library.py  raw.py  apply.py
 ├── tests/                  # pytest suite; conftest.py builds the app on a temp SQLite DB
 │   ├── conftest.py  fixtures/
-│   ├── test_albums.py  test_bpm.py  test_cover.py  test_genres.py
-│   ├── test_identify.py  test_items.py  test_library.py  test_lyrics.py
-│   ├── test_meta.py  test_scan.py            # route suites, mirroring beetdeck/routes/
+│   ├── test_albums.py  test_artwork.py  test_bpm.py  test_cover.py
+│   ├── test_genres.py  test_identify.py  test_items.py  test_library.py
+│   ├── test_lyrics.py  test_meta.py  test_scan.py
+│   │                                          # route suites, mirroring beetdeck/routes/
 │   ├── test_item_fields.py  test_scan_progress.py  test_utils.py
+│   ├── test_artwork_store.py  test_coverart.py
 │   │                                          # unit tests for the pure modules
+│   ├── test_config.py                         # create_app config parsing + extensions
 │   ├── test_mcp_*.py                          # beetdeck_mcp, driven against the real
 │   │                                          #   app over an in-process WSGI transport
 │   ├── test_scan_replace.py                   # format-replace integration (mp3→flac)
