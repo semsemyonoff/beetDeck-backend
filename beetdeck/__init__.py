@@ -109,6 +109,7 @@ def create_app(test_config=None):
     atexit.register(caa_client.close)
 
     from .routes.albums import bp as albums_bp
+    from .routes.artwork import bp as artwork_bp
     from .routes.bpm import bp as bpm_bp
     from .routes.cover import bp as cover_bp
     from .routes.genres import bp as genres_bp
@@ -121,6 +122,7 @@ def create_app(test_config=None):
 
     app.register_blueprint(library_bp)
     app.register_blueprint(albums_bp)
+    app.register_blueprint(artwork_bp)
     app.register_blueprint(bpm_bp)
     app.register_blueprint(cover_bp)
     app.register_blueprint(genres_bp)
