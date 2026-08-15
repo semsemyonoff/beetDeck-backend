@@ -21,6 +21,13 @@ Four things this module owns:
   which is outside that budget entirely; gating them would serialize a 40-tile
   gallery to ≥40 s with a request thread parked for each, on an app that is
   architecturally `-w 1 --threads N`.
+* **What bounds an image fetch.** `fetch_image` is handed a URL that came out of
+  a CAA payload, but it is replayed from `index.json` long after that lookup and
+  the response is written to a permanent mirror — so the URL is checked, not
+  trusted: `IMAGE_HOST_SUFFIXES` on every hop (which is why redirects are
+  followed by hand rather than by httpx), and `MAX_IMAGE_BYTES` enforced while
+  streaming, so a body that never ends cannot park a request thread on a
+  growing `bytes` object.
 * **The user agent.** `ARTWORK_USER_AGENT` supplies it (the app factory owns the
   wiring). An empty one is **not** fatal: CAA/archive.org, unlike MusicBrainz
   `ws/2`, does not reject anonymous clients, and raising here would take
@@ -47,6 +54,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -62,6 +70,23 @@ MIN_REQUEST_INTERVAL = 1.0
 #: A release lookup is a single indexed read; an image is a file off a CDN.
 DEFAULT_TIMEOUT = 20.0
 DEFAULT_CONNECT_TIMEOUT = 5.0
+
+#: The only hosts `fetch_image` will fetch from, matched on the host itself and
+#: on any subdomain. Both are needed and neither is optional: CAA serves the
+#: `coverartarchive.org` URL the payload carries and 307s it to `archive.org`,
+#: which redirects again to a numbered CDN node (`ia801506.us.archive.org`).
+IMAGE_HOST_SUFFIXES = ("coverartarchive.org", "archive.org")
+
+#: How far a CAA image URL may be chased. The real chain is two hops; anything
+#: longer is a loop or a redirector, not a scan.
+MAX_IMAGE_REDIRECTS = 5
+
+#: The ceiling on one image. CAA originals are scans and the largest real ones
+#: are single-digit MB, so this is a backstop against an upstream that answers
+#: with something else entirely — not a size policy. It is enforced against the
+#: bytes actually read, because `Content-Length` is optional and a chunked reply
+#: that never ends is exactly the case that matters.
+MAX_IMAGE_BYTES = 64 * 1024 * 1024
 
 
 class RateGate:
@@ -228,6 +253,29 @@ def normalize_images(payload: Any) -> list[dict[str, Any]]:
     return records
 
 
+def is_image_url_allowed(url: str) -> bool:
+    """Is this a URL `fetch_image` may go to?
+
+    Host, not path: the id and the size are already sanitized elsewhere, and what
+    this rules out is a URL pointing somewhere other than the archive — a stale
+    `index.json` written by an older build, a payload from an upstream having a
+    bad day, a redirect chain that leaves the CDN. Scheme is checked too, so a
+    `file://` never reaches httpx as a "download".
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https"):
+        return False
+    try:
+        host = (parts.hostname or "").lower().rstrip(".")
+    except ValueError:
+        # A malformed authority (an unclosed IPv6 bracket) raises here, not above.
+        return False
+    return any(host == suffix or host.endswith(f".{suffix}") for suffix in IMAGE_HOST_SUFFIXES)
+
+
 @dataclass
 class CaaClient:
     """Blocking Cover Art Archive client; the JSON lookup sits behind the gate.
@@ -312,30 +360,80 @@ class CaaClient:
         return CaaResult(response.status_code, images=normalize_images(payload))
 
     def fetch_image(self, url: str) -> CaaImageResult:
-        """One image off the archive.org CDN. **Not** gated — see the docstring."""
+        """One image off the archive.org CDN. **Not** gated — see the docstring.
+
+        Redirects are followed by hand rather than by httpx, because every hop
+        has to clear :func:`is_image_url_allowed`: the client's own
+        `follow_redirects` would chase a `Location` anywhere, and the first URL
+        being an archive one says nothing about the last. The body is streamed
+        against `MAX_IMAGE_BYTES` for the same reason the timeout exists — this
+        runs on a request thread of a `--threads N` app, and the bytes are on
+        their way to a permanent mirror.
+        """
         target = (url or "").strip()
         if not target:
             return CaaImageResult(None, error="an image URL is required")
 
-        log.info("CAA GET %s", target)
-        try:
-            response = self._client.get(target, headers={"Accept": "image/*"})
-        except httpx.TimeoutException as exc:
-            return CaaImageResult(None, error=f"the image request timed out ({target}): {exc}")
-        except httpx.InvalidURL as exc:
-            return CaaImageResult(None, error=f"{target!r} is not a usable image URL: {exc}")
-        except httpx.HTTPError as exc:
-            return CaaImageResult(None, error=f"the image is unreachable ({target}): {exc}")
+        for _hop in range(MAX_IMAGE_REDIRECTS + 1):
+            if not is_image_url_allowed(target):
+                return CaaImageResult(
+                    None, error=f"{target!r} is not a Cover Art Archive image URL"
+                )
+            log.info("CAA GET %s", target)
+            try:
+                result, redirect = self._read_image(target)
+            except httpx.TimeoutException as exc:
+                return CaaImageResult(None, error=f"the image request timed out ({target}): {exc}")
+            except httpx.InvalidURL as exc:
+                return CaaImageResult(None, error=f"{target!r} is not a usable image URL: {exc}")
+            except httpx.HTTPError as exc:
+                return CaaImageResult(None, error=f"the image is unreachable ({target}): {exc}")
+            if result is not None:
+                return result
+            target = redirect
 
-        if response.status_code >= 300:
-            return CaaImageResult(
-                response.status_code,
-                error=f"the Cover Art Archive returned HTTP {response.status_code} for {target}",
-            )
-        if not response.content:
-            return CaaImageResult(response.status_code, error=f"empty image body for {target}")
+        return CaaImageResult(None, error=f"too many redirects for {url.strip()}")
 
-        content_type = (response.headers.get("Content-Type") or "").split(";")[0].strip()
-        return CaaImageResult(
-            response.status_code, data=response.content, content_type=content_type
-        )
+    def _read_image(self, target: str) -> tuple[CaaImageResult | None, str]:
+        """One hop: `(result, "")` when it answered, `(None, next_url)` when it moved."""
+        with self._client.stream(
+            "GET", target, headers={"Accept": "image/*"}, follow_redirects=False
+        ) as response:
+            if response.is_redirect:
+                location = (response.headers.get("Location") or "").strip()
+                if not location:
+                    return CaaImageResult(
+                        response.status_code,
+                        error=f"HTTP {response.status_code} with no Location for {target}",
+                    ), ""
+                # Resolved against the URL actually requested: CAA's own
+                # `Location` is absolute, but a relative one is legal.
+                return None, urljoin(str(response.url), location)
+
+            if response.status_code >= 300:
+                return CaaImageResult(
+                    response.status_code,
+                    error=(
+                        f"the Cover Art Archive returned HTTP {response.status_code} for {target}"
+                    ),
+                ), ""
+
+            chunks: list[bytes] = []
+            read = 0
+            for chunk in response.iter_bytes():
+                read += len(chunk)
+                if read > MAX_IMAGE_BYTES:
+                    return CaaImageResult(
+                        response.status_code,
+                        error=f"the image at {target} exceeds {MAX_IMAGE_BYTES} bytes",
+                    ), ""
+                chunks.append(chunk)
+
+            data = b"".join(chunks)
+            if not data:
+                return CaaImageResult(
+                    response.status_code, error=f"empty image body for {target}"
+                ), ""
+
+            content_type = (response.headers.get("Content-Type") or "").split(";")[0].strip()
+            return CaaImageResult(response.status_code, data=data, content_type=content_type), ""

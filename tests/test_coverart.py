@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 from beetdeck.coverart import (
+    MAX_IMAGE_BYTES,
     MIN_REQUEST_INTERVAL,
     CaaClient,
     RateGate,
@@ -555,6 +556,117 @@ class TestFetchImage:
 
         lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("CAA GET")]
         assert lines == [f"CAA GET {url}"]
+
+
+class TestFetchImageBounds:
+    """What keeps a stored URL from becoming an arbitrary fetch.
+
+    The `urls` map is CAA's own, but it is replayed off `index.json` long after
+    the lookup and the bytes go to a permanent mirror — so the host is checked on
+    every hop and the body is capped while it is read.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://169.254.169.254/latest/meta-data/",
+            "https://evil.example/1.jpg",
+            # Suffix matching must not accept a host that merely ends in the
+            # allowed string without the dot boundary.
+            "https://notarchive.org/1.jpg",
+            "https://archive.org.evil.example/1.jpg",
+            "file:///etc/passwd",
+            "https:///1.jpg",
+        ],
+    )
+    def test_a_non_archive_url_never_leaves_the_process(self, url):
+        handler = image_handler()
+        result = make_client(handler).fetch_image(url)
+
+        assert not result.ok
+        assert "not a Cover Art Archive image URL" in result.message
+        assert handler.seen == []
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://coverartarchive.org/release/x/1-250.jpg",
+            "https://ia801506.us.archive.org/x/1.jpg",
+            "https://ARCHIVE.ORG/x/1.jpg",
+        ],
+    )
+    def test_the_archive_and_its_subdomains_are_allowed(self, url):
+        assert make_client(image_handler()).fetch_image(url).ok
+
+    def test_a_redirect_inside_the_archive_is_followed(self):
+        seen = []
+
+        def handler(request):
+            seen.append(str(request.url))
+            if len(seen) == 1:
+                return httpx.Response(
+                    307, headers={"Location": "https://ia800.us.archive.org/x/1.jpg"}
+                )
+            return httpx.Response(200, content=b"png", headers={"Content-Type": "image/png"})
+
+        result = make_client(handler).fetch_image("https://coverartarchive.org/release/x/1.jpg")
+
+        assert result.ok
+        assert result.data == b"png"
+        assert seen == [
+            "https://coverartarchive.org/release/x/1.jpg",
+            "https://ia800.us.archive.org/x/1.jpg",
+        ]
+
+    def test_a_redirect_off_the_archive_is_refused(self):
+        """The first URL being an archive one says nothing about the last."""
+        seen = []
+
+        def handler(request):
+            seen.append(str(request.url))
+            return httpx.Response(302, headers={"Location": "http://169.254.169.254/"})
+
+        result = make_client(handler).fetch_image("https://coverartarchive.org/release/x/1.jpg")
+
+        assert not result.ok
+        assert "not a Cover Art Archive image URL" in result.message
+        assert len(seen) == 1
+
+    def test_a_redirect_loop_ends(self):
+        def handler(request):
+            return httpx.Response(302, headers={"Location": str(request.url)})
+
+        result = make_client(handler).fetch_image("https://coverartarchive.org/release/x/1.jpg")
+
+        assert not result.ok
+        assert "too many redirects" in result.message
+
+    def test_a_redirect_without_a_location_is_an_error_not_a_hop(self):
+        def handler(request):
+            return httpx.Response(302, headers={"Location": ""})
+
+        result = make_client(handler).fetch_image("https://coverartarchive.org/release/x/1.jpg")
+
+        assert not result.ok
+        assert "no Location" in result.message
+
+    def test_an_oversized_body_is_refused_rather_than_buffered(self):
+        # Streamed in chunks so the cap is crossed mid-body: the point is that
+        # the read stops, not that `Content-Length` was believed.
+        chunk = b"\x00" * (1024 * 1024)
+
+        def handler(request):
+            def body():
+                for _ in range(MAX_IMAGE_BYTES // len(chunk) + 2):
+                    yield chunk
+
+            return httpx.Response(200, content=body(), headers={"Content-Type": "image/jpeg"})
+
+        result = make_client(handler).fetch_image("https://ia800.us.archive.org/x/1.jpg")
+
+        assert not result.ok
+        assert result.data is None
+        assert f"exceeds {MAX_IMAGE_BYTES} bytes" in result.message
 
 
 # ---------------------------------------------------------------------------

@@ -38,7 +38,12 @@ obvious from their name:
   validate against it.
 - `beetdeck/coverart.py` — Cover Art Archive HTTP client, a dataclass with an
   injectable `transport` and `gate` (the shape `beetdeck_mcp/musicbrainz.py`
-  established, deliberately duplicated rather than imported).
+  established, deliberately duplicated rather than imported). Its `fetch_image`
+  is handed a URL replayed from `index.json`, so it checks rather than trusts it:
+  the host must be `coverartarchive.org`/`archive.org` or a subdomain **on every
+  redirect hop** (which is why it follows them by hand instead of letting httpx
+  do it), and the body is streamed against `MAX_IMAGE_BYTES` — a `502` either
+  way, and nothing partial reaches the mirror.
 - `beetdeck/artwork_store.py` — the two-root disk layer under the gallery:
   index, image resolution, and the cache sweep. Pure filesystem, no Flask.
 - `beetdeck/templates/index.html` — SPA shell; injects the hashed JS/CSS by

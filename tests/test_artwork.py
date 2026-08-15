@@ -50,11 +50,11 @@ FRONT_IMAGE = {
     "comment": "",
     "image": "https://coverartarchive.org/release/x/1234567890.jpg",
     "thumbnails": {
-        "250": "https://caa/1234567890-250.jpg",
-        "500": "https://caa/1234567890-500.jpg",
-        "1200": "https://caa/1234567890-1200.jpg",
-        "small": "https://caa/1234567890-250.jpg",
-        "large": "https://caa/1234567890-500.jpg",
+        "250": "https://coverartarchive.org/release/x/1234567890-250.jpg",
+        "500": "https://coverartarchive.org/release/x/1234567890-500.jpg",
+        "1200": "https://coverartarchive.org/release/x/1234567890-1200.jpg",
+        "small": "https://coverartarchive.org/release/x/1234567890-250.jpg",
+        "large": "https://coverartarchive.org/release/x/1234567890-500.jpg",
     },
 }
 
@@ -68,7 +68,7 @@ BOOKLET_IMAGE = {
     "approved": False,
     "comment": "booklet page 3",
     "image": "https://coverartarchive.org/release/x/9876543210.png",
-    "thumbnails": {"250": "https://caa/9876543210-250.jpg"},
+    "thumbnails": {"250": "https://coverartarchive.org/release/x/9876543210-250.jpg"},
 }
 
 CAA_PAYLOAD = {"release": MB_URL, "images": [FRONT_IMAGE, BOOKLET_IMAGE]}
@@ -330,7 +330,10 @@ def test_the_named_thumbnail_aliases_are_translated_not_dropped(client, album_id
         "images": [
             {
                 **FRONT_IMAGE,
-                "thumbnails": {"small": "https://caa/s.jpg", "large": "https://caa/l.jpg"},
+                "thumbnails": {
+                    "small": "https://coverartarchive.org/release/x/s.jpg",
+                    "large": "https://coverartarchive.org/release/x/l.jpg",
+                },
             }
         ],
     }
@@ -442,7 +445,9 @@ def test_a_stale_index_is_refreshed(client, album_id, caa, app):
         app,
         {
             "fetched_at": "2001-01-01T00:00:00Z",
-            "images": [stored_record(FRONT_IMAGE, {"250": "https://caa/old.jpg"})],
+            "images": [
+                stored_record(FRONT_IMAGE, {"250": "https://coverartarchive.org/release/x/old.jpg"})
+            ],
             "dims": {},
         },
     )
@@ -633,7 +638,7 @@ def test_a_miss_is_fetched_stored_and_served(client, album_id, caa, app):
 
     assert resp.status_code == 200
     assert resp.data == caa.image_data
-    assert caa.image_calls == ["https://caa/1234567890-500.jpg"]
+    assert caa.image_calls == ["https://coverartarchive.org/release/x/1234567890-500.jpg"]
     # The bytes landed in the write root under the Content-Type's extension…
     stored = os.path.join(app.config["ARTWORK_STORAGE_DIR"], MBID, "1234567890-500.jpg")
     assert os.path.isfile(stored)
@@ -675,7 +680,7 @@ def test_asking_for_full_does_not_pre_fetch_the_thumbnails(client, album_id, caa
 def test_asking_for_a_thumbnail_does_not_pre_fetch_the_original(client, album_id, caa, app):
     client.get(image_url(album_id, size=250))
 
-    assert caa.image_calls == ["https://caa/1234567890-250.jpg"]
+    assert caa.image_calls == ["https://coverartarchive.org/release/x/1234567890-250.jpg"]
     release_dir = os.path.join(app.config["ARTWORK_STORAGE_DIR"], MBID)
     assert sorted(os.listdir(release_dir)) == ["1234567890-250.jpg", INDEX_FILENAME]
 
@@ -684,7 +689,7 @@ def test_only_the_requested_image_is_mirrored(client, album_id, caa):
     """One tile is one fetch — the other scans in the release stay untouched."""
     client.get(image_url(album_id, size=250))
 
-    assert caa.image_calls == ["https://caa/1234567890-250.jpg"]
+    assert caa.image_calls == ["https://coverartarchive.org/release/x/1234567890-250.jpg"]
 
 
 # --- the binary route: the refusals -----------------------------------------
@@ -799,6 +804,27 @@ def test_an_image_transport_failure_is_502(client, album_id, caa):
 
     assert resp.status_code == 502
     assert "unreachable" in resp.get_json()["error"]
+
+
+def test_a_stored_url_off_the_archive_is_refused_rather_than_fetched(client, album_id, caa):
+    """The route replays a URL off `index.json`, so the client checks it.
+
+    A listing is persisted and re-read for as long as its `urls` stay valid, and
+    nothing about the payload that produced it is re-verified at fetch time — so
+    an index carrying a URL that does not point at the archive (an older build, a
+    hand-edited file, an upstream having a bad day) must not turn the proxy into
+    a fetcher for that host.
+    """
+    caa.payload = {
+        "release": MB_URL,
+        "images": [{**FRONT_IMAGE, "thumbnails": {"250": "http://169.254.169.254/latest/"}}],
+    }
+
+    resp = client.get(image_url(album_id, size=250))
+
+    assert resp.status_code == 502
+    assert "not a Cover Art Archive image URL" in resp.get_json()["error"]
+    assert caa.image_calls == []
 
 
 def test_a_failed_listing_lookup_is_502_for_a_cold_image(client, album_id, caa):
