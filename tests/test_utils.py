@@ -563,3 +563,49 @@ def test_init_beets_overrides_beets_directory(tmp_path):
         assert lib_dir == "/music/custom"
     finally:
         lib._close()
+
+
+# ---------------------------------------------------------------------------
+# _save_cover_to_album — the Cover Art Archive marker
+# ---------------------------------------------------------------------------
+
+
+def _album_for_save(mocker, tmp_path):
+    """A beets album stand-in whose files really exist under `tmp_path`."""
+    album_dir = tmp_path / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    item = mocker.MagicMock()
+    item.path = str(album_dir / "01.mp3").encode()
+    album = mocker.MagicMock()
+    album.items.return_value = [item]
+    album.art_destination.return_value = str(album_dir / "cover.jpg").encode()
+    return album
+
+
+def test_save_cover_clears_the_artwork_marker_before_storing(app, tmp_path, mocker):
+    """Every Flask cover write funnels through here, so this is the one place
+    that can keep `beetdeck_cover_image_id` from outliving the cover it names.
+
+    Assigned ``""``, never deleted: the attr is absent on most albums and ``del``
+    on an absent flex attr raises — which would turn an ordinary upload into a
+    500 for an album that never had a marker at all.
+    """
+    from beetdeck.utils import _save_cover_to_album
+
+    album = _album_for_save(mocker, tmp_path)
+    src = tmp_path / "new.jpg"
+    _write_jpeg(src)
+    mocker.patch("beetsplug._utils.art.embed_album")
+    mocker.patch("beets.plugins.send")
+
+    order = mocker.MagicMock()
+    order.attach_mock(album.__setitem__, "mark")
+    order.attach_mock(album.store, "store")
+
+    with app.app_context():
+        _save_cover_to_album(album, str(src))
+
+    album.__setitem__.assert_called_once_with("beetdeck_cover_image_id", "")
+    assert not album.__delitem__.called
+    # …and before the store, or the cleared value never reaches the DB.
+    assert [call[0] for call in order.mock_calls] == ["mark", "store"]

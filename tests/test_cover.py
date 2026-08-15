@@ -49,6 +49,14 @@ class TestAlbumCover:
         assert resp.status_code == 200
 
 
+def _write_jpeg_bytes(handle, size=(300, 300), color="red"):
+    """A real JPEG into an open file object, for multipart upload bodies."""
+    from PIL import Image
+
+    Image.new("RGB", size, color=color).save(handle, format="JPEG")
+    handle.seek(0)
+
+
 def _write_jpeg(path, size=(300, 300), color="red"):
     """Write a real JPEG (Pillow-readable) so thumbnailing can run."""
     from PIL import Image
@@ -977,3 +985,89 @@ class TestCoverBehaviorUnchanged:
         )
         assert resp.status_code == 200
         assert resp.get_json()["status"] == "ok"
+
+
+class TestUploadClearsTheArtworkMarker:
+    """``beetdeck_cover_image_id`` names one Cover Art Archive scan as the
+    album's cover, so it has to die with the cover it describes.
+
+    Every cover write inside Flask funnels through ``_save_cover_to_album``,
+    which clears it — this drives the upload route against a **real** beets
+    library so the clearing is asserted where it matters, in the DB, rather than
+    on a mock that records the assignment and stores nothing.
+
+    ⚠️ Known limitation, out of scope here: a rescan (`beet import` /
+    `beet update -M` with fetchart) rewrites ``artpath`` without going through
+    this funnel, so the marker can survive a cover it no longer describes.
+    """
+
+    def _marker(self, db_path, album_id):
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT value FROM album_attributes WHERE entity_id = ? AND key = ?",
+                (album_id, "beetdeck_cover_image_id"),
+            ).fetchone()
+        finally:
+            conn.close()
+        return None if row is None else row[0]
+
+    def _album_with_marker(self, db_path, tmp_path, value="1234567890"):
+        import sqlite3
+
+        album_dir = tmp_path / "Artist" / "Marked Album"
+        album_dir.mkdir(parents=True)
+        track = album_dir / "01.mp3"
+        track.write_bytes(b"")
+        album_id = insert_album(db_path, album="Marked Album")
+        insert_item(db_path, album_id, path=str(track).encode())
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "INSERT INTO album_attributes (entity_id, key, value) VALUES (?, ?, ?)",
+                (album_id, "beetdeck_cover_image_id", value),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return album_id
+
+    def test_an_upload_clears_the_marker(self, client, db_path, tmp_path, mocker):
+        album_id = self._album_with_marker(db_path, tmp_path)
+        assert self._marker(db_path, album_id) == "1234567890"
+        mocker.patch("beetsplug._utils.art.embed_album")
+        new_cover = io.BytesIO()
+        _write_jpeg_bytes(new_cover)
+
+        resp = client.post(
+            f"/api/album/{album_id}/cover/upload",
+            data={"file": (new_cover, "new.jpg")},
+            content_type="multipart/form-data",
+        )
+
+        assert resp.status_code == 200
+        assert self._marker(db_path, album_id) == ""
+
+    def test_an_album_that_never_had_a_marker_uploads_fine(self, client, db_path, tmp_path, mocker):
+        """The clear is an assignment, not a ``del`` — deleting an absent flex
+        attr raises, which would 500 every upload in a library with no gallery
+        history at all."""
+        album_dir = tmp_path / "Artist" / "Unmarked"
+        album_dir.mkdir(parents=True)
+        track = album_dir / "01.mp3"
+        track.write_bytes(b"")
+        album_id = insert_album(db_path, album="Unmarked")
+        insert_item(db_path, album_id, path=str(track).encode())
+        mocker.patch("beetsplug._utils.art.embed_album")
+        new_cover = io.BytesIO()
+        _write_jpeg_bytes(new_cover)
+
+        resp = client.post(
+            f"/api/album/{album_id}/cover/upload",
+            data={"file": (new_cover, "new.jpg")},
+            content_type="multipart/form-data",
+        )
+
+        assert resp.status_code == 200

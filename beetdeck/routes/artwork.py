@@ -32,21 +32,25 @@ import sqlite3
 from flask import Blueprint, current_app, jsonify, request, send_file
 from spectree import Response
 
+from beetdeck import state
 from beetdeck.api import api
 from beetdeck.artwork_store import IMAGE_SIZES, sanitize_image_id, sanitize_mbid, sanitize_size
 from beetdeck.schemas.artwork import ArtworkListQuery, ArtworkListResponse
 from beetdeck.schemas.common import ErrorResponse
-from beetdeck.utils import _get_ro_conn, log
+from beetdeck.schemas.cover import CoverStatusResponse
+from beetdeck.utils import (
+    COVER_IMAGE_ID_ATTR,
+    _drop_cover_stash,
+    _get_ro_conn,
+    _init_beets,
+    _save_cover_to_album,
+    log,
+)
 
 bp = Blueprint("artwork", __name__)
 
 #: CAA has no per-image page, so the link is the release's MusicBrainz page.
 MB_RELEASE_URL = "https://musicbrainz.org/release/"
-
-#: The flex attr recording which CAA image was applied as the album cover.
-#: Cleared by writing `""` (see `_save_cover_to_album`), so an empty value means
-#: "no marker", not "id number zero".
-COVER_IMAGE_ID_ATTR = "beetdeck_cover_image_id"
 
 NO_MBID_REASON = "album has no MusicBrainz id"
 BAD_MBID_REASON = "album's MusicBrainz id is not a release id"
@@ -58,6 +62,10 @@ REMOTE = "remote"
 #: but a bare URL has to resolve to something, and the smallest rendition is the
 #: one that costs the least to be wrong about.
 DEFAULT_IMAGE_SIZE = "250"
+
+#: The rendition a cover is made of. Applying a thumbnail would install a 250 px
+#: image as the album's cover art, which no caller ever means.
+FULL_IMAGE_SIZE = "full"
 
 #: How long a browser may keep a proxied image. The bytes behind one
 #: `(image_id, size)` never change — CAA gives a new id to a new scan.
@@ -282,6 +290,19 @@ def _resolve_cold(store, mbid, image_id, size):
     return stored, None, None
 
 
+def _resolve_image(store, mbid, image_id, size):
+    """One rendition on disk, fetching it first when it is not; `(stored, error, status)`.
+
+    The disk layers answer first — that is the mirror — and only a genuine miss
+    reaches `_resolve_cold`. Shared by the binary route and the apply route so
+    the two cannot drift on what "this image is not available" means.
+    """
+    stored = store.find_image(mbid, image_id, size)
+    if stored is not None:
+        return stored, None, None
+    return _resolve_cold(store, mbid, image_id, size)
+
+
 # NOTE: **left undecorated**, for the reason `cover.py:59-64` spells out — this
 # route streams bytes through ``send_file``, which puts the response into
 # direct-passthrough mode, and spectree's response post-processing calls
@@ -320,11 +341,9 @@ def album_artwork_image(album_id, image_id):
         # serve. The listing route is where that is explained in words.
         return jsonify({"error": "Image not found"}), 404
 
-    stored = store.find_image(mbid, image_id, size)
+    stored, error, status = _resolve_image(store, mbid, image_id, size)
     if stored is None:
-        stored, error, status = _resolve_cold(store, mbid, image_id, size)
-        if stored is None:
-            return jsonify({"error": error}), status
+        return jsonify({"error": error}), status
 
     response = (
         send_file(stored.path, mimetype=stored.content_type)
@@ -333,3 +352,94 @@ def album_artwork_image(album_id, image_id):
     )
     response.headers["Cache-Control"] = IMAGE_CACHE_CONTROL
     return response
+
+
+@bp.route("/api/album/<int:album_id>/artwork/<image_id>/apply", methods=["POST"])
+@api.validate(
+    resp=Response(
+        HTTP_200=CoverStatusResponse,
+        HTTP_400=ErrorResponse,
+        HTTP_404=ErrorResponse,
+        HTTP_500=ErrorResponse,
+        HTTP_502=ErrorResponse,
+    ),
+    tags=["artwork"],
+)
+def apply_artwork_image(album_id, image_id):
+    """Make one Cover Art Archive scan the album cover.
+
+    The original is resolved (and, on a miss, fetched and mirrored) **outside**
+    the album write lock: it is the slow part and it mutates nothing the lock
+    protects. Everything that does mutate happens inside it, held across check
+    and write for the same reason `confirm_cover` holds it — a check that passes
+    in microseconds guards a write that takes seconds.
+
+    There is no stash of this route's own, so no `expected_generation` and no
+    `409`; what it *must* do is invalidate the cover stash, because a token
+    minted before this write would otherwise still pass its precondition and
+    revert it.
+    """
+    try:
+        image_id = sanitize_image_id(image_id)
+    except ValueError:
+        return jsonify({"error": "image_id must be a Cover Art Archive image id"}), 400
+
+    store = current_app.extensions["beetdeck_artwork_store"]
+    try:
+        row = _album_row(album_id)
+    except sqlite3.OperationalError as exc:
+        return jsonify({"error": str(exc)}), 500
+    if row is None:
+        return jsonify({"error": "Album not found"}), 404
+
+    try:
+        mbid = sanitize_mbid(row[0])
+    except ValueError:
+        return jsonify({"error": "Image not found"}), 404
+
+    stored, error, status = _resolve_image(store, mbid, image_id, FULL_IMAGE_SIZE)
+    if stored is None:
+        return jsonify({"error": error}), status
+
+    lib = None
+    try:
+        library_db = current_app.config["LIBRARY_DB"]
+        library_dir = current_app.config.get("LIBRARY_ROOT") or None
+        with state.album_write_lock(album_id):
+            lib = _init_beets(library_db, library_dir)
+            album = lib.get_album(album_id)
+            if not album:
+                return jsonify({"error": "Album not found"}), 404
+
+            log.info(
+                "Applying CAA image %s as cover for album_id=%d from %s",
+                image_id,
+                album_id,
+                stored.path,
+            )
+            # Dropped **before** the first persistent mutation, not after it.
+            # `_save_cover_to_album` persists `artpath` and only then embeds and
+            # sends `art_set`; either can raise, and a failure there would answer
+            # 500 with the cover already changed while leaving the old stash
+            # generation valid — so a stale confirm would still pass its
+            # precondition and overwrite the half-applied change. Invalidating a
+            # preview that turns out not to have been replaced is the cheap
+            # direction to be wrong in.
+            _drop_cover_stash(album_id)
+
+            _save_cover_to_album(album, stored.path)
+            # The helper cleared the marker and has already run its own
+            # `store()`, so re-setting it needs one of its own. The value is the
+            # same decimal string the listing route compares against.
+            album[COVER_IMAGE_ID_ATTR] = image_id
+            album.store()
+
+        log.info("CAA image %s applied for album_id=%d", image_id, album_id)
+        return jsonify({"status": "ok"})
+
+    except Exception as exc:
+        log.exception("Artwork apply failed for album_id=%d", album_id)
+        return jsonify({"error": str(exc)}), 500
+    finally:
+        if lib:
+            lib._close()

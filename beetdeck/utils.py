@@ -62,6 +62,12 @@ COVER_EMBED_QUALITY = 70
 COVER_THUMB_SIZES = (64, 128, 256, 400)
 COVER_THUMB_QUALITY = 80
 
+#: Album flex attr recording which Cover Art Archive image was applied as the
+#: cover, so the gallery can flag that tile as the current one. Cleared by
+#: writing ``""`` (see ``_save_cover_to_album``) — an empty value means "no
+#: marker", not "image id zero".
+COVER_IMAGE_ID_ATTR = "beetdeck_cover_image_id"
+
 
 def _default_file_mode():
     """The mode a plain ``open()`` would produce here, i.e. 0666 minus the umask.
@@ -430,6 +436,13 @@ def _save_cover_to_album(album, src_path):
         artdest = beets_unique_path(artdest)
         move(hires_bytes, artdest)
         album.artpath = artdest
+        # This is the single funnel for every cover write inside Flask, so it is
+        # the one place that can keep the Cover Art Archive marker from
+        # outliving the cover it describes. Assigned ``""`` rather than deleted:
+        # the attr is absent on most albums and ``del`` on an absent flex attr
+        # raises. The artwork apply route re-sets it — with its own ``store()``
+        # — immediately after this function returns.
+        album[COVER_IMAGE_ID_ATTR] = ""
         album.store()
     finally:
         if os.path.exists(hires_path):

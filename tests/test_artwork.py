@@ -31,6 +31,7 @@ import httpx
 import pytest
 from PIL import Image
 
+from beetdeck import state
 from beetdeck.artwork_store import INDEX_FILENAME
 from beetdeck.coverart import RateGate
 
@@ -813,3 +814,358 @@ def test_a_cold_fetch_in_cache_only_mode_lands_in_the_cache(client, album_id, ap
 
     assert resp.status_code == 200
     assert os.path.isfile(os.path.join(app.config["ARTWORK_CACHE_DIR"], MBID, "1234567890-250.jpg"))
+
+
+# --- the apply route --------------------------------------------------------
+#
+# `POST …/artwork/<image_id>/apply` is the one write in this feature, and what
+# it has to get right is not the write itself — `_save_cover_to_album` already
+# owns that — but the two things around it:
+#
+# * the cover stash is invalidated **before** the first persistent mutation, so
+#   a confirm token minted earlier can never revert a half-applied change;
+# * the applied id is recorded as the same decimal string the listing route
+#   compares against, or the *Current cover* marker vanishes on the next reload.
+
+
+def apply_url(album_id, image_id="1234567890"):
+    return f"/api/album/{album_id}/artwork/{image_id}/apply"
+
+
+def marker(db_path, album_id):
+    """The `beetdeck_cover_image_id` flex attr as the DB holds it, or `None`."""
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT value FROM album_attributes WHERE entity_id = ? AND key = ?",
+            (album_id, "beetdeck_cover_image_id"),
+        ).fetchone()
+    finally:
+        conn.close()
+    return None if row is None else row[0]
+
+
+@pytest.fixture()
+def beets(mocker):
+    """A stand-in beets library for the apply route: one album, no file work.
+
+    Returns the album mock. `_save_cover_to_album` is left alone — a test that
+    wants the real one (the failure-injection group below) gets it.
+    """
+    album = mocker.MagicMock()
+    library = mocker.MagicMock()
+    library.get_album.return_value = album
+    mocker.patch("beetdeck.routes.artwork._init_beets", return_value=library)
+    return album
+
+
+@pytest.fixture()
+def saved(mocker):
+    """`_save_cover_to_album` stubbed out, as seen by the apply route."""
+    return mocker.patch("beetdeck.routes.artwork._save_cover_to_album")
+
+
+def test_apply_writes_the_stored_original_as_the_cover(client, album_id, caa, app, beets, saved):
+    resp = client.post(apply_url(album_id))
+
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "ok"}
+    stored = os.path.join(app.config["ARTWORK_STORAGE_DIR"], MBID, "1234567890-full.jpg")
+    assert saved.call_args.args[1] == stored
+    # The original, never a thumbnail — a 250 px file installed as the album
+    # cover is a downgrade nobody asked for.
+    assert caa.image_calls == [FRONT_IMAGE["image"]]
+
+
+def test_apply_reuses_an_already_mirrored_original(client, album_id, caa, app, beets, saved):
+    plant_image(app.config["ARTWORK_STORAGE_DIR"], "1234567890-full.jpg")
+
+    resp = client.post(apply_url(album_id))
+
+    assert resp.status_code == 200
+    assert caa.calls == []
+
+
+def test_apply_records_the_image_id_as_a_decimal_string(client, album_id, beets, saved, mocker):
+    """The marker is set *after* the helper, with a `store()` of its own.
+
+    `_save_cover_to_album` clears the attr and runs its own `store()` mid-way,
+    so a marker written before it would be persisted as `""` and one written
+    after it without a second `store()` would never reach the DB at all.
+    """
+    order = mocker.MagicMock()
+    order.attach_mock(saved, "save")
+    order.attach_mock(beets.__setitem__, "mark")
+    order.attach_mock(beets.store, "store")
+
+    resp = client.post(apply_url(album_id))
+
+    assert resp.status_code == 200
+    assert [call[0] for call in order.mock_calls] == ["save", "mark", "store"]
+    beets.__setitem__.assert_called_once_with("beetdeck_cover_image_id", "1234567890")
+
+
+def test_apply_drops_the_cover_stash(client, album_id, beets, saved):
+    state.identify_tasks[f"cover_{album_id}"] = {
+        "candidate_path": "/tmp/candidate.jpg",
+        "stash_generation": 1,
+    }
+
+    resp = client.post(apply_url(album_id))
+
+    assert resp.status_code == 200
+    assert f"cover_{album_id}" not in state.identify_tasks
+
+
+def test_the_stash_is_dropped_before_the_first_persistent_mutation(client, album_id, beets, saved):
+    """Not after the write: `_save_cover_to_album` can raise half-way through.
+
+    It persists `artpath` and only then embeds and sends `art_set`. A stash
+    dropped afterwards would still be valid at that point, so a confirm holding
+    its generation would pass its precondition and overwrite the half-applied
+    cover — the exact invariant `_drop_cover_stash` exists to protect.
+    """
+    seen = {}
+    saved.side_effect = lambda album, path: seen.update(
+        stash_present=f"cover_{album_id}" in state.identify_tasks
+    )
+    state.identify_tasks[f"cover_{album_id}"] = {
+        "candidate_path": "/tmp/candidate.jpg",
+        "stash_generation": 1,
+    }
+
+    assert client.post(apply_url(album_id)).status_code == 200
+    assert seen == {"stash_present": False}
+
+
+# --- the apply route: the refusals ------------------------------------------
+
+
+def test_apply_on_an_unknown_album_is_404(client, caa):
+    resp = client.post(apply_url(4242))
+
+    assert resp.status_code == 404
+    assert resp.get_json() == {"error": "Album not found"}
+    assert caa.calls == []
+
+
+def test_apply_on_an_album_without_a_release_id_is_404(client, db_path, caa):
+    album = insert_album(db_path, mb_albumid="")
+
+    resp = client.post(apply_url(album))
+
+    assert resp.status_code == 404
+    assert caa.calls == []
+
+
+@pytest.mark.parametrize("image_id", ["12a", "-12", "12.0", r"..%5C..%5Cetc"])
+def test_apply_with_a_non_numeric_image_id_is_400(client, album_id, caa, image_id):
+    resp = client.post(apply_url(album_id, image_id=image_id))
+
+    assert resp.status_code == 400
+    assert "image_id" in resp.get_json()["error"]
+    assert caa.calls == []
+
+
+def test_apply_of_an_image_outside_the_release_is_404(client, album_id, beets, saved):
+    resp = client.post(apply_url(album_id, image_id="5555555555"))
+
+    assert resp.status_code == 404
+    assert resp.get_json() == {"error": "Image not found"}
+    assert not saved.called
+
+
+def test_apply_is_502_when_the_original_cannot_be_fetched(client, album_id, caa, beets, saved):
+    caa.image_status = 503
+
+    resp = client.post(apply_url(album_id))
+
+    assert resp.status_code == 502
+    assert "503" in resp.get_json()["error"]
+    assert not saved.called
+
+
+def test_apply_is_502_when_the_release_cannot_be_looked_up(client, album_id, caa, beets, saved):
+    caa.raises = httpx.ConnectError("down")
+
+    resp = client.post(apply_url(album_id))
+
+    assert resp.status_code == 502
+    assert not saved.called
+
+
+def test_apply_is_404_when_the_album_vanished_between_read_and_write(
+    client, album_id, beets, saved, mocker
+):
+    """The row is read through SQLite and re-fetched through beets under the lock."""
+    mocker.patch("beetdeck.routes.artwork._init_beets").return_value.get_album.return_value = None
+
+    resp = client.post(apply_url(album_id))
+
+    assert resp.status_code == 404
+    assert not saved.called
+
+
+def test_apply_db_failure_is_500(client, db_path, album_id, app, caa):
+    app.config["LIBRARY_DB"] = str(db_path) + ".missing"
+
+    resp = client.post(apply_url(album_id))
+
+    assert resp.status_code == 500
+    assert "error" in resp.get_json()
+    assert caa.calls == []
+
+
+# --- the apply route: the marker round trip ---------------------------------
+
+
+def test_current_image_id_survives_a_round_trip(client, album_id, db_path, mocker):
+    """Apply, then re-read the listing: one decimal string on both sides.
+
+    Driven through a **real** beets library rather than a mock, because the
+    boundary this pins is the flex attr itself — CAA sends the id as a number
+    and beets attrs are TEXT, so anything less than one canonical spelling makes
+    `current_image_id === image_id` false in the page after a reload and the
+    *Current cover* marker silently disappears.
+    """
+    mocker.patch("beetdeck.routes.artwork._save_cover_to_album")
+
+    assert client.post(apply_url(album_id)).status_code == 200
+
+    assert marker(db_path, album_id) == "1234567890"
+    body = client.get(f"/api/album/{album_id}/artwork").get_json()
+    assert body["current_image_id"] == "1234567890"
+    assert body["current_image_id"] in [image["image_id"] for image in body["images"]]
+
+
+# --- the apply route: the stash invariant, end to end -----------------------
+
+
+def mint_cover_stash(client, mocker, tmp_path, album_id):
+    """Drive `…/cover/fetch` for real and return the `stash_generation` it stamped.
+
+    A hand-planted `identify_tasks` entry would prove the same thing about the
+    apply route and nothing about the pair — the generation has to come from the
+    endpoint that mints it for "a token issued before the apply" to mean what it
+    says.
+    """
+    candidate_file = tmp_path / "candidate.jpg"
+    Image.new("RGB", (600, 600), "blue").save(str(candidate_file), format="JPEG")
+    library = mocker.MagicMock()
+    library.get_album.return_value = mocker.MagicMock()
+    mocker.patch("beetdeck.routes.cover._init_beets", return_value=library)
+    candidate = mocker.MagicMock()
+    candidate.path = str(candidate_file).encode()
+    candidate.source_name = "coverart"
+    plugin = mocker.MagicMock()
+    plugin.name = "fetchart"
+    plugin.art_for_album.return_value = candidate
+    mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+
+    fetched = client.post(f"/api/album/{album_id}/cover/fetch").get_json()
+    assert fetched["found"] is True
+    return fetched["stash_generation"]
+
+
+def test_a_confirm_token_minted_before_an_apply_is_refused_after_it(
+    client, album_id, tmp_path, beets, saved, mocker
+):
+    """The end-to-end form of the stash invariant.
+
+    Asserting the key is absent proves the drop ran; it does not prove the
+    precondition the drop exists to serve. This drives all three endpoints: a
+    real fetch mints a generation, the apply overrules it, and the confirm
+    holding it is refused instead of reverting the cover that replaced it.
+    """
+    generation = mint_cover_stash(client, mocker, tmp_path, album_id)
+    reverting_save = mocker.patch("beetdeck.routes.cover._save_cover_to_album")
+
+    assert client.post(apply_url(album_id)).status_code == 200
+
+    resp = client.post(
+        f"/api/album/{album_id}/cover/confirm", json={"expected_generation": generation}
+    )
+    assert resp.status_code == 409
+    assert "changed since the preview" in resp.get_json()["error"]
+    # …and the cover the apply installed is still the one on the album.
+    assert not reverting_save.called
+    assert saved.call_count == 1
+
+
+# --- the apply route: failure injection -------------------------------------
+#
+# Every arm answers 500 **and** leaves the previously minted generation refused.
+# A 500 that left the stash valid is the dangerous shape: the cover may already
+# have been half-written, and a confirm holding that token would overwrite it.
+
+
+@pytest.fixture()
+def library_on_disk(mocker, tmp_path, db_path):
+    """A beets album backed by a real directory, so the *real* save runs.
+
+    Only the two beets calls that touch audio files are stubbed by the tests
+    below; everything else — the resize, the move, the flex-attr write — is the
+    code under test.
+    """
+    album_dir = tmp_path / "Artist" / "Album"
+    album_dir.mkdir(parents=True)
+    item = mocker.MagicMock()
+    item.path = str(album_dir / "01.mp3").encode()
+    album = mocker.MagicMock()
+    album.items.return_value = [item]
+    album.art_destination.return_value = str(album_dir / "cover.jpg").encode()
+    library = mocker.MagicMock()
+    library.get_album.return_value = album
+    mocker.patch("beetdeck.routes.artwork._init_beets", return_value=library)
+    return album
+
+
+def assert_apply_failed_with_the_stash_invalidated(client, album_id, generation, resp, message):
+    assert resp.status_code == 500
+    assert message in resp.get_json()["error"]
+    confirm = client.post(
+        f"/api/album/{album_id}/cover/confirm", json={"expected_generation": generation}
+    )
+    assert confirm.status_code == 409
+
+
+def test_a_failing_embed_is_500_and_still_invalidates_the_stash(
+    client, album_id, tmp_path, library_on_disk, mocker
+):
+    generation = mint_cover_stash(client, mocker, tmp_path, album_id)
+    mocker.patch("beetsplug._utils.art.embed_album", side_effect=RuntimeError("no mutagen"))
+    mocker.patch("beets.plugins.send")
+
+    resp = client.post(apply_url(album_id))
+
+    assert_apply_failed_with_the_stash_invalidated(client, album_id, generation, resp, "no mutagen")
+
+
+def test_a_failing_art_set_is_500_and_still_invalidates_the_stash(
+    client, album_id, tmp_path, library_on_disk, mocker
+):
+    """`artpath` is already persisted by the time this event goes out."""
+    generation = mint_cover_stash(client, mocker, tmp_path, album_id)
+    mocker.patch("beetsplug._utils.art.embed_album")
+    mocker.patch("beets.plugins.send", side_effect=RuntimeError("plugin blew up"))
+
+    resp = client.post(apply_url(album_id))
+
+    assert_apply_failed_with_the_stash_invalidated(
+        client, album_id, generation, resp, "plugin blew up"
+    )
+
+
+def test_a_failing_marker_store_is_500_and_still_invalidates_the_stash(
+    client, album_id, tmp_path, beets, saved, mocker
+):
+    """The cover is written by now; only the marker write is left to fail."""
+    generation = mint_cover_stash(client, mocker, tmp_path, album_id)
+    beets.store.side_effect = RuntimeError("database is locked")
+
+    resp = client.post(apply_url(album_id))
+
+    assert saved.called
+    assert_apply_failed_with_the_stash_invalidated(
+        client, album_id, generation, resp, "database is locked"
+    )
