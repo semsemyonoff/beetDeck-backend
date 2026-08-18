@@ -281,3 +281,318 @@ class TestPreviewMbsyncInSpec:
 
         resp = client.post("/api/album/9999/mbsync")
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# POST /api/album/<id>/mbsync/confirm
+# ---------------------------------------------------------------------------
+#
+# Every test below runs a real preview first to mint a genuine stash entry,
+# then re-points `_init_beets`/`Album.items` at *fresh* item/album instances
+# before confirming — mirroring a real confirm's own DB re-read. Reusing the
+# exact objects the preview mutated in place (it never reverts them; only
+# `store()` is skipped) would make every field look drifted, since the
+# "current" value would already equal the "new" one.
+
+
+def _write_ok(mocker):
+    mocker.patch("beetdeck.routes.mbsync._try_write_item", return_value=True)
+
+
+def _no_op_store(mocker):
+    mocker.patch.object(Item, "store", lambda self, **kw: None)
+    mocker.patch.object(Album, "store", lambda self, **kw: None)
+
+
+class TestConfirmMbsync:
+    def _run_preview(self, client, mocker, item, album, info):
+        install_lib(mocker, album, [item])
+        patch_mb(mocker, album_info=info)
+        resp = client.post(f"/api/album/{album.id}/mbsync")
+        assert resp.status_code == 200
+        return resp.get_json()
+
+    def test_returns_400_with_no_stash_and_no_generation(self, client, mocker):
+        album = make_album(id=1)
+        install_lib(mocker, album, [])
+
+        resp = client.post("/api/album/1/mbsync/confirm")
+        assert resp.status_code == 400
+
+    def test_returns_409_with_no_stash_when_generation_given(self, client, mocker):
+        album = make_album(id=1)
+        install_lib(mocker, album, [])
+
+        resp = client.post("/api/album/1/mbsync/confirm", json={"expected_generation": 1})
+        assert resp.status_code == 409
+
+    def test_returns_409_with_stale_generation(self, client, mocker):
+        item = make_item(id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1)
+        album = make_album(id=1, mb_albumid="mb-release-1")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1")
+        self._run_preview(client, mocker, item, album, info)
+
+        resp = client.post("/api/album/1/mbsync/confirm", json={"expected_generation": 999999})
+        assert resp.status_code == 409
+
+    def test_returns_409_during_an_importing_rescan(self, client, mocker):
+        item = make_item(id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1)
+        album = make_album(id=1, mb_albumid="mb-release-1")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1")
+        body = self._run_preview(client, mocker, item, album, info)
+
+        state.rescan_phase = "importing"
+        resp = client.post(
+            "/api/album/1/mbsync/confirm", json={"expected_generation": body["stash_generation"]}
+        )
+        assert resp.status_code == 409
+
+    def test_writes_included_fields_and_updates_album_row(self, client, mocker):
+        item = make_item(
+            id=101, title="Old Title", label="Old Label", mb_trackid="rec-1", track=1, disc=1
+        )
+        album = make_album(id=1, mb_albumid="mb-release-1", label="Old Label")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1", label="4AD", artist="New Artist")
+        body = self._run_preview(client, mocker, item, album, info)
+
+        fresh_item = make_item(
+            id=101, title="Old Title", label="Old Label", mb_trackid="rec-1", track=1, disc=1
+        )
+        fresh_album = make_album(id=1, mb_albumid="mb-release-1", label="Old Label")
+        install_lib(mocker, fresh_album, [fresh_item])
+        _write_ok(mocker)
+        stored_item_ids = []
+        stored_album_ids = []
+        mocker.patch.object(Item, "store", lambda self, **kw: stored_item_ids.append(self.id))
+        mocker.patch.object(Album, "store", lambda self, **kw: stored_album_ids.append(self.id))
+
+        resp = client.post(
+            "/api/album/1/mbsync/confirm", json={"expected_generation": body["stash_generation"]}
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "ok"
+        assert fresh_item.title == "New Title"
+        assert fresh_album.label == "4AD"
+        assert stored_item_ids == [101]
+        assert stored_album_ids == [1]
+        # The stash is gone once confirmed.
+        assert "mbsync_1" not in state.identify_tasks
+
+    def test_excluded_field_stays_unchanged_on_item_and_album(self, client, mocker):
+        item = make_item(
+            id=101, title="Old Title", label="Old Label", mb_trackid="rec-1", track=1, disc=1
+        )
+        album = make_album(id=1, mb_albumid="mb-release-1", label="Old Label")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1", label="4AD")
+        body = self._run_preview(client, mocker, item, album, info)
+
+        fresh_item = make_item(
+            id=101, title="Old Title", label="Old Label", mb_trackid="rec-1", track=1, disc=1
+        )
+        fresh_album = make_album(id=1, mb_albumid="mb-release-1", label="Old Label")
+        install_lib(mocker, fresh_album, [fresh_item])
+        _write_ok(mocker)
+        _no_op_store(mocker)
+
+        resp = client.post(
+            "/api/album/1/mbsync/confirm",
+            json={"expected_generation": body["stash_generation"], "excluded_fields": ["label"]},
+        )
+        assert resp.status_code == 200
+        assert fresh_item.title == "New Title"
+        assert fresh_item.label == "Old Label"
+        assert fresh_album.label == "Old Label"
+
+    def test_unrelated_album_row_disagreement_survives_untouched(self, client, mocker):
+        # The release never proposes a "genre" value (album-level, not stripped
+        # like the dedicated genre fields), so a pre-existing mismatch between
+        # the album row and item[0] on that field is not this sync's business.
+        item = make_item(
+            id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1, catalognum="ITEM-CAT"
+        )
+        album = make_album(id=1, mb_albumid="mb-release-1", catalognum="ALBUM-CAT")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1")
+        body = self._run_preview(client, mocker, item, album, info)
+
+        fresh_item = make_item(
+            id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1, catalognum="ITEM-CAT"
+        )
+        fresh_album = make_album(id=1, mb_albumid="mb-release-1", catalognum="ALBUM-CAT")
+        install_lib(mocker, fresh_album, [fresh_item])
+        _write_ok(mocker)
+        _no_op_store(mocker)
+
+        resp = client.post(
+            "/api/album/1/mbsync/confirm", json={"expected_generation": body["stash_generation"]}
+        )
+        assert resp.status_code == 200
+        assert fresh_album.catalognum == "ALBUM-CAT"
+
+    def test_unmapped_items_are_untouched(self, client, mocker):
+        matched = make_item(id=101, title="Track One", mb_trackid="rec-1", track=1, disc=1)
+        extra = make_item(
+            id=102, title="Bonus Track", mb_trackid="not-on-release", track=13, disc=1
+        )
+        album = make_album(id=1, mb_albumid="mb-release-1")
+        track = make_track_info(
+            title="Track One Fixed",
+            track_id="rec-1",
+            release_track_id="rt-1",
+            medium=1,
+            medium_index=1,
+        )
+        info = make_album_info([track], album_id="mb-release-1")
+        install_lib(mocker, album, [matched, extra])
+        patch_mb(mocker, album_info=info)
+        preview_resp = client.post("/api/album/1/mbsync")
+        assert preview_resp.status_code == 200
+        body = preview_resp.get_json()
+
+        fresh_matched = make_item(id=101, title="Track One", mb_trackid="rec-1", track=1, disc=1)
+        fresh_extra = make_item(
+            id=102, title="Bonus Track", mb_trackid="not-on-release", track=13, disc=1
+        )
+        fresh_album = make_album(id=1, mb_albumid="mb-release-1")
+        install_lib(mocker, fresh_album, [fresh_matched, fresh_extra])
+        _write_ok(mocker)
+        _no_op_store(mocker)
+
+        resp = client.post(
+            "/api/album/1/mbsync/confirm", json={"expected_generation": body["stash_generation"]}
+        )
+        assert resp.status_code == 200
+        assert fresh_matched.title == "Track One Fixed"
+        assert fresh_extra.title == "Bonus Track"
+
+    # -- drift ---------------------------------------------------------
+
+    def test_returns_409_when_an_item_field_drifted(self, client, mocker):
+        item = make_item(id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1)
+        album = make_album(id=1, mb_albumid="mb-release-1")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1")
+        body = self._run_preview(client, mocker, item, album, info)
+
+        # Something else wrote a different title between preview and confirm.
+        fresh_item = make_item(
+            id=101, title="Someone Else's Title", mb_trackid="rec-1", track=1, disc=1
+        )
+        fresh_album = make_album(id=1, mb_albumid="mb-release-1")
+        install_lib(mocker, fresh_album, [fresh_item])
+
+        resp = client.post(
+            "/api/album/1/mbsync/confirm", json={"expected_generation": body["stash_generation"]}
+        )
+        assert resp.status_code == 409
+
+    def test_returns_409_when_the_album_row_drifted(self, client, mocker):
+        item = make_item(
+            id=101, title="Old Title", label="Old Label", mb_trackid="rec-1", track=1, disc=1
+        )
+        album = make_album(id=1, mb_albumid="mb-release-1", label="Old Label")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1", label="4AD")
+        body = self._run_preview(client, mocker, item, album, info)
+
+        fresh_item = make_item(
+            id=101, title="Old Title", label="Old Label", mb_trackid="rec-1", track=1, disc=1
+        )
+        # Someone else edited the album's label directly since the preview.
+        fresh_album = make_album(id=1, mb_albumid="mb-release-1", label="Someone Else's Label")
+        install_lib(mocker, fresh_album, [fresh_item])
+
+        resp = client.post(
+            "/api/album/1/mbsync/confirm", json={"expected_generation": body["stash_generation"]}
+        )
+        assert resp.status_code == 409
+
+    def test_returns_409_when_a_stashed_item_left_the_album(self, client, mocker):
+        item = make_item(id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1)
+        album = make_album(id=1, mb_albumid="mb-release-1")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1")
+        body = self._run_preview(client, mocker, item, album, info)
+
+        # Item 101 has since been re-parented away from album 1.
+        fresh_album = make_album(id=1, mb_albumid="mb-release-1")
+        install_lib(mocker, fresh_album, [])
+
+        resp = client.post(
+            "/api/album/1/mbsync/confirm", json={"expected_generation": body["stash_generation"]}
+        )
+        assert resp.status_code == 409
+
+    def test_returns_409_when_the_album_was_removed(self, client, mocker):
+        item = make_item(id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1)
+        album = make_album(id=1, mb_albumid="mb-release-1")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1")
+        body = self._run_preview(client, mocker, item, album, info)
+
+        lib = mocker.MagicMock()
+        lib.get_album.return_value = None
+        mocker.patch("beetdeck.routes.mbsync._init_beets", return_value=lib)
+
+        resp = client.post(
+            "/api/album/1/mbsync/confirm", json={"expected_generation": body["stash_generation"]}
+        )
+        assert resp.status_code == 409
+
+    def test_reports_partial_status_on_a_write_failure(self, client, mocker):
+        item = make_item(id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1)
+        album = make_album(id=1, mb_albumid="mb-release-1")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1")
+        body = self._run_preview(client, mocker, item, album, info)
+
+        fresh_item = make_item(id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1)
+        fresh_album = make_album(id=1, mb_albumid="mb-release-1")
+        install_lib(mocker, fresh_album, [fresh_item])
+        mocker.patch("beetdeck.routes.mbsync._try_write_item", return_value=False)
+        _no_op_store(mocker)
+
+        resp = client.post(
+            "/api/album/1/mbsync/confirm", json={"expected_generation": body["stash_generation"]}
+        )
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["status"] == "partial"
+        assert body["write_failures"] == [101]
+
+
+class TestConfirmMbsyncInSpec:
+    def test_confirm_in_spec(self, client):
+        spec = client.get("/apidoc/openapi.json").get_json()
+        assert "/api/album/{album_id}/mbsync/confirm" in spec["paths"]
+
+    def test_confirm_without_body_reaches_handler(self, client, mocker):
+        album = make_album(id=1)
+        install_lib(mocker, album, [])
+
+        resp = client.post("/api/album/1/mbsync/confirm")
+        assert resp.status_code == 400
