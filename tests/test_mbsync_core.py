@@ -217,6 +217,33 @@ class TestSnapshotDiffRestoreDrift:
 
         assert album_fields == []
 
+    def test_album_only_fields_stay_out_of_the_item_snapshot(self):
+        # `album.items()` hands back items with `_cached_album` populated, and
+        # beets' `Item.keys()` unions the album's fields by default — `artpath`
+        # is an album-only column no item row carries.
+        item = make_item(id=1, title="Intro")
+        item._cached_album = make_album(id=1, artpath=b"/music/a/cover.jpg")
+
+        snapshot = snapshot_items([item])
+
+        assert "artpath" not in snapshot[1]
+
+    def test_an_album_only_field_changing_is_not_a_track_change(self):
+        # A cover write between preview and confirm moves `album.artpath`. Read
+        # through the item, that would mark *every* track changed and make the
+        # confirm rewrite every file in the album, unmapped ones included.
+        item = make_item(id=1, title="Intro")
+        item._cached_album = make_album(id=1, artpath=b"/music/a/old.jpg")
+        snapshot = snapshot_items([item])
+
+        item._cached_album = make_album(id=1, artpath=b"/music/a/new.jpg")
+
+        album_snapshot = snapshot_album(make_album(id=1))
+        album_fields, track_fields = diff_against(album_snapshot, snapshot, [item])
+
+        assert album_fields == []
+        assert track_fields == []
+
     def test_restore_field_present_in_snapshot(self):
         item = make_item(id=1, title="Intro")
         snapshot = snapshot_items([item])

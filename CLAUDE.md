@@ -178,7 +178,15 @@ shared `common.py`). Do not maintain an endpoint table here — read the spec.
   never appeared in the diff), and it commits with `album.store(inherit=False)`
   — every field in that copy is in `Album.item_keys` by construction, so the
   default `inherit=True` would push each one onto **every** item's DB row,
-  including the unmapped tracks this route never rewrites the files of.
+  including the unmapped tracks this route never rewrites the files of. The
+  per-item snapshot and diff read `item.keys(with_album=False)`: beets' default
+  unions the album's own fields (and `Item.__getitem__` falls back to the album),
+  so `artpath` would be snapshotted onto every track and a cover applied between
+  preview and confirm would read as a change on all of them — rewriting every
+  file in the album. `excluded_fields` is validated against the stashed diff and
+  `400`s on anything outside it: `restore_fields` writes the preview-time value
+  back into the DB *and* the audio file, and the drift check only covers the
+  fields the preview reported changed.
 - `POST …/cover/fetch` retries with `fetchart`'s `minwidth`/`enforce_ratio`
   lifted when the first pass finds nothing, and marks such a hit `relaxed: true`
   with a `warning`. Both outcomes carry `current_width`/`current_height`, and

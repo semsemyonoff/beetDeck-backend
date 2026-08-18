@@ -97,8 +97,18 @@ def build_item_info_pairs(album_info, items):
 
 
 def snapshot_items(items):
-    """``{item.id: {field: value}}`` over every field each item currently holds."""
-    return {item.id: {field: item[field] for field in item.keys()} for item in items}
+    """``{item.id: {field: value}}`` over every field each item currently holds.
+
+    ``with_album=False`` is load-bearing: beets' ``Item.keys()`` defaults to
+    unioning the album's own fields (and ``Item.__getitem__`` falls back to the
+    album), so ``artpath`` — an album-only column no item row carries — would be
+    snapshotted onto every track. A cover write between preview and confirm then
+    reads as a change on *every* item, and the confirm rewrites every file in the
+    album, including the unmapped ones it promises to leave alone.
+    """
+    return {
+        item.id: {field: item[field] for field in item.keys(with_album=False)} for item in items
+    }
 
 
 def snapshot_album(album):
@@ -123,7 +133,8 @@ def diff_against(album_snapshot, item_snapshot, items):
     track_changes = {}
     for item in items:
         old_row = item_snapshot.get(item.id, {})
-        current_keys = set(item.keys())
+        # Item's own fields only, matching snapshot_items — see its docstring.
+        current_keys = set(item.keys(with_album=False))
         for field in set(old_row) | current_keys:
             old_val = old_row.get(field)
             new_val = item[field] if field in current_keys else None

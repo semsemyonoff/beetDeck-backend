@@ -687,6 +687,41 @@ class TestConfirmMbsync:
         # The stash is consumed either way — a no-op confirm is still a confirm.
         assert "mbsync_1" not in state.identify_tasks
 
+    def test_returns_400_for_an_excluded_field_outside_the_preview(self, client, mocker):
+        # `restore_fields` would write the preview-time value of *any* name back
+        # onto every item and into its file, and the drift check only covers the
+        # fields the preview reported changed.
+        item = make_item(
+            id=101, title="Old Title", comments="Keep me", mb_trackid="rec-1", track=1, disc=1
+        )
+        album = make_album(id=1, mb_albumid="mb-release-1")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1")
+        body = self._run_preview(client, mocker, item, album, info)
+
+        fresh_item = make_item(
+            id=101, title="Old Title", comments="Rewritten", mb_trackid="rec-1", track=1, disc=1
+        )
+        fresh_album = make_album(id=1, mb_albumid="mb-release-1")
+        install_lib(mocker, fresh_album, [fresh_item])
+        _write_ok(mocker)
+        _no_op_store(mocker)
+
+        resp = client.post(
+            "/api/album/1/mbsync/confirm",
+            json={
+                "expected_generation": body["stash_generation"],
+                "excluded_fields": ["comments"],
+            },
+        )
+        assert resp.status_code == 400
+        assert "comments" in resp.get_json()["error"]
+        assert fresh_item.comments == "Rewritten"
+        # A refused confirm leaves the stash intact — nothing was consumed.
+        assert state.identify_tasks["mbsync_1"]["stash_generation"] == body["stash_generation"]
+
     def test_a_second_preview_invalidates_the_first_token(self, client, mocker):
         item = make_item(id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1)
         album = make_album(id=1, mb_albumid="mb-release-1")

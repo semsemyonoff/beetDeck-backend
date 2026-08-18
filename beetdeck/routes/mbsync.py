@@ -239,6 +239,23 @@ def confirm_mbsync(album_id):
             if task is None:
                 return jsonify({"error": "No sync preview found for this album"}), 400
 
+            # `restore_fields` writes the preview-time value back onto every item
+            # (or `del`s it), and the drift check only covers the fields the
+            # preview reported changed — so a name from outside the diff would be
+            # reverted, and written to the audio file, with no freshness check at
+            # all. Bad value, not a bad shape, so 400 rather than 422.
+            known_fields = set(task.get("album_field_names") or []) | set(
+                task.get("track_field_names") or []
+            )
+            unknown_fields = sorted(excluded_fields - known_fields)
+            if unknown_fields:
+                return jsonify(
+                    {
+                        "error": "Excluded field(s) are not part of this preview: "
+                        + ", ".join(unknown_fields)
+                    }
+                ), 400
+
             library_db = current_app.config["LIBRARY_DB"]
             library_dir = current_app.config.get("LIBRARY_ROOT") or None
             lib = _init_beets(library_db, library_dir)
