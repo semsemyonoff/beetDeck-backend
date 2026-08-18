@@ -36,6 +36,16 @@ obvious from their name:
 - `beetdeck/item_fields.py` — the source of truth for which beets fields are
   editable and which are album-level; both the catalog route and the write path
   validate against it.
+- `beetdeck/coverart.py` — Cover Art Archive HTTP client, a dataclass with an
+  injectable `transport` and `gate` (the shape `beetdeck_mcp/musicbrainz.py`
+  established, deliberately duplicated rather than imported). Its `fetch_image`
+  is handed a URL replayed from `index.json`, so it checks rather than trusts it:
+  the host must be `coverartarchive.org`/`archive.org` or a subdomain **on every
+  redirect hop** (which is why it follows them by hand instead of letting httpx
+  do it), and the body is streamed against `MAX_IMAGE_BYTES` — a `502` either
+  way, and nothing partial reaches the mirror.
+- `beetdeck/artwork_store.py` — the two-root disk layer under the gallery:
+  index, image resolution, and the cache sweep. Pure filesystem, no Flask.
 - `beetdeck/templates/index.html` — SPA shell; injects the hashed JS/CSS by
   reading the Vite manifest at request time.
 - `beetdeck/static/dist/` — SPA build output, gitignored.
@@ -52,6 +62,34 @@ obvious from their name:
 | `LIBRARY_ROOT` | `BEETS_LIBRARY_ROOT` | falls back to `IMPORT_DIR` |
 | `COVER_CACHE_DIR` | `BEETS_COVER_CACHE_DIR` | `<tmp>/beetdeck-cover-cache` |
 | `MAX_CONTENT_LENGTH` | — | 32 MB (cover upload limit) |
+| `ARTWORK_STORAGE_DIR` | `BEETS_ARTWORK_STORAGE_DIR` | `None` → storage mode off |
+| `ARTWORK_CACHE_DIR` | `BEETS_ARTWORK_CACHE_DIR` | `<tmp>/beetdeck-artwork-cache` |
+| `ARTWORK_CACHE_MAX_BYTES` | `BEETS_ARTWORK_CACHE_MAX_BYTES` | 512 MB |
+| `ARTWORK_CACHE_TTL` | `BEETS_ARTWORK_CACHE_TTL` | 7 days |
+| `ARTWORK_META_TTL` | `BEETS_ARTWORK_META_TTL` | 24 h (the `index.json` listing only) |
+| `ARTWORK_USER_AGENT` | `BEETS_ARTWORK_USER_AGENT` | `DEFAULT_ARTWORK_USER_AGENT` |
+| `ARTWORK_CAA_TRANSPORT` | — | `None`; test-only `httpx` transport injection |
+
+The three numeric artwork keys are parsed defensively: a non-numeric env value
+logs a warning and falls back to the default rather than failing app
+construction. `0` and negatives are **passed through** — the store reads a
+non-positive TTL/budget as "that half of the cache sweep is off", which is not
+the same as garbage input.
+
+`ARTWORK_STORAGE_DIR` is opt-in. Set, every rendition the gallery proxies is
+mirrored there permanently and re-reads never hit the network; unset, the same
+files land in the TTL- and size-bounded cache root. Reads consult both roots
+(storage first) so flipping the mode never orphans what is already on disk, but
+nothing is ever *promoted* between them.
+
+The `CaaClient` and the `ArtworkStore` are built **once per app** in
+`create_app` and live in `app.extensions["beetdeck_caa"]` /
+`["beetdeck_artwork_store"]`. That lifetime is load-bearing, not tidiness: a
+client built per request hands every thread a fresh `RateGate` with a clean
+timestamp, so concurrent gallery loads would all call CAA at once while every
+unit test of the gate still passed. The transport is closed via
+`atexit.register` — Flask's `teardown_*` hooks fire per *request*, and closing
+there makes the second gallery load raise on a closed client.
 
 `LIBRARY_ROOT` defaults to `IMPORT_DIR` because the deployment convention is
 beets `copy: no, move: no` — library dir and import dir are the same tree. It is
@@ -107,6 +145,58 @@ shared `common.py`). Do not maintain an endpoint table here — read the spec.
   lifted when the first pass finds nothing, and marks such a hit `relaxed: true`
   with a `warning`. Both outcomes carry `current_width`/`current_height`, and
   `found: false` carries `reasons` — the art plugin's own rejection lines.
+- `GET /api/album/<id>/artwork` keeps **three** outcomes apart, per *Absence is
+  not a fact*: `available: false` + a `reason` (no gallery is possible — the
+  album has no release MBID; still a `200`, the album exists), `available: true`
+  with an empty `images` (CAA answered `404`, which is its normal way of saying
+  this release has no art — a fact about the release), and `502` (CAA could not
+  be reached **and** no index for the release is on disk, so nothing was ever
+  established). An unreachable CAA over an index that has merely gone stale is
+  *not* a `502`: the stale listing is served as it stands, because in storage
+  mode its images are mirrored beside it and an expired `ARTWORK_META_TTL` is no
+  reason to fail a gallery the disk can answer in full. `source`
+  (`storage`/`cache`/`remote`) and `fetched_at` say where the listing came from
+  and how old it is, so the age is reported rather than hidden; `?refresh=1`
+  bypasses `ARTWORK_META_TTL` — and, since it never reads the index, still
+  reports an outage as a `502`.
+- All three artwork routes answer `500 {"error": "the artwork store could not be
+  written"}` when the **disk layer** fails — a permanent mirror that filled up, a
+  volume remounted read-only under a running app. `ArtworkStore` re-raises rather
+  than swallowing, and an uncaught `OSError` would surface as Flask's HTML 500 on
+  a blueprint whose every other answer is JSON: the SPA's `r.json()` then yields
+  null, which it reads as "still loading", and the gallery sits on its skeleton
+  with nothing to retry. The operator's detail goes to the log, not to the
+  client. On the binary route the guard spans `send_file` too, not just the
+  resolve — the inline cache sweep can evict the file between the two.
+- `width`/`height` on an artwork image are the **original's** measured pixel
+  size and are `null` until the original has actually been fetched (fullscreen
+  or apply). CAA publishes no dimensions at all, so anything reported here was
+  measured off a file on disk; reporting the 250 px tile's size instead would
+  publish a false fact about the scan. `thumb_sizes` is ascending **ints**, and
+  the upstream URLs are stripped from the response on purpose — every byte goes
+  through `GET …/artwork/<image_id>?size=…`, which is what makes local storage
+  meaningful and keeps an external origin out of the page.
+- **`images` keeps CAA's own order** — the index stores what the fetch returned
+  and the projection only filters, never sorts. That order is MusicBrainz's
+  editorial one (the front cover leads, a booklet runs in page order), so it is
+  what the release's `/cover-art` page shows, and the SPA renders the list as it
+  arrives to match it. Sorting here — or there — scrambles multi-type scans out
+  of their sequence.
+- **`image_id` is a decimal string everywhere** — route path, `ArtworkImage`,
+  `current_image_id`, the `beetdeck_cover_image_id` flex attr, the on-disk
+  filenames. CAA sends it as a number and beets flex attrs are TEXT; anything
+  less than one canonical spelling makes the SPA's `current_image_id ===
+  image_id` false after a reload and the *Current cover* marker silently vanish
+  (the same class of bug as `lyrics_instrumental`'s truthy spellings). The
+  binary route `400`s a non-numeric id — the check doubles as path-traversal
+  protection, since the id becomes a filename.
+- `current_image_id` is recorded by `POST …/artwork/<image_id>/apply` into the
+  `beetdeck_cover_image_id` flex attr, and `_save_cover_to_album` — the single
+  funnel for every cover write inside Flask — clears it, so any other cover
+  write drops the marker. ⚠️ **Known limitation:** a rescan (`beet import` /
+  `beet update -M` with fetchart) rewrites `artpath` without going through that
+  funnel, so the marker can outlive the cover it describes. Clearing it there
+  would mean hooking the beets import path.
 - Both lyrics fetches carry `reasons` on a miss — the lyrics plugin's own words
   for a source that failed. Empty means every source answered and none had the
   track, which is the only case where `found: false` is a fact about the track.
@@ -232,6 +322,12 @@ Behaviours this app works around:
   enabled, re-embeds the album and can delete the art file, which from inside our
   embed would be re-entrant. It also chmods the resized file: `tempfile` hands
   out 0600 regardless of umask, and `move()` carries that mode into the library.
+  It **resizes before it removes**, and the order is load-bearing: nothing
+  upstream proves `src_path` is a decodable image (`…/cover/upload` checks only
+  the filename extension, and the artwork apply route stores an unrecognised
+  `Content-Type` under `.bin` rather than dropping the bytes), so deleting the
+  album's existing `cover/folder/front.*` first would mean a PIL failure answers
+  `500` with the user's cover already gone and `artpath` pointing at nothing.
 - An instrumental verdict lives in the `lyrics_instrumental` flex attr and has
   more than one truthy spelling (`'1'` from the 2.13.0 migration, `1` from a
   `types.BOOLEAN` write) — `_is_instrumental()` is the single rule. It is surfaced
@@ -319,12 +415,20 @@ on (it POSTs those confirms with no body at all).
 
 The precondition only sees what goes *through* the stash, so **every** route that
 writes one of those targets directly clears it on success — `…/cover/upload`,
-`…/lyrics/save`, both `…/lyrics/embed` routes, and `PATCH /api/items/<id>/tags`
-when the patch touches `lyrics` or a `lyrics_*` attr (`is_editable` is a
-deny-list, so that endpoint can write them). `_drop_cover_stash` /
-`_drop_lyrics_stash` are the single implementation; a route that writes lyrics
-and forgets to call one leaves the stash intact with its original generation, and
-a token minted before it still passes its precondition and reverts the edit.
+`POST …/artwork/<image_id>/apply`, `…/lyrics/save`, both `…/lyrics/embed` routes,
+and `PATCH /api/items/<id>/tags` when the patch touches `lyrics` or a `lyrics_*`
+attr (`is_editable` is a deny-list, so that endpoint can write them).
+`_drop_cover_stash` / `_drop_lyrics_stash` are the single implementation; a route
+that writes lyrics and forgets to call one leaves the stash intact with its
+original generation, and a token minted before it still passes its precondition
+and reverts the edit.
+
+The artwork apply drops the stash **before** its first persistent mutation, not
+after it: `_save_cover_to_album` persists `artpath` via `album.store()` and only
+then embeds and sends `art_set`, either of which can raise. Dropping afterwards
+means a `500` with the cover already changed and the old generation still valid
+— exactly the window the call exists to close. Invalidating a preview that
+turned out not to have been replaced is the cheap direction to be wrong in.
 
 A generation check alone is not enough, because it is checked in microseconds and
 the write that follows takes seconds. `state.album_write_lock(album_id)` is held

@@ -1,10 +1,36 @@
 """beetDeek Flask application factory."""
 
+import atexit
 import json
+import logging
 import os
 import tempfile
 
 from flask import Flask
+
+#: The identity CAA/archive.org sees. Not a refuse-to-start invariant — unlike
+#: MusicBrainz `ws/2`, CAA serves anonymous clients (see `beetdeck.coverart`).
+DEFAULT_ARTWORK_USER_AGENT = "beetDeck/0.3 ( https://git.horn/beetDeck )"
+
+
+def _int_env(name, default):
+    """An integer env var, falling back to `default` on anything unparseable.
+
+    A typo in a cache budget must not take the whole app down at construction:
+    the gallery degrades to the default and says so in the log.
+    """
+    raw = os.environ.get(name, "")
+    if not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        # `beetdeck.utils` imports this package, so its `log` cannot be imported
+        # here — this is the same logger by name.
+        logging.getLogger("beetdeck").warning(
+            "%s=%r is not an integer, falling back to %s", name, raw, default
+        )
+        return default
 
 
 def create_app(test_config=None):
@@ -32,10 +58,58 @@ def create_app(test_config=None):
         tempfile.gettempdir(), "beetdeck-cover-cache"
     )
 
+    # ARTWORK_STORAGE_DIR is opt-in: unset or empty means there is no permanent
+    # mirror and everything the gallery touches lands in the bounded cache
+    # instead. Both roots share one on-disk layout, so flipping the mode never
+    # orphans what is already written.
+    app.config["ARTWORK_STORAGE_DIR"] = (
+        os.environ.get("BEETS_ARTWORK_STORAGE_DIR", "").strip() or None
+    )
+    app.config["ARTWORK_CACHE_DIR"] = os.environ.get(
+        "BEETS_ARTWORK_CACHE_DIR", ""
+    ).strip() or os.path.join(tempfile.gettempdir(), "beetdeck-artwork-cache")
+    app.config["ARTWORK_CACHE_MAX_BYTES"] = _int_env(
+        "BEETS_ARTWORK_CACHE_MAX_BYTES", 512 * 1024 * 1024
+    )
+    app.config["ARTWORK_CACHE_TTL"] = _int_env("BEETS_ARTWORK_CACHE_TTL", 7 * 24 * 60 * 60)
+    app.config["ARTWORK_META_TTL"] = _int_env("BEETS_ARTWORK_META_TTL", 24 * 60 * 60)
+    app.config["ARTWORK_USER_AGENT"] = (
+        os.environ.get("BEETS_ARTWORK_USER_AGENT", "").strip() or DEFAULT_ARTWORK_USER_AGENT
+    )
+    # Test-only injection seam: an httpx transport handed to the CAA client, so
+    # tests drive real request construction through create_app(test_config=…)
+    # instead of monkeypatching a module global.
+    app.config["ARTWORK_CAA_TRANSPORT"] = None
+
     if test_config:
         app.config.update(test_config)
 
+    from .artwork_store import ArtworkStore
+    from .coverart import CaaClient
+
+    # One store and one client per **app**, never per request. A factory called
+    # per request hands every thread a fresh RateGate with a clean timestamp, so
+    # concurrent gallery loads all reach CAA at once and the spacing contract
+    # silently does nothing.
+    app.extensions["beetdeck_artwork_store"] = ArtworkStore(
+        app.config["ARTWORK_STORAGE_DIR"],
+        app.config["ARTWORK_CACHE_DIR"],
+        meta_ttl=app.config["ARTWORK_META_TTL"],
+        cache_ttl=app.config["ARTWORK_CACHE_TTL"],
+        max_bytes=app.config["ARTWORK_CACHE_MAX_BYTES"],
+    )
+    caa_client = CaaClient(
+        user_agent=app.config["ARTWORK_USER_AGENT"],
+        transport=app.config["ARTWORK_CAA_TRANSPORT"],
+    )
+    app.extensions["beetdeck_caa"] = caa_client
+    # atexit, not teardown_appcontext/teardown_request: Flask has no app-shutdown
+    # hook and both of those fire **per request**, so the second gallery load
+    # would raise "Cannot send a request, as the client has been closed".
+    atexit.register(caa_client.close)
+
     from .routes.albums import bp as albums_bp
+    from .routes.artwork import bp as artwork_bp
     from .routes.bpm import bp as bpm_bp
     from .routes.cover import bp as cover_bp
     from .routes.genres import bp as genres_bp
@@ -48,6 +122,7 @@ def create_app(test_config=None):
 
     app.register_blueprint(library_bp)
     app.register_blueprint(albums_bp)
+    app.register_blueprint(artwork_bp)
     app.register_blueprint(bpm_bp)
     app.register_blueprint(cover_bp)
     app.register_blueprint(genres_bp)
