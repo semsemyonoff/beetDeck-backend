@@ -1,5 +1,6 @@
 """Tests for genres blueprint routes."""
 
+import beetdeck.state as state
 
 # ---------------------------------------------------------------------------
 # POST /api/album/<id>/genre  (fetch_genre_preview)
@@ -134,6 +135,32 @@ class TestConfirmGenre:
         assert data["status"] == "ok"
         assert "genre" in data
         mock_plugin._process.assert_called_once_with(mock_album, write=True)
+
+    def test_drops_the_mbsync_stash(self, client, mocker):
+        """The confirmed genre becomes part of the album's item_keys, which the
+        mbsync confirm's album-level copy reads — a pending stash for this
+        album is stale once this write commits."""
+        with state.identify_lock:
+            state.identify_tasks["mbsync_1"] = {
+                "_mbsync_obj": object(),
+                "stash_generation": state.next_stash_generation(),
+            }
+
+        mock_album = mocker.MagicMock()
+        mock_album.albumartist = "Artist"
+        mock_album.album = "Album"
+        mock_album.get.return_value = "Jazz"
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_album.return_value = mock_album
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
+
+        mock_plugin = mocker.MagicMock()
+        mock_plugin.name = "lastgenre"
+        mocker.patch("beets.plugins.find_plugins", return_value=[mock_plugin])
+
+        resp = client.post("/api/album/1/genre/confirm")
+        assert resp.status_code == 200
+        assert "mbsync_1" not in state.identify_tasks
 
     def test_returns_formatted_genre(self, client, mocker):
         mock_album = mocker.MagicMock()
@@ -321,6 +348,26 @@ class TestSaveGenre:
         resp = client.post("/api/album/1/genre/save", json={"genre": "  Rock  "})
         assert resp.status_code == 200
         assert resp.get_json()["genre"] == "Rock"
+
+    def test_drops_the_mbsync_stash(self, client, mocker):
+        """Same reasoning as the confirm route: genres are part of
+        `Album.item_keys`, which the mbsync confirm's album-level copy reads."""
+        with state.identify_lock:
+            state.identify_tasks["mbsync_1"] = {
+                "_mbsync_obj": object(),
+                "stash_generation": state.next_stash_generation(),
+            }
+
+        mock_item = mocker.MagicMock()
+        mock_album = mocker.MagicMock()
+        mock_album.items.return_value = [mock_item]
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_album.return_value = mock_album
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/album/1/genre/save", json={"genre": "Jazz"})
+        assert resp.status_code == 200
+        assert "mbsync_1" not in state.identify_tasks
 
 
 # ---------------------------------------------------------------------------

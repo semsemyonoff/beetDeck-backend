@@ -473,6 +473,25 @@ class TestRescan:
         assert state.rescan_log_path is not None
         assert state.rescan_log_path.endswith(".log")
 
+    def test_clears_mbsync_stashes_on_start(self, client, mocker):
+        """A starting rescan can rewrite any field an mbsync diff might carry
+        across the whole library, not just one album, so every mbsync stash is
+        stale at once — cleared here, not just on a per-album write."""
+        mocker.patch(
+            "beetdeck.routes.scan.subprocess.Popen",
+            return_value=_make_mock_proc(mocker),
+        )
+        mocker.patch("beetdeck.routes.scan._take_snapshot", return_value={})
+        with state.identify_lock:
+            state.identify_tasks["mbsync_1"] = {"stash_generation": state.next_stash_generation()}
+            state.identify_tasks["mbsync_2"] = {"stash_generation": state.next_stash_generation()}
+            state.identify_tasks["album_1"] = {"status": "done"}
+
+        resp = client.post("/api/rescan")
+        assert resp.status_code == 200
+        assert not any(k.startswith("mbsync_") for k in state.identify_tasks)
+        assert "album_1" in state.identify_tasks
+
 
 # ---------------------------------------------------------------------------
 # GET /api/rescan/status

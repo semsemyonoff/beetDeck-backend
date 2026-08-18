@@ -14,6 +14,7 @@ from beetdeck.schemas.genres import (
     GenreWriteResponse,
 )
 from beetdeck.utils import (
+    _drop_mbsync_stash,
     _format_genre,
     _genre_names,
     _init_beets,
@@ -262,6 +263,7 @@ def confirm_genre(album_id):
 
         new_genre = fresh.get("genres", "") or ""
         log.info("Genre written for album_id=%d: %s", album_id, new_genre)
+        _drop_mbsync_stash(album_id)
 
         # _process(write=True) calls item.try_write() without path resolution,
         # which silently fails for relative paths (stored after rescan preflight
@@ -337,6 +339,7 @@ def save_genre(album_id):
                     )
                     write_failures.append(item.id)
 
+        _drop_mbsync_stash(album_id)
         log.info("Genre manually set for album_id=%d: %s", album_id, genre)
         if write_failures:
             return jsonify(
