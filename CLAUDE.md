@@ -176,6 +176,12 @@ shared `common.py`). Do not maintain an endpoint table here — read the spec.
   the upstream URLs are stripped from the response on purpose — every byte goes
   through `GET …/artwork/<image_id>?size=…`, which is what makes local storage
   meaningful and keeps an external origin out of the page.
+- **`images` keeps CAA's own order** — the index stores what the fetch returned
+  and the projection only filters, never sorts. That order is MusicBrainz's
+  editorial one (the front cover leads, a booklet runs in page order), so it is
+  what the release's `/cover-art` page shows, and the SPA renders the list as it
+  arrives to match it. Sorting here — or there — scrambles multi-type scans out
+  of their sequence.
 - **`image_id` is a decimal string everywhere** — route path, `ArtworkImage`,
   `current_image_id`, the `beetdeck_cover_image_id` flex attr, the on-disk
   filenames. CAA sends it as a number and beets flex attrs are TEXT; anything
