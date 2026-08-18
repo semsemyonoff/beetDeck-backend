@@ -54,7 +54,8 @@ returns the diff it *would* apply plus a single-use `preview_token`, and
 successful apply and expires on its own after 15 minutes.
 
 The preview tools are `preview_match`, `preview_items_match`,
-`preview_tags_edit`, `preview_cover`, `preview_lyrics` and `preview_genres`.
+`preview_tags_edit`, `preview_cover`, `preview_lyrics`, `preview_genres` and
+`preview_mbsync`.
 
 `BEETDECK_MCP_READONLY` disables `apply_change` alone. It does **not** make the
 server inert: `rescan_library` re-imports files, `compute_bpm` writes a BPM tag
@@ -69,6 +70,7 @@ These writes land in real audio files, and the protection is not uniform.
 |---|---|---|
 | `identify`, `items_identify` | `preview_match`, `preview_items_match` | **Enforced by the backend.** The token carries the identification generation read at preview time; the confirm is rejected inside the backend's own lock if identification was re-run or already applied. |
 | `cover`, `lyrics` | `preview_cover`, `preview_lyrics` | **Enforced by the backend.** The token carries the generation of the stash slot the fetched result went into; the confirm is rejected if a competing fetch (the web UI, another agent) replaced it. For lyrics the check is all-or-nothing across the selection. |
+| `mbsync` | `preview_mbsync` | **Enforced by the backend.** The token carries the generation of the stash the previewed diff landed in; the confirm is rejected if any write to the album, or a starting rescan, dropped that stash since. The apply writes the **whole** diff — this tool exposes no way to exclude individual fields, unlike the web UI. |
 | `tags`, `genres` | `preview_tags_edit`, `preview_genres` | **Best effort.** The previewed old values are re-read immediately before writing and the apply is refused on drift. A change landing between that re-read and the write is not caught. |
 
 A refused apply says which check failed — expiry, value drift, or the backend
@@ -100,9 +102,10 @@ guess:
   recommended*: compare `width`/`height` against `current_width`/`current_height`
   in the same response before applying. When nothing is found at all, the error
   repeats the art sources' own reasons.
-* **The Last.fm lookup could not run.** `preview_genres` reports that as a
-  failure with the upstream message, never as "this album has no genre". A
-  successful lookup that simply had no tags is the other case, and says so.
+* **The genre lookup could not run.** `preview_genres` reports that as a
+  failure with the upstream message, never as "this album has no genre" —
+  whichever of the two sources it asked. A successful lookup that simply had no
+  tags is the other case, and says so.
 * **A lyrics source failed.** `preview_lyrics` separates "every source answered
   and none had the track" (check the artist and title tags) from "a source was
   blocked or unreachable" (retry later, and do not conclude the track has no
@@ -114,12 +117,18 @@ established, not what was absent.
 
 ## Genres: replace or merge
 
-`preview_genres(album_id)` proposes what Last.fm returned. `mode="merge"` keeps
-the genres the album already has and appends the fetched ones it does not carry —
-use it when the existing value came from MusicBrainz or from the file tags and is
-worth keeping. The preview shows the fetched value separately from the proposed
-one, so the difference between the two modes is visible before you apply either.
-Passing `genre=` sets a value verbatim and queries nothing.
+`preview_genres(album_id)` proposes what the lookup returned. `source="lastfm"`
+(the default) asks Last.fm; `source="musicbrainz"` reads the genre votes off the
+album's own release and needs an `mb_albumid` on it. `mode="merge"` keeps the
+genres the album already has and appends the fetched ones it does not carry —
+use it when the existing value came from the other source or from the file tags
+and is worth keeping. The preview shows the fetched value separately from the
+proposed one, so the difference between the two modes is visible before you
+apply either. Passing `genre=` sets a value verbatim and queries nothing.
+
+The two sources disagree by design — Last.fm reports listener tags, MusicBrainz
+reports editor-curated genres — so a source switch is a different question, not
+a retry.
 
 ## When identification returns the wrong album
 

@@ -147,7 +147,10 @@ shared `common.py`). Do not maintain an endpoint table here — read the spec.
   produced nothing) is a `502`, never a `200` with an empty genre — see
   *Absence is not a fact* below. The `musicbrainz` branch reads
   `release["genres"]` + `release["release_group"]["genres"]` off
-  `mb_api.get_release(mbid)` and sums/sorts/caps them itself — deliberately
+  `mb_api.get_release(mbid)` — through the plugin's own `_extract_id` first,
+  because that method interpolates the id straight into the lookup URL's path
+  and `PATCH …/tags` can write `mb_albumid` — and sums/sorts/caps them itself,
+  deliberately
   duplicating `MusicBrainzPlugin._parse_genres` rather than mutating
   `lastgenre.config["pretend"]` (process-wide state two background threads can
   observe) to reach it. `400` when the album has no `mb_albumid` or the release
@@ -172,7 +175,10 @@ shared `common.py`). Do not maintain an endpoint table here — read the spec.
   genre through this path; the album-level copy after `apply_metadata` is
   narrowed to fields that **changed and were not excluded**, not the full
   `Album.item_keys` (copying all of them would overwrite album-row values that
-  never appeared in the diff).
+  never appeared in the diff), and it commits with `album.store(inherit=False)`
+  — every field in that copy is in `Album.item_keys` by construction, so the
+  default `inherit=True` would push each one onto **every** item's DB row,
+  including the unmapped tracks this route never rewrites the files of.
 - `POST …/cover/fetch` retries with `fetchart`'s `minwidth`/`enforce_ratio`
   lifted when the first pass finds nothing, and marks such a hit `relaxed: true`
   with a `warning`. Both outcomes carry `current_width`/`current_height`, and
@@ -499,7 +505,15 @@ stash slot **before** it snapshots the items and the album row, not after. That
 ordering closes the pre-snapshot race by construction: a competing write that
 lands after the mint always has a stash entry to invalidate via
 `_drop_mbsync_stash`, so by the time the preview snapshots, every earlier writer
-is already accounted for. The confirm's **drift check** — every field the
+is already accounted for. The second half of that ordering is load-bearing too —
+the preview fills the slot **only if it is still the dict it minted** (identity,
+not equality) and answers `409` otherwise. Re-assigning unconditionally would
+resurrect a slot the competing write just dropped, under the same generation, so
+the confirm's precondition would pass and revert exactly the write the drop
+existed to protect. For the same reason a preview that raises after minting pops
+its own half-filled slot: a stash carrying a generation and no snapshot makes a
+bodyless confirm `500` on the missing key instead of `400`. The confirm's
+**drift check** — every field the
 preview reported changed must still hold its `old` value, on the items and on
 the album row, checked before `apply_metadata` touches anything — is therefore
 declared **defence-in-depth**, not a structural necessity: it exists to catch a

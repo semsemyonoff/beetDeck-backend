@@ -14,6 +14,8 @@ from beets.autotag.hooks import AlbumInfo, TrackInfo
 from beets.library import Album, Item
 
 from beetdeck import state
+from beetdeck.routes import mbsync as mbsync_routes
+from beetdeck.utils import _drop_mbsync_stash
 
 
 def make_item(**fields):
@@ -583,6 +585,219 @@ class TestConfirmMbsync:
         body = resp.get_json()
         assert body["status"] == "partial"
         assert body["write_failures"] == [101]
+
+    def test_returns_409_when_an_item_joined_the_album(self, client, mocker):
+        # The mirror of "an item left": a newcomer has no snapshot row, so
+        # `restore_fields` would delete an excluded field off it and
+        # `diff_against` would read all of its fields as changed.
+        item = make_item(id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1)
+        album = make_album(id=1, mb_albumid="mb-release-1")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1")
+        body = self._run_preview(client, mocker, item, album, info)
+
+        fresh_item = make_item(id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1)
+        newcomer = make_item(id=102, title="Just Imported", mb_trackid="rec-9", track=2, disc=1)
+        fresh_album = make_album(id=1, mb_albumid="mb-release-1")
+        install_lib(mocker, fresh_album, [fresh_item, newcomer])
+        _write_ok(mocker)
+        _no_op_store(mocker)
+
+        resp = client.post(
+            "/api/album/1/mbsync/confirm",
+            json={"expected_generation": body["stash_generation"], "excluded_fields": ["title"]},
+        )
+        assert resp.status_code == 409
+        assert newcomer.title == "Just Imported"
+
+    def test_album_row_write_does_not_inherit_onto_unmapped_items(self, client, mocker):
+        # `album.store()` defaults to `inherit=True`, which pushes every dirty
+        # `Album.item_keys` field onto *every* item's DB row — including the
+        # unmapped ones, whose files this route never rewrites.
+        matched = make_item(
+            id=101, title="Track One", label="Old Label", mb_trackid="rec-1", track=1, disc=1
+        )
+        extra = make_item(
+            id=102, title="Bonus", label="Old Label", mb_trackid="not-on-release", track=13, disc=1
+        )
+        album = make_album(id=1, mb_albumid="mb-release-1", label="Old Label")
+        track = make_track_info(
+            title="Track One", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1", label="4AD")
+        install_lib(mocker, album, [matched, extra])
+        patch_mb(mocker, album_info=info)
+        body = client.post("/api/album/1/mbsync").get_json()
+
+        fresh_matched = make_item(
+            id=101, title="Track One", label="Old Label", mb_trackid="rec-1", track=1, disc=1
+        )
+        fresh_extra = make_item(
+            id=102, title="Bonus", label="Old Label", mb_trackid="not-on-release", track=13, disc=1
+        )
+        fresh_album = make_album(id=1, mb_albumid="mb-release-1", label="Old Label")
+        install_lib(mocker, fresh_album, [fresh_matched, fresh_extra])
+        _write_ok(mocker)
+        inherit_flags = []
+        mocker.patch.object(Item, "store", lambda self, **kw: None)
+        mocker.patch.object(
+            Album, "store", lambda self, **kw: inherit_flags.append(kw.get("inherit", True))
+        )
+
+        resp = client.post(
+            "/api/album/1/mbsync/confirm", json={"expected_generation": body["stash_generation"]}
+        )
+        assert resp.status_code == 200
+        assert fresh_album.label == "4AD"
+        assert inherit_flags == [False]
+        assert fresh_extra.label == "Old Label"
+
+    def test_excluding_every_changed_field_writes_nothing_and_still_succeeds(self, client, mocker):
+        item = make_item(id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1)
+        album = make_album(id=1, mb_albumid="mb-release-1")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1")
+        body = self._run_preview(client, mocker, item, album, info)
+
+        fresh_item = make_item(id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1)
+        fresh_album = make_album(id=1, mb_albumid="mb-release-1")
+        install_lib(mocker, fresh_album, [fresh_item])
+        writes = []
+        mocker.patch("beetdeck.routes.mbsync._try_write_item", lambda item: writes.append(item.id))
+        stored = []
+        mocker.patch.object(Item, "store", lambda self, **kw: stored.append(self.id))
+        mocker.patch.object(Album, "store", lambda self, **kw: stored.append("album"))
+
+        resp = client.post(
+            "/api/album/1/mbsync/confirm",
+            json={
+                "expected_generation": body["stash_generation"],
+                "excluded_fields": [f["field"] for f in body["track_fields"]],
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "ok"
+        assert fresh_item.title == "Old Title"
+        assert writes == []
+        assert stored == []
+        # The stash is consumed either way — a no-op confirm is still a confirm.
+        assert "mbsync_1" not in state.identify_tasks
+
+    def test_a_second_preview_invalidates_the_first_token(self, client, mocker):
+        item = make_item(id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1)
+        album = make_album(id=1, mb_albumid="mb-release-1")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1")
+        first = self._run_preview(client, mocker, item, album, info)
+        second = self._run_preview(client, mocker, item, album, info)
+        assert first["stash_generation"] != second["stash_generation"]
+
+        resp = client.post(
+            "/api/album/1/mbsync/confirm", json={"expected_generation": first["stash_generation"]}
+        )
+        assert resp.status_code == 409
+
+
+class TestPreviewStashSlot:
+    def test_a_write_during_the_snapshot_is_not_resurrected(self, client, mocker):
+        """A `_drop_mbsync_stash` landing between the mint and the fill wins.
+
+        Re-inserting the slot unconditionally would hand the confirm back the
+        same generation it was minted with, so the competing write's
+        invalidation would be silently undone.
+        """
+        item = make_item(id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1)
+        album = make_album(id=1, mb_albumid="mb-release-1")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1")
+        install_lib(mocker, album, [item])
+        patch_mb(mocker, album_info=info)
+
+        real_snapshot = mbsync_routes.snapshot_album
+
+        def drop_then_snapshot(album_arg):
+            _drop_mbsync_stash(1)
+            return real_snapshot(album_arg)
+
+        mocker.patch.object(mbsync_routes, "snapshot_album", drop_then_snapshot)
+
+        resp = client.post("/api/album/1/mbsync")
+        assert resp.status_code == 409
+        assert "mbsync_1" not in state.identify_tasks
+
+    def test_a_preview_that_fails_after_minting_leaves_no_stash(self, client, mocker):
+        item = make_item(id=101, title="Old Title", mb_trackid="rec-1", track=1, disc=1)
+        album = make_album(id=1, mb_albumid="mb-release-1")
+        track = make_track_info(
+            title="New Title", track_id="rec-1", release_track_id="rt-1", medium=1, medium_index=1
+        )
+        info = make_album_info([track], album_id="mb-release-1")
+        install_lib(mocker, album, [item])
+        patch_mb(mocker, album_info=info)
+        mocker.patch.object(
+            mbsync_routes, "snapshot_album", mocker.Mock(side_effect=RuntimeError("boom"))
+        )
+
+        assert client.post("/api/album/1/mbsync").status_code == 500
+        # A slot carrying only a generation would make a bodyless confirm raise
+        # KeyError on the missing snapshot and answer 500 instead of 400.
+        assert "mbsync_1" not in state.identify_tasks
+        assert client.post("/api/album/1/mbsync/confirm").status_code == 400
+
+
+class TestPreviewStripsGenres:
+    def test_release_genres_never_reach_the_diff_or_the_write(self, client, mocker):
+        """`strip_genre_fields` is wired in, not merely unit-tested.
+
+        With `musicbrainz.genres: yes` in a deploy's beets config the release
+        carries genres, and `genres` is in `Album.item_keys` — without the strip
+        they would ride into this diff, which is exactly what the dedicated
+        genre flow exists to prevent.
+        """
+        item = make_item(
+            id=101, title="Old Title", genres=["Shoegaze"], mb_trackid="rec-1", track=1, disc=1
+        )
+        album = make_album(id=1, mb_albumid="mb-release-1", genres=["Shoegaze"])
+        track = make_track_info(
+            title="New Title",
+            track_id="rec-1",
+            release_track_id="rt-1",
+            medium=1,
+            medium_index=1,
+            genres=["Dream Pop"],
+        )
+        info = make_album_info([track], album_id="mb-release-1", genres=["Dream Pop"])
+        install_lib(mocker, album, [item])
+        patch_mb(mocker, album_info=info)
+
+        body = client.post("/api/album/1/mbsync").get_json()
+        assert [f["field"] for f in body["album_fields"]] == []
+        assert "genres" not in {f["field"] for f in body["track_fields"]}
+        assert "genre" not in {f["field"] for f in body["track_fields"]}
+
+        fresh_item = make_item(
+            id=101, title="Old Title", genres=["Shoegaze"], mb_trackid="rec-1", track=1, disc=1
+        )
+        fresh_album = make_album(id=1, mb_albumid="mb-release-1", genres=["Shoegaze"])
+        install_lib(mocker, fresh_album, [fresh_item])
+        _write_ok(mocker)
+        _no_op_store(mocker)
+
+        resp = client.post(
+            "/api/album/1/mbsync/confirm", json={"expected_generation": body["stash_generation"]}
+        )
+        assert resp.status_code == 200
+        assert fresh_item.title == "New Title"
+        assert fresh_item.genres == ["Shoegaze"]
+        assert fresh_album.genres == ["Shoegaze"]
 
 
 class TestConfirmMbsyncInSpec:

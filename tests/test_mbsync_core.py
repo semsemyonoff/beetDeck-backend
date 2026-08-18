@@ -53,6 +53,13 @@ class TestResolveDataSource:
         monkeypatch.setattr(Album, "items", lambda self: [item])
         assert resolve_data_source(album) == "MusicBrainz"
 
+    def test_an_album_with_no_items_falls_back_rather_than_raising(self, monkeypatch):
+        # A route reaches this with whatever album id the URL carried; an
+        # IndexError here surfaces as a 500 reading "list index out of range".
+        album = make_album(id=1, data_source="")
+        monkeypatch.setattr(Album, "items", lambda self: [])
+        assert resolve_data_source(album) == "MusicBrainz"
+
 
 # ---------------------------------------------------------------------------
 # strip_genre_fields

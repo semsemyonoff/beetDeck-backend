@@ -213,6 +213,40 @@ class TestPreviewMbsync:
         assert "could not reach" in result["error"]
         assert len(store) == 0
 
+    @pytest.mark.parametrize("generation", [None, True])
+    def test_a_preview_without_a_usable_stash_generation_mints_nothing(
+        self, make_tools, mcp_config, store, generation
+    ):
+        """`True` is not a generation, and `isinstance(True, int)` is `True`.
+
+        A token described as backend-enforced that nothing enforces is worse
+        than no token, so the preview refuses rather than weakening itself.
+        """
+        body = {
+            "album_id": 1,
+            "mb_albumid": "mb-release-1",
+            "data_source": "MusicBrainz",
+            "album_fields": [],
+            "track_fields": [
+                {
+                    "field": "title",
+                    "changes": [{"item_id": 101, "track": 1, "old": "Old", "new": "New"}],
+                }
+            ],
+            "unmapped": [],
+            "changed": True,
+        }
+        if generation is not None:
+            body["stash_generation"] = generation
+
+        def handler(request):
+            return httpx.Response(200, json=body)
+
+        odd = BeetdeckClient(mcp_config, transport=httpx.MockTransport(handler))
+        result = make_tools(odd)[TOOL_NAME](1)
+        assert "no stash generation" in result["error"]
+        assert len(store) == 0
+
 
 class TestApplyMbsync:
     def _preview(self, tools, mocker, item, album, info):

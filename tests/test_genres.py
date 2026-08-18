@@ -743,4 +743,9 @@ class TestGenrePreviewMusicBrainzSource:
             mocker, release={"genres": [], "release_group": {"genres": []}}
         )
         client.post("/api/album/1/genre?source=musicbrainz")
-        plugin.config.__setitem__.assert_not_called()
+        # Not `__setitem__`: the idiom this guards against is
+        # `config["genres"].set(True)` (the lastgenre branch's own
+        # `config["pretend"].set(…)`), which is a `__getitem__` followed by a
+        # call on the child. Asserting no access at all is the only assertion
+        # that can actually fail if that creeps in.
+        assert plugin.config.mock_calls == []

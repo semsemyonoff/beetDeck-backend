@@ -62,8 +62,18 @@ def _fetch_musicbrainz_genres(album, album_id):
     if plugin is None:
         return None, ({"error": "musicbrainz plugin not loaded"}, 500)
 
+    # `mb_api.get_release` interpolates the id straight into the lookup URL's
+    # path. `album_for_id` — the sync route's entry point into the same plugin —
+    # runs it through the plugin's own extractor first, so this branch does too:
+    # otherwise a malformed or URL-form `mb_albumid` (both writable through the
+    # tag editor, whose `is_editable` is a deny-list) reaches the wire verbatim,
+    # and the two routes disagree about which ids they accept.
+    release_id = plugin._extract_id(mbid)
+    if not release_id:
+        return None, ({"error": f"Release {mbid} not found on MusicBrainz"}, 400)
+
     try:
-        release = plugin.mb_api.get_release(mbid)
+        release = plugin.mb_api.get_release(release_id)
     except HTTPNotFoundError:
         return None, ({"error": f"Release {mbid} not found on MusicBrainz"}, 400)
     except Exception as exc:

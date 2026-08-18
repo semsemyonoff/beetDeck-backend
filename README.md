@@ -26,7 +26,9 @@ repo is source for the backend only.
   across request threads — see *Architecture constraints* in `CLAUDE.md`. Routes
   are organized as Flask Blueprints under `beetdeck/routes/`.
 - **beets integration**: uses the beets Python API directly (not the CLI) for
-  identification, genre lookup, cover art, and lyrics. The CLI is only used for
+  identification, genre lookup, cover art, lyrics, and the MusicBrainz re-sync
+  (`beet mbsync` is deliberately not shelled out to — its text report carries no
+  diff a preview UI could show). The CLI is only used for
   `beet import` (rescan) and `beet update` (prune stale entries). Genres are
   stored as native list fields; library paths are stored relative to the database
   root and resolved at runtime.
@@ -82,9 +84,9 @@ Request models live in `beetdeck/schemas/` (one module per blueprint plus a shar
 ## MCP server
 
 `beetdeck_mcp/` exposes the library to an MCP client (streamable-http) — album
-browsing, MusicBrainz identification, cover art, lyrics, genres, tag edits, plus
-library rescans, per-track BPM computation, the album ignore flag and a `GET`-only
-`/api/` escape hatch. It is a **separate process** from Flask, shipped in the same
+browsing, MusicBrainz identification and re-sync of an already-identified album,
+cover art, lyrics, genres, tag edits, plus library rescans, per-track BPM
+computation, the album ignore flag and a `GET`-only `/api/` escape hatch. It is a **separate process** from Flask, shipped in the same
 install and image, and it talks to this backend over HTTP. Every mutating
 capability is two-phase: a `preview_*` tool returns a diff plus a single-use token,
 and `apply_change` is the only tool that writes. Design notes and the per-kind

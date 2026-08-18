@@ -369,6 +369,7 @@ def test_artwork_list_response_json_schema():
     props = schema["properties"]
     assert props["mb_albumid"]["type"] == "string"
     assert props["available"]["type"] == "boolean"
+    assert "$defs" in schema and "ArtworkImage" in schema["$defs"]
 
 
 # ---------------------------------------------------------------------------

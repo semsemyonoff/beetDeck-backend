@@ -25,9 +25,18 @@ def resolve_data_source(album):
     """Reproduce ``beetsplug/mbsync.py``'s album-level ``data_source`` lookup.
 
     An album's own ``data_source`` wins; a loose/legacy album that never got
-    one falls back to its first item's, and then to ``"MusicBrainz"``.
+    one falls back to its first item's, and then to ``"MusicBrainz"``. An album
+    with no items at all falls straight through to the default rather than
+    raising ``IndexError`` — upstream indexes blindly, but there the album came
+    out of a query that guarantees tracks, and here it came out of a URL.
     """
-    return album.get("data_source") or album.items()[0].get("data_source", "MusicBrainz")
+    own = album.get("data_source")
+    if own:
+        return own
+    items = list(album.items())
+    if not items:
+        return "MusicBrainz"
+    return items[0].get("data_source", "MusicBrainz")
 
 
 def strip_genre_fields(album_info):

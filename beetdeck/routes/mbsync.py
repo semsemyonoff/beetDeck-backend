@@ -1,8 +1,8 @@
 """MusicBrainz sync routes blueprint.
 
-``POST /api/album/<id>/mbsync`` — preview a re-sync against the album's own
-release (this module). The confirm route lands in the same blueprint in a
-later task.
+``POST /api/album/<id>/mbsync`` previews a re-sync against the album's own
+release and stashes the diff; ``POST /api/album/<id>/mbsync/confirm`` applies
+that stash and never looks the release up again. Both live in this module.
 
 Both MusicBrainz reads in this module go straight to the plugin, never
 through ``beets.metadata_plugins.album_for_id``: that dispatcher wraps every
@@ -66,6 +66,8 @@ def preview_mbsync(album_id):
         if state.rescan_phase in ("importing", "updating"):
             return jsonify({"error": "A library scan is in progress"}), 409
 
+    key = _mbsync_stash_key(album_id)
+    minted = None
     lib = None
     try:
         library_db = current_app.config["LIBRARY_DB"]
@@ -105,14 +107,14 @@ def preview_mbsync(album_id):
         items = list(album.items())
 
         # Mint the stash slot (and its generation) before snapshotting: a write
-        # that lands after this point has something to drop (a route added in a
-        # later task calls `_drop_mbsync_stash`), which is what closes the
-        # pre-snapshot race by construction rather than by a drift check alone
-        # (Review corrections #22).
-        key = _mbsync_stash_key(album_id)
+        # that lands after this point has something to drop (every route that
+        # writes a field this diff could carry calls `_drop_mbsync_stash`),
+        # which is what closes the pre-snapshot race by construction rather than
+        # by a drift check alone (Review corrections #22).
         with state.identify_lock:
             generation = state.next_stash_generation()
-            state.identify_tasks[key] = {"stash_generation": generation}
+            minted = {"stash_generation": generation}
+            state.identify_tasks[key] = minted
 
         pairs, unmapped = build_item_info_pairs(info, items)
 
@@ -131,6 +133,14 @@ def preview_mbsync(album_id):
         item_index = {item.id: track_index[id(track_info)] for item, track_info in pairs.items()}
 
         with state.identify_lock:
+            # Only fill in the slot this preview minted. Re-assigning
+            # unconditionally would *resurrect* a stash a competing write
+            # dropped while the snapshot was being taken — under the same
+            # generation, so the confirm's precondition would pass and revert
+            # the write that overruled it. That is the very race the
+            # mint-before-snapshot ordering above exists to close.
+            if state.identify_tasks.get(key) is not minted:
+                return jsonify({"error": STALE_STASH_ERROR}), 409
             state.identify_tasks[key] = {
                 "album_id": album_id,
                 "mb_albumid": mbid,
@@ -177,6 +187,14 @@ def preview_mbsync(album_id):
 
     except Exception as e:
         log.exception("MusicBrainz sync preview failed for album_id=%d", album_id)
+        # A failure between the mint and the fill leaves a slot carrying only a
+        # generation; a confirm sent without `expected_generation` would find it
+        # and blow up on the missing snapshot. Identity-checked so a slot some
+        # other preview has since minted is not collateral damage.
+        if minted is not None:
+            with state.identify_lock:
+                if state.identify_tasks.get(key) is minted:
+                    state.identify_tasks.pop(key, None)
         return jsonify({"error": str(e)}), 500
     finally:
         if lib:
@@ -241,10 +259,13 @@ def confirm_mbsync(album_id):
             album_field_names = task["album_field_names"]
             track_field_names = task["track_field_names"]
 
-            if not set(item_snapshot) <= set(item_by_id):
-                return jsonify(
-                    {"error": "An item from the preview is no longer in this album"}
-                ), 409
+            # Equality, not a subset: an item *added* since the preview is as
+            # disqualifying as one that left. It has no snapshot row, so
+            # `restore_fields` would `del` an excluded field off it (wiping a
+            # title the preview never showed) and `diff_against` would read
+            # every one of its fields as changed.
+            if set(item_snapshot) != set(item_by_id):
+                return jsonify({"error": "This album's tracks changed since the preview"}), 409
 
             # Drift check runs on the live, pre-mutation items/album — before
             # apply_metadata touches anything — against the field names the
@@ -295,7 +316,15 @@ def confirm_mbsync(album_id):
             if album_fields:
                 for field_diff in album_fields:
                     album[field_diff["field"]] = field_diff["new"]
-                album.store()
+                # `inherit=False` matters: every `album_fields` entry is in
+                # `Album.item_keys` by construction, and the default
+                # `inherit=True` pushes each of them onto *every* item's DB row
+                # — including the unmapped ones the UI promises are left as is,
+                # whose files are never rewritten here. That would leave those
+                # tracks' database rows disagreeing with their tags. The mapped
+                # items already carry these values from `apply_metadata` and
+                # were stored (and written) in the loop above.
+                album.store(inherit=False)
 
             with state.identify_lock:
                 if state.identify_tasks.get(key) is task:
