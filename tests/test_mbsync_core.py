@@ -244,6 +244,29 @@ class TestSnapshotDiffRestoreDrift:
         assert album_fields == []
         assert track_fields == []
 
+    def test_mtime_stays_out_of_the_item_snapshot(self):
+        item = make_item(id=1, title="Intro", mtime=1780935555.0)
+
+        snapshot = snapshot_items([item])
+
+        assert "mtime" not in snapshot[1]
+
+    def test_mtime_reset_by_a_tag_write_is_not_reported_as_a_change(self):
+        # `Item.__setitem__` zeroes `mtime` whenever a field in
+        # `MediaFile.fields()` changes, so a release that corrects one title
+        # would otherwise show the user an `mtime: … -> 0` row with a
+        # checkbox next to it.
+        item = make_item(id=1, title="Intro", track=3, mtime=1780935555.0)
+        snapshot = snapshot_items([item])
+
+        item.title = "Introduction"
+        assert item.mtime == 0
+
+        album_snapshot = snapshot_album(make_album(id=1))
+        _, track_fields = diff_against(album_snapshot, snapshot, [item])
+
+        assert [f["field"] for f in track_fields] == ["title"]
+
     def test_restore_field_present_in_snapshot(self):
         item = make_item(id=1, title="Intro")
         snapshot = snapshot_items([item])

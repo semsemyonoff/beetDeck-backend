@@ -96,8 +96,20 @@ def build_item_info_pairs(album_info, items):
     return pairs, unmapped
 
 
-def snapshot_items(items):
-    """``{item.id: {field: value}}`` over every field each item currently holds.
+#: Columns beets keeps for its own bookkeeping, held out of every item snapshot
+#: and therefore out of every diff. ``mtime`` is the one that actually leaks:
+#: ``Item.__setitem__`` resets it to ``0`` whenever a field in
+#: ``MediaFile.fields()`` changes ("this row is now newer than the file"), so a
+#: release that merely corrects a track title also reports
+#: ``mtime: 1780935555.0 -> 0`` — a field no user has an opinion about, offered
+#: with a checkbox next to it. Excluding it from the snapshot is what keeps it
+#: out of `excluded_fields` too, where restoring the pre-sync value would write
+#: a stale mtime back over a file this very confirm just rewrote.
+BOOKKEEPING_FIELDS = frozenset({"mtime"})
+
+
+def _item_fields(item):
+    """The field names of ``item`` that a snapshot and a diff may look at.
 
     ``with_album=False`` is load-bearing: beets' ``Item.keys()`` defaults to
     unioning the album's own fields (and ``Item.__getitem__`` falls back to the
@@ -106,9 +118,15 @@ def snapshot_items(items):
     reads as a change on *every* item, and the confirm rewrites every file in the
     album, including the unmapped ones it promises to leave alone.
     """
-    return {
-        item.id: {field: item[field] for field in item.keys(with_album=False)} for item in items
-    }
+    return [field for field in item.keys(with_album=False) if field not in BOOKKEEPING_FIELDS]
+
+
+def snapshot_items(items):
+    """``{item.id: {field: value}}`` over every field each item currently holds.
+
+    Bookkeeping columns are left out — see ``BOOKKEEPING_FIELDS``.
+    """
+    return {item.id: {field: item[field] for field in _item_fields(item)} for item in items}
 
 
 def snapshot_album(album):
@@ -133,8 +151,10 @@ def diff_against(album_snapshot, item_snapshot, items):
     track_changes = {}
     for item in items:
         old_row = item_snapshot.get(item.id, {})
-        # Item's own fields only, matching snapshot_items — see its docstring.
-        current_keys = set(item.keys(with_album=False))
+        # Item's own fields, minus the bookkeeping ones — matching
+        # snapshot_items, or a field missing from the snapshot would read as a
+        # change from `None` on every item.
+        current_keys = set(_item_fields(item))
         for field in set(old_row) | current_keys:
             old_val = old_row.get(field)
             new_val = item[field] if field in current_keys else None

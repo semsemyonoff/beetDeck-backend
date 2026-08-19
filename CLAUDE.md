@@ -183,7 +183,13 @@ shared `common.py`). Do not maintain an endpoint table here — read the spec.
   unions the album's own fields (and `Item.__getitem__` falls back to the album),
   so `artpath` would be snapshotted onto every track and a cover applied between
   preview and confirm would read as a change on all of them — rewriting every
-  file in the album. `excluded_fields` is validated against the stashed diff and
+  file in the album. They also drop `mbsync.BOOKKEEPING_FIELDS` (`mtime`):
+  `Item.__setitem__` zeroes `mtime` whenever a field in `MediaFile.fields()`
+  changes, so a release that merely corrects one track title would otherwise
+  report `mtime: <timestamp> → 0` as a field of its own — offered to the user
+  with a checkbox, and eligible for `excluded_fields`, where restoring it would
+  write a stale mtime back over a file the same confirm just rewrote.
+  `excluded_fields` is validated against the stashed diff and
   `400`s on anything outside it: `restore_fields` writes the preview-time value
   back into the DB *and* the audio file, and the drift check only covers the
   fields the preview reported changed.
