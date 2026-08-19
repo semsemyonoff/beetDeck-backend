@@ -25,6 +25,15 @@ jobs:
         run: ruff format --check .
 
   test:
+    # Sequential, not for the dependency — the suites are independent — but for
+    # the tool cache. Both jobs ask for the same `python-version`, and on a
+    # self-hosted runner they share one `hostedtoolcache` volume. When a new
+    # patch release appears upstream neither finds it cached, both install it at
+    # once, and one job's "delete the version folder, copy the new tree" races
+    # the other's copy: the winner ends up with a half-written stdlib and dies on
+    # `import email` before a single test runs. Serialized, the first job fills
+    # the cache and the second just reads it.
+    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
