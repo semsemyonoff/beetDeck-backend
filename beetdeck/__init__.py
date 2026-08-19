@@ -10,7 +10,14 @@ from flask import Flask
 
 #: The identity CAA/archive.org sees. Not a refuse-to-start invariant — unlike
 #: MusicBrainz `ws/2`, CAA serves anonymous clients (see `beetdeck.coverart`).
-DEFAULT_ARTWORK_USER_AGENT = "beetDeck/0.3 ( https://git.horn/beetDeck )"
+#: The URL has to be one a CAA operator can actually reach, and the version has
+#: to be the one that is running: it is taken from `APP_VERSION` (baked into the
+#: image by the release build, `0.0.0` outside one) rather than written out here,
+#: where it would go stale silently.
+DEFAULT_ARTWORK_USER_AGENT = (
+    f"beetDeck/{os.environ.get('APP_VERSION', '0.0.0')} "
+    "( https://github.com/semsemyonoff/beetDeck )"
+)
 
 
 def _int_env(name, default):
