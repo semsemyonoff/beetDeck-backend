@@ -31,6 +31,7 @@ from beetdeck.schemas.identify import (
 from beetdeck.utils import (
     STALE_GENERATION_ERROR,
     _consume_matches,
+    _drop_mbsync_stash,
     _get_ro_conn,
     _get_task_json,
     _init_beets,
@@ -411,6 +412,7 @@ def confirm_match(album_id):
 
         album_match.apply_album_metadata(album)
         album.store()
+        _drop_mbsync_stash(album_id)
 
         if not write_failures:
             album.beetdeck_tagged = "1"

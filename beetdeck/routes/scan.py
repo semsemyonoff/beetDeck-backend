@@ -27,7 +27,7 @@ from beetdeck.schemas.scan import (
     RescanStartResponse,
     RescanStatusResponse,
 )
-from beetdeck.utils import _decode_path, _get_ro_conn, _resolve_path, log
+from beetdeck.utils import _decode_path, _drop_all_mbsync_stashes, _get_ro_conn, _resolve_path, log
 
 bp = Blueprint("scan", __name__)
 
@@ -462,6 +462,12 @@ def rescan():
         state.rescan_processed = 0
         state.rescan_total = None
         state.rescan_current_item = None
+    # After releasing rescan_lock, not inside it: nesting identify_lock inside
+    # rescan_lock here would invert the order the mbsync confirm uses (it takes
+    # album_write_lock/identify_lock, never rescan_lock). Safe to do before the
+    # controller thread starts — the phase is already "importing", so nothing
+    # can interleave a new mbsync preview in between.
+    _drop_all_mbsync_stashes()
     log.info("Starting rescan (%s) run_id=%s", mode, run_id)
     t = threading.Thread(
         target=_run_scan_controller,

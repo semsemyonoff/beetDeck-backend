@@ -35,7 +35,7 @@ ApplyStatus = Literal["ok", "partial", "failed"]
 #: Preview-token kinds `normalize()` understands, i.e. every write the MCP
 #: server can commit. Adding a kind without a normalizer is a `ValueError`, not a
 #: silent pass-through.
-WRITE_KINDS = ("identify", "items_identify", "tags", "genres", "cover", "lyrics")
+WRITE_KINDS = ("identify", "items_identify", "tags", "genres", "cover", "lyrics", "mbsync")
 
 
 @dataclass(frozen=True)
@@ -150,6 +150,17 @@ def _normalize_cover(_response: ApiResponse, _ctx: _Context) -> ApplyResult:
     return _ok()
 
 
+def _normalize_mbsync(response: ApiResponse, _ctx: _Context) -> ApplyResult:
+    """`POST …/mbsync/confirm`: 200 + `status: "partial"` with the item ids
+    whose file could not be written — the same shape `genres.py`'s save uses."""
+    data = response.data
+    if data.get("status") != "partial":
+        return _ok()
+    failures = _as_strings(data.get("write_failures"))
+    detail = [f"file write failed for item(s) {', '.join(failures)}"] if failures else []
+    return _partial(detail or ["the database was written but not every file"])
+
+
 def _normalize_lyrics(response: ApiResponse, ctx: _Context) -> ApplyResult:
     """`POST …/lyrics/confirm`: three separate partial signals, one of them silent.
 
@@ -187,6 +198,7 @@ _NORMALIZERS: Mapping[str, Callable[[ApiResponse, _Context], ApplyResult]] = {
     "genres": _normalize_genres,
     "cover": _normalize_cover,
     "lyrics": _normalize_lyrics,
+    "mbsync": _normalize_mbsync,
 }
 
 

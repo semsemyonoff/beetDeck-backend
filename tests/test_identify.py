@@ -251,6 +251,43 @@ class TestConfirmMatch:
         mock_match.apply_album_metadata.assert_called_once_with(mock_album)
         mock_album.store.assert_called()
 
+    def test_confirming_drops_the_mbsync_stash(self, client, mocker):
+        """Applying an identify confirm rewrites the album's own metadata, so a
+        pending mbsync stash for this album is stale — a confirm minted before
+        it would then revert this edit."""
+        with state.identify_lock:
+            state.identify_tasks["mbsync_1"] = {
+                "_mbsync_obj": object(),
+                "stash_generation": state.next_stash_generation(),
+            }
+
+        mock_item = mocker.MagicMock()
+        mock_item.track = 1
+        mock_item.title = "Track 1"
+        mock_item.try_write.return_value = True
+
+        mock_album = mocker.MagicMock()
+
+        mock_match = mocker.MagicMock()
+        mock_match.info.artist = "Artist"
+        mock_match.info.album = "Album"
+        mock_match.info.data_source = "MusicBrainz"
+        mock_match.distance = 0.05
+        mock_match.mapping = {mock_item: mocker.MagicMock()}
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_album.return_value = mock_album
+
+        state.identify_tasks["album_1"] = {
+            "status": "done",
+            "_matches": [mock_match],
+            "_lib": mock_lib,
+        }
+
+        resp = client.post("/api/album/1/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 200
+        assert "mbsync_1" not in state.identify_tasks
+
     def test_task_status_set_to_done_after_success(self, client, mocker):
         mock_item = mocker.MagicMock()
         mock_item.track = 1

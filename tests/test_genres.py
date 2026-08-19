@@ -1,5 +1,8 @@
 """Tests for genres blueprint routes."""
 
+from beetsplug._utils.requests import HTTPNotFoundError
+
+import beetdeck.state as state
 
 # ---------------------------------------------------------------------------
 # POST /api/album/<id>/genre  (fetch_genre_preview)
@@ -134,6 +137,32 @@ class TestConfirmGenre:
         assert data["status"] == "ok"
         assert "genre" in data
         mock_plugin._process.assert_called_once_with(mock_album, write=True)
+
+    def test_drops_the_mbsync_stash(self, client, mocker):
+        """The confirmed genre becomes part of the album's item_keys, which the
+        mbsync confirm's album-level copy reads — a pending stash for this
+        album is stale once this write commits."""
+        with state.identify_lock:
+            state.identify_tasks["mbsync_1"] = {
+                "_mbsync_obj": object(),
+                "stash_generation": state.next_stash_generation(),
+            }
+
+        mock_album = mocker.MagicMock()
+        mock_album.albumartist = "Artist"
+        mock_album.album = "Album"
+        mock_album.get.return_value = "Jazz"
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_album.return_value = mock_album
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
+
+        mock_plugin = mocker.MagicMock()
+        mock_plugin.name = "lastgenre"
+        mocker.patch("beets.plugins.find_plugins", return_value=[mock_plugin])
+
+        resp = client.post("/api/album/1/genre/confirm")
+        assert resp.status_code == 200
+        assert "mbsync_1" not in state.identify_tasks
 
     def test_returns_formatted_genre(self, client, mocker):
         mock_album = mocker.MagicMock()
@@ -322,6 +351,26 @@ class TestSaveGenre:
         assert resp.status_code == 200
         assert resp.get_json()["genre"] == "Rock"
 
+    def test_drops_the_mbsync_stash(self, client, mocker):
+        """Same reasoning as the confirm route: genres are part of
+        `Album.item_keys`, which the mbsync confirm's album-level copy reads."""
+        with state.identify_lock:
+            state.identify_tasks["mbsync_1"] = {
+                "_mbsync_obj": object(),
+                "stash_generation": state.next_stash_generation(),
+            }
+
+        mock_item = mocker.MagicMock()
+        mock_album = mocker.MagicMock()
+        mock_album.items.return_value = [mock_item]
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_album.return_value = mock_album
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/album/1/genre/save", json={"genre": "Jazz"})
+        assert resp.status_code == 200
+        assert "mbsync_1" not in state.identify_tasks
+
 
 # ---------------------------------------------------------------------------
 # OpenAPI spec coverage (spectree decoration)
@@ -338,6 +387,7 @@ class TestGenresOpenAPISpec:
         op = spec["paths"]["/api/album/{album_id}/genre"]["post"]
         assert "genres" in op["tags"]
         assert "200" in op["responses"]
+        assert "400" in op["responses"]
         assert "404" in op["responses"]
         # No JSON body documented (body-less POST).
         assert "requestBody" not in op
@@ -535,3 +585,167 @@ class TestGenrePreviewModes:
         self._lastgenre(mocker, current=["Rock"], fetched=["Electronic"])
         client.post("/api/album/1/genre")
         assert logging.getLogger("beets.lastgenre").handlers == []
+
+    def test_default_source_is_lastfm(self, client, mocker):
+        """The SPA's pre-existing request (no `source` at all) must keep working:
+        if the default ever drifted to `musicbrainz`, this would hit the
+        unmocked `metadata_plugins.get_metadata_source` and fail differently."""
+        self._lastgenre(mocker, current=["Rock"], fetched=["Electronic"])
+        resp = client.post("/api/album/1/genre")
+        assert resp.status_code == 200
+        assert resp.get_json()["fetched_genre"] == "Electronic"
+
+
+# ---------------------------------------------------------------------------
+# preview: source=musicbrainz
+# ---------------------------------------------------------------------------
+
+
+class TestGenrePreviewMusicBrainzSource:
+    """`source=musicbrainz`: votes are summed from the release and its release
+    group, capped like Last.fm's, and no plugin config is ever touched."""
+
+    def _lastgenre_stub(self, mocker, count=3):
+        plugin = mocker.MagicMock()
+        plugin.name = "lastgenre"
+        plugin.config.__getitem__.return_value.get.return_value = count
+        mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+        return plugin
+
+    def _album(self, mocker, *, genres=(), mb_albumid="mb-release-1"):
+        album = mocker.MagicMock()
+        album.albumartist = "Artist"
+        album.album = "Album"
+        album.get.side_effect = lambda key, default="": {
+            "genres": list(genres),
+            "mb_albumid": mb_albumid,
+        }.get(key, default)
+        lib = mocker.MagicMock()
+        lib.get_album.return_value = album
+        mocker.patch("beetdeck.routes.genres._init_beets", return_value=lib)
+        return album
+
+    def _patch_mb_release(self, mocker, release=None, exc=None):
+        plugin = mocker.MagicMock()
+        if exc is not None:
+            plugin.mb_api.get_release.side_effect = exc
+        else:
+            plugin.mb_api.get_release.return_value = release
+        mocker.patch(
+            "beetdeck.routes.genres.metadata_plugins.get_metadata_source",
+            return_value=plugin,
+        )
+        return plugin
+
+    def test_sums_votes_across_release_and_release_group(self, client, mocker):
+        self._lastgenre_stub(mocker)
+        self._album(mocker, genres=["Rock"])
+        self._patch_mb_release(
+            mocker,
+            release={
+                "genres": [{"name": "Post-Rock", "count": 2}],
+                "release_group": {
+                    "genres": [
+                        {"name": "Post-Rock", "count": 3},
+                        {"name": "Shoegaze", "count": 1},
+                    ]
+                },
+            },
+        )
+        resp = client.post("/api/album/1/genre?source=musicbrainz")
+        assert resp.status_code == 200
+        data = resp.get_json()
+        assert data["old_genre"] == "Rock"
+        # Post-Rock: 2 + 3 = 5 votes, ahead of Shoegaze's 1.
+        assert data["fetched_genre"] == "Post-Rock, Shoegaze"
+        assert data["new_genre"] == "Post-Rock, Shoegaze"
+
+    def test_caps_at_the_configured_lastgenre_count(self, client, mocker):
+        self._lastgenre_stub(mocker, count=2)
+        self._album(mocker, genres=[])
+        self._patch_mb_release(
+            mocker,
+            release={
+                "genres": [
+                    {"name": "A", "count": 4},
+                    {"name": "B", "count": 3},
+                    {"name": "C", "count": 2},
+                ],
+                "release_group": {"genres": []},
+            },
+        )
+        data = client.post("/api/album/1/genre?source=musicbrainz").get_json()
+        assert data["fetched_genre"] == "A, B"
+
+    def test_merge_mode_reuses_merge_genres(self, client, mocker):
+        self._lastgenre_stub(mocker)
+        self._album(mocker, genres=["Rock"])
+        self._patch_mb_release(
+            mocker,
+            release={
+                "genres": [
+                    {"name": "rock", "count": 1},
+                    {"name": "Electronic", "count": 1},
+                ],
+                "release_group": {"genres": []},
+            },
+        )
+        data = client.post("/api/album/1/genre?source=musicbrainz&mode=merge").get_json()
+        assert data["new_genre"] == "Rock, Electronic"
+
+    def test_empty_result_when_release_carries_no_genres(self, client, mocker):
+        self._lastgenre_stub(mocker)
+        self._album(mocker, genres=["Rock"])
+        self._patch_mb_release(mocker, release={"genres": [], "release_group": {"genres": []}})
+        resp = client.post("/api/album/1/genre?source=musicbrainz")
+        assert resp.status_code == 200
+        assert resp.get_json()["fetched_genre"] == ""
+
+    def test_500_when_musicbrainz_plugin_not_loaded(self, client, mocker):
+        self._lastgenre_stub(mocker)
+        self._album(mocker, genres=[])
+        mocker.patch(
+            "beetdeck.routes.genres.metadata_plugins.get_metadata_source", return_value=None
+        )
+        resp = client.post("/api/album/1/genre?source=musicbrainz")
+        assert resp.status_code == 500
+        assert resp.get_json()["error"] == "musicbrainz plugin not loaded"
+
+    def test_400_without_mb_albumid(self, client, mocker):
+        self._lastgenre_stub(mocker)
+        self._album(mocker, genres=[], mb_albumid="")
+        resp = client.post("/api/album/1/genre?source=musicbrainz")
+        assert resp.status_code == 400
+        assert "MusicBrainz release id" in resp.get_json()["error"]
+
+    def test_400_when_release_not_found(self, client, mocker):
+        self._lastgenre_stub(mocker)
+        self._album(mocker, genres=[])
+        self._patch_mb_release(mocker, exc=HTTPNotFoundError(response=None))
+        resp = client.post("/api/album/1/genre?source=musicbrainz")
+        assert resp.status_code == 400
+        assert "not found" in resp.get_json()["error"]
+
+    def test_502_when_musicbrainz_unreachable(self, client, mocker):
+        self._lastgenre_stub(mocker)
+        self._album(mocker, genres=[])
+        self._patch_mb_release(mocker, exc=ConnectionError("timed out"))
+        resp = client.post("/api/album/1/genre?source=musicbrainz")
+        assert resp.status_code == 502
+        assert "timed out" in resp.get_json()["reasons"]
+
+    def test_does_not_touch_musicbrainz_plugin_config(self, client, mocker):
+        """No process-wide state is mutated on this branch, unlike lastgenre's
+        pretend flag — see Review corrections #23."""
+        self._lastgenre_stub(mocker)
+        self._album(mocker, genres=[])
+        plugin = self._patch_mb_release(
+            mocker, release={"genres": [], "release_group": {"genres": []}}
+        )
+        client.post("/api/album/1/genre?source=musicbrainz")
+        # Not `__setitem__`: the idiom this guards against is
+        # `config["genres"].set(True)` (the lastgenre branch's own
+        # `config["pretend"].set(…)`), which is a `__getitem__` followed by a
+        # call on the child. Asserting no access at all is the only assertion
+        # that can actually fail if that creeps in.
+        assert plugin.config.mock_calls == []

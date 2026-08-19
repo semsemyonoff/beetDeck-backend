@@ -61,6 +61,7 @@ from beetdeck.utils import (
     STALE_GENERATION_ERROR,
     _consume_matches,
     _drop_lyrics_stash,
+    _drop_mbsync_stash,
     _get_ro_conn,
     _get_task_json,
     _init_beets,
@@ -398,6 +399,11 @@ def patch_item_tags(item_id):
             if any(name == "lyrics" or name.startswith("lyrics_") for name in fields):
                 _drop_lyrics_stash(item_id)
 
+            # Any written field could be one an mbsync preview diffed, so this
+            # generic path owes the same stash invalidation regardless of which
+            # fields changed.
+            _drop_mbsync_stash(item.album_id)
+
             warnings = []
             if not _try_write_item(item):
                 path = getattr(item, "path", "") or ""
@@ -454,6 +460,7 @@ def update_metadata(item_id):
         if album:
             item.album = album
         item.store()
+        _drop_mbsync_stash(item.album_id)
 
         if not _try_write_item(item):
             log.warning("Failed to write tags for item %d after metadata update", item_id)
@@ -655,6 +662,15 @@ def metadata_batch():
                         resolved = _item_disk_path(item)
                         log.warning("File write failed for item %d: %s", item_id, resolved)
                         warnings.append(f"file write failed: {resolved}")
+
+            # The batch spans albums — every album an item in this request
+            # belongs to may have had a field an mbsync diff carries rewritten,
+            # not just the ones with album-level overrides.
+            request_album_ids = {
+                item.album_id for item in item_objects.values() if item.album_id is not None
+            }
+            for aid in request_album_ids:
+                _drop_mbsync_stash(aid)
 
         return jsonify({"status": "ok", "warnings": warnings, "albums_updated": albums_updated})
 
@@ -1043,6 +1059,13 @@ def items_confirm(task_id):
                 warnings.append(f"file write failed: {resolved}")
             else:
                 log.info("Wrote tags for item %d: %s", item.id, item.title)
+
+        # This flow re-parents items: an mbsync stash keyed by the album an
+        # item used to belong to is now describing an album these items have
+        # left, and the destination album may itself have had a preview
+        # pending against its own pre-confirm state.
+        for aid in set(original_album_ids.values()) | {album.id}:
+            _drop_mbsync_stash(aid)
 
         with state.identify_lock:
             _consume_matches(task)

@@ -62,6 +62,12 @@ COVER_EMBED_QUALITY = 70
 COVER_THUMB_SIZES = (64, 128, 256, 400)
 COVER_THUMB_QUALITY = 80
 
+#: Album flex attr recording which Cover Art Archive image was applied as the
+#: cover, so the gallery can flag that tile as the current one. Cleared by
+#: writing ``""`` (see ``_save_cover_to_album``) — an empty value means "no
+#: marker", not "image id zero".
+COVER_IMAGE_ID_ATTR = "beetdeck_cover_image_id"
+
 
 def _default_file_mode():
     """The mode a plain ``open()`` would produce here, i.e. 0666 minus the umask.
@@ -418,10 +424,17 @@ def _save_cover_to_album(album, src_path):
 
     items = list(album.items())
     album_dir = _common_parent_dir([_resolve_path(it.path) for it in items]) if items else None
-    _remove_cover_files(album_dir)
 
+    # Decode and resize **before** deleting anything: this is the first
+    # destructive step, and ``src_path`` is not guaranteed to be a decodable
+    # image. The Cover Art Archive apply route hands over whatever the archive
+    # served — an HTML error page under a 200, or a truncated body, is stored
+    # with a ``.bin`` extension and reaches here intact. With the removal first,
+    # PIL raising would answer 500 having already deleted the album's existing
+    # cover files and left ``artpath`` pointing at nothing.
     hires_path = _resize_image(src_path, COVER_HIRES_MAX, quality=95)
     try:
+        _remove_cover_files(album_dir)
         hires_bytes = bytestring_path(hires_path)
         if album_dir:
             artdest = album.art_destination(hires_bytes, item_dir=bytestring_path(album_dir))
@@ -430,6 +443,13 @@ def _save_cover_to_album(album, src_path):
         artdest = beets_unique_path(artdest)
         move(hires_bytes, artdest)
         album.artpath = artdest
+        # This is the single funnel for every cover write inside Flask, so it is
+        # the one place that can keep the Cover Art Archive marker from
+        # outliving the cover it describes. Assigned ``""`` rather than deleted:
+        # the attr is absent on most albums and ``del`` on an absent flex attr
+        # raises. The artwork apply route re-sets it — with its own ``store()``
+        # — immediately after this function returns.
+        album[COVER_IMAGE_ID_ATTR] = ""
         album.store()
     finally:
         if os.path.exists(hires_path):
@@ -714,6 +734,37 @@ def _drop_lyrics_stash(item_id):
     """
     with state.identify_lock:
         state.identify_tasks.pop(f"lyrics_{item_id}", None)
+
+
+def _drop_mbsync_stash(album_id):
+    """Discard a stashed MusicBrainz sync preview because its album was written directly.
+
+    Same contract as ``_drop_cover_stash``/``_drop_lyrics_stash`` — a stash left
+    behind keeps the generation it was minted with, so a confirm holding that
+    generation passes its precondition and reverts the write that overruled it.
+    Album-keyed rather than item-keyed: item-scoped routes resolve
+    ``item.album_id`` first and skip a singleton item with no album.
+
+    Caller must not hold ``state.identify_lock``.
+    """
+    if album_id is None:
+        return
+    with state.identify_lock:
+        state.identify_tasks.pop(f"mbsync_{album_id}", None)
+
+
+def _drop_all_mbsync_stashes():
+    """Discard every stashed MusicBrainz sync preview, e.g. when a rescan starts.
+
+    A starting rescan can rewrite any field an mbsync diff might carry across
+    the whole library, not just one album, so every stash is stale at once.
+
+    Caller must not hold ``state.identify_lock``.
+    """
+    with state.identify_lock:
+        stale_keys = [k for k in state.identify_tasks if k.startswith("mbsync_")]
+        for k in stale_keys:
+            state.identify_tasks.pop(k, None)
 
 
 def _consume_matches(task):

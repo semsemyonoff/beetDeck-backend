@@ -339,6 +339,30 @@ class TestMetadataBatch:
         assert item1.albumartist == "Shared Artist"
         assert item2.albumartist == "Shared Artist"
 
+    def test_drops_mbsync_stash_for_every_album_in_the_request(self, client, mocker):
+        """The batch spans albums, so every album an item in the request
+        belongs to must be invalidated — not just the ones with album-level
+        overrides (this request has none)."""
+        state.identify_tasks.clear()
+        item1 = self._make_mock_item(mocker, 1, 10)
+        item2 = self._make_mock_item(mocker, 2, 20)
+        with state.identify_lock:
+            state.identify_tasks["mbsync_10"] = {"stash_generation": state.next_stash_generation()}
+            state.identify_tasks["mbsync_20"] = {"stash_generation": state.next_stash_generation()}
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.side_effect = lambda iid: {1: item1, 2: item2}.get(iid)
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
+
+        resp = client.post(
+            "/api/items/metadata-batch",
+            json={"items": [{"id": 1, "title": "New Title"}, {"id": 2, "artist": "New Artist"}]},
+        )
+        assert resp.status_code == 200
+        assert "mbsync_10" not in state.identify_tasks
+        assert "mbsync_20" not in state.identify_tasks
+
     def test_album_members_not_in_request_get_files_flushed(self, client, mocker):
         """A member of an updated album that is absent from the request still
         gets its file rewritten, so multi-disc / shared-album on-disk tags do
@@ -599,6 +623,24 @@ class TestUpdateMetadata:
         assert mock_item.artist == "New Artist"
         assert mock_item.album == "New Album"
         mock_item.store.assert_called()
+
+    def test_drops_the_mbsync_stash_for_the_items_album(self, client, mocker):
+        state.identify_tasks.clear()
+        with state.identify_lock:
+            state.identify_tasks["mbsync_5"] = {
+                "_mbsync_obj": object(),
+                "stash_generation": state.next_stash_generation(),
+            }
+        mock_item = mocker.MagicMock()
+        mock_item.album_id = 5
+        mock_item.try_write.return_value = True
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+
+        resp = client.post("/api/items/1/metadata", json={"artist": "New Artist"})
+        assert resp.status_code == 200
+        assert "mbsync_5" not in state.identify_tasks
 
     def test_updates_only_artist(self, client, mocker):
         mock_item = mocker.MagicMock()
@@ -918,6 +960,44 @@ class TestItemsConfirm:
         mock_album.store.assert_called()
         mock_match.apply_metadata.assert_called()
         mock_match.apply_album_metadata.assert_called_with(mock_album)
+
+    def test_confirming_drops_mbsync_stash_for_old_and_new_album(self, client, mocker):
+        """This flow re-parents items: a stash keyed by the album items used to
+        belong to now describes an album they have left, and the destination
+        album may have had a preview pending against its own pre-confirm state."""
+        with state.identify_lock:
+            state.identify_tasks["mbsync_10"] = {"stash_generation": state.next_stash_generation()}
+            state.identify_tasks["mbsync_99"] = {"stash_generation": state.next_stash_generation()}
+
+        mock_item = mocker.MagicMock()
+        mock_item.id = 1
+        mock_item.album_id = 10
+        mock_item.track = 1
+        mock_item.try_write.return_value = True
+
+        mock_album = mocker.MagicMock()
+        mock_album.id = 99
+
+        mock_match = mocker.MagicMock()
+        mock_match.mapping = {mock_item: mocker.MagicMock()}
+
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mock_lib.add_album.return_value = mock_album
+
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+
+        state.identify_tasks["items_c9"] = {
+            "task_id": "c9",
+            "status": "done",
+            "_matches": [mock_match],
+            "item_ids": [1],
+        }
+
+        resp = client.post("/api/items/identify/c9/confirm", json={"candidate_index": 0})
+        assert resp.status_code == 200
+        assert "mbsync_10" not in state.identify_tasks
+        assert "mbsync_99" not in state.identify_tasks
 
     def test_returns_ok_with_warnings_on_partial_file_write_failure(self, client, mocker):
         mock_item = mocker.MagicMock()
@@ -1329,6 +1409,27 @@ class TestItemTagsPatch:
 
         client.patch("/api/items/8/tags", json={"fields": {"title": "New Title"}})
         assert "lyrics_8" in state.identify_tasks
+
+    def test_writing_a_field_drops_the_mbsync_stash(self, client, mocker):
+        """Any written field could be one an mbsync preview diffed, so this
+        generic endpoint owes the same stash invalidation as the dedicated
+        cover/lyrics routes — album-keyed here, since mbsync stashes are keyed
+        by album, not item."""
+        state.identify_tasks.clear()
+        with state.identify_lock:
+            state.identify_tasks["mbsync_10"] = {
+                "_mbsync_obj": object(),
+                "stash_generation": state.next_stash_generation(),
+            }
+        mock_item = self._make_mock_item(mocker, 9, album_id=10)
+        mock_lib = mocker.MagicMock()
+        mock_lib.get_item.return_value = mock_item
+        mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
+        mocker.patch("beetdeck.routes.items._try_write_item", return_value=True)
+
+        resp = client.patch("/api/items/9/tags", json={"fields": {"title": "New Title"}})
+        assert resp.status_code == 200
+        assert "mbsync_10" not in state.identify_tasks
 
     def test_empty_value_clears_field_via_delitem(self, client, mocker):
         mock_item = self._make_mock_item(mocker, 2)
