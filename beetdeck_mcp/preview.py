@@ -7,13 +7,14 @@ token: what it carries, how long it lives, and what makes it refuse to apply.
 **The freshness guarantee is not uniform, and the difference is named here rather
 than implied.** Two strategies, one per group of kinds (`FRESHNESS_BY_KIND`):
 
-* `BACKEND_PRECONDITION` (`identify`, `items_identify`, `cover`, `lyrics`) — the
-  token carries the generation of the state it previewed, read at preview time,
-  and passes it to the confirm endpoint, which compares it inside
-  `state.identify_lock`. For the identify kinds that generation is the task's
-  `match_generation`; for the fetch kinds it is the `stash_generation` of the
-  slot the fetched cover or lyrics landed in. Either way a re-run, a re-fetch or
-  a competing confirm is *rejected*, not merely noticed.
+* `BACKEND_PRECONDITION` (`identify`, `items_identify`, `cover`, `lyrics`,
+  `mbsync`) — the token carries the generation of the state it previewed, read
+  at preview time, and passes it to the confirm endpoint, which compares it
+  inside `state.identify_lock`. For the identify kinds that generation is the
+  task's `match_generation`; for the fetch kinds and for `mbsync` it is the
+  `stash_generation` of the slot the fetched cover, lyrics or sync diff landed
+  in. Either way a re-run, a re-fetch or a competing confirm is *rejected*, not
+  merely noticed.
 * `REREAD_OLD_VALUES` (`tags`, `genres`) — the token records the values it
   previewed; `apply_change` re-reads them immediately before writing and refuses
   on drift. TOCTOU-racy by construction: a change landing between the re-read and
@@ -58,6 +59,7 @@ FRESHNESS_BY_KIND: Mapping[str, Freshness] = {
     "genres": REREAD_OLD_VALUES,
     "cover": BACKEND_PRECONDITION,
     "lyrics": BACKEND_PRECONDITION,
+    "mbsync": BACKEND_PRECONDITION,
 }
 
 #: What moved and what to do about it, per kind, when a backend precondition
@@ -70,6 +72,10 @@ PRECONDITION_SUBJECT: Mapping[str, tuple[str, str]] = {
     "items_identify": ("identification", "identify again and preview the new candidates"),
     "cover": ("the fetched cover art", "re-run the preview and decide again on the current state"),
     "lyrics": ("the fetched lyrics", "re-run the preview and decide again on the current state"),
+    "mbsync": (
+        "the MusicBrainz sync diff",
+        "re-run the preview and decide again on the current state",
+    ),
 }
 
 #: Agent-facing wording, returned with every minted token. An agent that cannot

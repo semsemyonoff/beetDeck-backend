@@ -113,6 +113,7 @@ _HANDLERS: Mapping[str, Callable[[BeetdeckClient, Preview], ApplyResult]] = {
     "genres": _apply_after_reread,
     "cover": _apply_backend_precondition,
     "lyrics": _apply_backend_precondition,
+    "mbsync": _apply_backend_precondition,
 }
 
 

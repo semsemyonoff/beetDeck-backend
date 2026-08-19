@@ -49,8 +49,15 @@ def tools(make_tools):
 
 @pytest.fixture()
 def album(db_path):
-    """One album with one track, carrying the legacy singular genre `Rock`."""
-    album_id = insert_album(db_path, album="Test Album", albumartist="Test Artist", genre="Rock")
+    """One album with one track, carrying the legacy singular genre `Rock`
+    and a MusicBrainz release id — both sources must be previewable."""
+    album_id = insert_album(
+        db_path,
+        album="Test Album",
+        albumartist="Test Artist",
+        genre="Rock",
+        mb_albumid="mb-release-1",
+    )
     insert_item(db_path, album_id, title="Track One", path=b"/music/test/01.mp3")
     return album_id
 
@@ -68,6 +75,44 @@ def suggestion(mocker):
 
         plugin._process.side_effect = process
         mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+        return plugin
+
+    return _install
+
+
+@pytest.fixture()
+def lastgenre_count(mocker):
+    """`lastgenre` loaded only for its configured `count` cap — the
+    MusicBrainz branch reads the cap but never calls the plugin itself."""
+
+    def _install(count=3):
+        plugin = mocker.MagicMock()
+        plugin.name = "lastgenre"
+        plugin.config.__getitem__.return_value.get.return_value = count
+        mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+        return plugin
+
+    return _install
+
+
+@pytest.fixture()
+def mb_release(mocker):
+    """The MusicBrainz plugin, answering `mb_api.get_release` with a fixed
+    payload — or raising, to exercise the `502` path."""
+
+    def _install(release=None, exc=None):
+        plugin = mocker.MagicMock()
+        if exc is not None:
+            plugin.mb_api.get_release.side_effect = exc
+        else:
+            plugin.mb_api.get_release.return_value = release or {
+                "genres": [],
+                "release_group": {"genres": []},
+            }
+        mocker.patch(
+            "beetdeck.routes.genres.metadata_plugins.get_metadata_source",
+            return_value=plugin,
+        )
         return plugin
 
     return _install
@@ -111,7 +156,7 @@ class TestPreviewGenres:
         assert result["kind"] == "genres"
         assert result["target"] == f"album {album}"
         assert result["changes"]["genre"] == {"old": "Rock", "new": "Electronic"}
-        assert result["changes"]["source"] == "lastgenre"
+        assert result["changes"]["source"] == "lastfm"
         assert result["changes"]["mode"] == "replace"
         assert "re-read" in result["guarantee"]
         assert len(store) == 1
@@ -198,6 +243,97 @@ class TestPreviewGenres:
         suggestion("Electronic")
         token = tools["preview_genres"](album)["preview_token"]
         assert store.peek(token).old_values == {"genre": "Rock"}
+
+
+class TestPreviewGenresSource:
+    """`source` picks where a lookup is fetched from; omitting it must keep
+    hitting Last.fm exactly as before the argument existed."""
+
+    def test_defaults_to_lastfm_and_never_touches_musicbrainz(
+        self, tools, album, suggestion, mocker
+    ):
+        suggestion("Electronic")
+        get_metadata_source = mocker.patch(
+            "beetdeck.routes.genres.metadata_plugins.get_metadata_source"
+        )
+
+        result = tools["preview_genres"](album)
+
+        assert result["changes"]["genre"] == {"old": "Rock", "new": "Electronic"}
+        assert result["changes"]["source"] == "lastfm"
+        assert not get_metadata_source.called
+
+    def test_musicbrainz_sums_votes_across_release_and_release_group(
+        self, tools, album, lastgenre_count, mb_release, store
+    ):
+        lastgenre_count()
+        mb_release(
+            release={
+                "genres": [{"name": "Post-Rock", "count": 2}],
+                "release_group": {
+                    "genres": [
+                        {"name": "Post-Rock", "count": 3},
+                        {"name": "Shoegaze", "count": 1},
+                    ]
+                },
+            }
+        )
+
+        result = tools["preview_genres"](album, source="musicbrainz")
+
+        # Post-Rock: 2 + 3 = 5 votes, ahead of Shoegaze's 1.
+        assert result["changes"]["genre"] == {"old": "Rock", "new": "Post-Rock, Shoegaze"}
+        assert result["changes"]["source"] == "musicbrainz"
+        assert len(store) == 1
+
+    def test_musicbrainz_result_is_capped_like_lastfm(
+        self, tools, album, lastgenre_count, mb_release
+    ):
+        lastgenre_count(count=2)
+        mb_release(
+            release={
+                "genres": [
+                    {"name": "A", "count": 4},
+                    {"name": "B", "count": 3},
+                    {"name": "C", "count": 2},
+                ],
+                "release_group": {"genres": []},
+            }
+        )
+
+        result = tools["preview_genres"](album, source="musicbrainz")
+        assert result["changes"]["genre"]["new"] == "A, B"
+
+    def test_musicbrainz_can_be_merged_with_the_current_genres(
+        self, tools, album, lastgenre_count, mb_release
+    ):
+        lastgenre_count()
+        mb_release(
+            release={
+                "genres": [
+                    {"name": "rock", "count": 1},
+                    {"name": "Electronic", "count": 1},
+                ],
+                "release_group": {"genres": []},
+            }
+        )
+
+        result = tools["preview_genres"](album, source="musicbrainz", mode="merge")
+        assert result["changes"]["genre"] == {"old": "Rock", "new": "Rock, Electronic"}
+        assert result["changes"]["mode"] == "merge"
+        # `fetched_genre` reports MusicBrainz's own answer verbatim, before the
+        # merge dedup drops `rock` as a case-insensitive repeat of `Rock`.
+        assert result["changes"]["fetched"] == "rock, Electronic"
+
+    def test_a_musicbrainz_failure_is_reported_as_a_failure(
+        self, tools, album, lastgenre_count, mb_release, store
+    ):
+        lastgenre_count()
+        mb_release(exc=ConnectionError("timed out"))
+
+        result = tools["preview_genres"](album, source="musicbrainz")
+        assert "502" in result["error"]
+        assert len(store) == 0
 
 
 class TestPreviewGenresRefusals:

@@ -22,8 +22,8 @@ Two consequences worth stating:
   time would refuse every such album. The previewed old value must come from the
   endpoint `apply_change` re-reads.
 * **An override skips the lookup entirely.** An agent that already knows the
-  genre it wants has no reason to make the backend query Last.fm, and no reason
-  to be blocked when lastgenre is unavailable.
+  genre it wants has no reason to make the backend query Last.fm or
+  MusicBrainz, and no reason to be blocked when the source is unavailable.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 TOOL_NAMES = ("preview_genres",)
 
 GenreMode = Literal["replace", "merge"]
+GenreSource = Literal["lastfm", "musicbrainz"]
 
 
 def read_path(album_id: int) -> str:
@@ -51,7 +52,7 @@ def read_path(album_id: int) -> str:
 
 
 def lookup_path(album_id: int) -> str:
-    """The pretend-mode lastgenre lookup (no write)."""
+    """The pretend-mode genre lookup, either source (no write)."""
     return f"/api/album/{album_id}/genre"
 
 
@@ -77,23 +78,38 @@ def build_tools(
     """The genre preview tool bound to `client` and `store`."""
 
     def preview_genres(
-        album_id: int, genre: str = "", mode: GenreMode = "replace"
+        album_id: int,
+        genre: str = "",
+        mode: GenreMode = "replace",
+        source: GenreSource = "lastfm",
     ) -> dict[str, Any]:
         """Show what setting an album's genre would change.
 
-        Omit `genre` to have the backend look one up from Last.fm without
+        Omit `genre` to have the backend look one up from `source` without
         writing it; pass `genre` to set a value of your own — one name or several
         as a comma-separated string (`"Rock, Post-Punk"`), written verbatim. An
-        override does not query Last.fm at all, and `mode` does not apply to it.
+        override does not query either source, and `mode`/`source` do not apply
+        to it.
+
+        `source` picks where a lookup is fetched from:
+
+        * `lastfm` (default) — the `lastgenre` plugin's usual Last.fm lookup.
+        * `musicbrainz` — the album's own MusicBrainz release: genre votes are
+          summed by name across the release and its release group, sorted by
+          vote count (most-voted first), and capped the same way Last.fm's
+          result is. Requires the album to carry an `mb_albumid`.
+
+        The two lists can be compared by previewing each and merged by running
+        one preview in `merge` mode over the other's applied result.
 
         `mode` decides what a looked-up genre is combined with:
 
-        * `replace` (default) — the album's genres become exactly what Last.fm
+        * `replace` (default) — the album's genres become exactly what `source`
           returned.
         * `merge` — the album keeps its current genres and gains the fetched ones
           it does not already carry (case-insensitive, current ones first). Use
-          this when the existing genre came from MusicBrainz or from the files
-          and is worth keeping.
+          this when the existing genre came from the other source or from the
+          files and is worth keeping.
 
         The genre is written to the album and to every one of its tracks.
         Returns the old → new diff plus a single-use `preview_token`; nothing is
@@ -101,8 +117,8 @@ def build_tools(
         album's current genre first and refuses if it changed in the meantime.
         The value it writes is exactly the one shown here.
 
-        A Last.fm lookup that could not be performed is reported as a failure,
-        never as "this album has no genre" — the two are different facts.
+        A lookup that could not be performed is reported as a failure, never as
+        "this album has no genre" — the two are different facts.
         """
         override = _clean(genre)
         if genre and not override:
@@ -121,20 +137,20 @@ def build_tools(
 
         fetched = ""
         if override:
-            new, source = override, "override"
+            new, origin = override, "override"
         else:
-            lookup = client.post(lookup_path(album_id), params={"mode": mode})
+            lookup = client.post(lookup_path(album_id), params={"mode": mode, "source": source})
             # A 502 here is the backend saying the lookup never happened; passing
             # it through as a failure is the whole point of that status.
             if not lookup.ok:
                 return failure(lookup)
             new = lookup.data.get("new_genre") or ""
             fetched = lookup.data.get("fetched_genre") or ""
-            source = "lastgenre"
+            origin = source
             if not new:
                 return {
                     "error": (
-                        f"Last.fm returned no genre for album {album_id} — nothing was "
+                        f"{source} returned no genre for album {album_id} — nothing was "
                         "previewed; pass the genre argument to set one yourself"
                     )
                 }
@@ -158,9 +174,9 @@ def build_tools(
             summary={
                 "album_id": album_id,
                 "genre": {"old": old, "new": new},
-                "source": source,
+                "source": origin,
                 # In merge mode `new` is old+fetched, so without these two the
-                # agent cannot see what Last.fm actually contributed.
+                # agent cannot see what the source actually contributed.
                 **({"mode": mode} if not override else {}),
                 **({"fetched": fetched} if fetched and fetched != new else {}),
             },

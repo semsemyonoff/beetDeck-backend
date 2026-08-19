@@ -47,6 +47,16 @@ class GenrePreviewQuery(BaseModel):
             "not already carry (case-insensitive, order preserved)."
         ),
     )
+    source: Literal["lastfm", "musicbrainz"] = Field(
+        default="lastfm",
+        description=(
+            "Which source to fetch genres from. Defaults to ``lastfm`` so the SPA's "
+            "pre-existing request (which never sends this parameter) keeps working "
+            "unchanged. ``musicbrainz`` sums the vote ``count`` for each genre name "
+            "across the album's own release and its release group, sorted by vote "
+            "count and capped the same way Last.fm's result is."
+        ),
+    )
 
 
 class GenreSaveBody(BaseModel):

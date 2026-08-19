@@ -24,6 +24,11 @@ from beetdeck.schemas import (
 )
 from beetdeck.schemas.artwork import ArtworkImage, ArtworkListQuery, ArtworkListResponse
 from beetdeck.schemas.bpm import TrackBpmComputeResponse
+from beetdeck.schemas.mbsync import (
+    MbsyncConfirmBody,
+    MbsyncConfirmResponse,
+    MbsyncPreviewResponse,
+)
 
 
 def test_album_summary_serializes_expected_keys():
@@ -365,3 +370,81 @@ def test_artwork_list_response_json_schema():
     assert props["mb_albumid"]["type"] == "string"
     assert props["available"]["type"] == "boolean"
     assert "$defs" in schema and "ArtworkImage" in schema["$defs"]
+
+
+# ---------------------------------------------------------------------------
+# Mbsync schemas
+# ---------------------------------------------------------------------------
+
+
+def test_mbsync_preview_response_serializes_expected_keys():
+    resp = MbsyncPreviewResponse(
+        album_id=1,
+        mb_albumid="mbid-1",
+        data_source="MusicBrainz",
+        stash_generation=7,
+        album_fields=[{"field": "label", "old": "", "new": "4AD"}],
+        track_fields=[
+            {
+                "field": "title",
+                "changes": [{"item_id": 101, "track": 3, "old": "Intro", "new": "Introduction"}],
+            }
+        ],
+        unmapped=[{"item_id": 117, "track": 13, "title": "Hidden"}],
+        changed=True,
+    )
+    dumped = resp.model_dump()
+    assert dumped["album_id"] == 1
+    assert dumped["stash_generation"] == 7
+    assert dumped["album_fields"] == [{"field": "label", "old": "", "new": "4AD"}]
+    assert dumped["track_fields"][0]["field"] == "title"
+    assert dumped["track_fields"][0]["changes"][0] == {
+        "item_id": 101,
+        "track": 3,
+        "old": "Intro",
+        "new": "Introduction",
+    }
+    assert dumped["unmapped"] == [{"item_id": 117, "track": 13, "title": "Hidden"}]
+    assert dumped["changed"] is True
+
+
+def test_mbsync_preview_response_defaults_lists_to_empty():
+    resp = MbsyncPreviewResponse(
+        album_id=1,
+        mb_albumid="mbid-1",
+        data_source="MusicBrainz",
+        stash_generation=1,
+        changed=False,
+    )
+    dumped = resp.model_dump()
+    assert dumped["album_fields"] == []
+    assert dumped["track_fields"] == []
+    assert dumped["unmapped"] == []
+
+
+def test_mbsync_confirm_body_all_fields_optional():
+    body = MbsyncConfirmBody()
+    assert body.model_dump() == {"expected_generation": None, "excluded_fields": None}
+
+
+def test_mbsync_confirm_body_accepts_generation_and_exclusions():
+    body = MbsyncConfirmBody(expected_generation=7, excluded_fields=["comments"])
+    assert body.model_dump() == {
+        "expected_generation": 7,
+        "excluded_fields": ["comments"],
+    }
+
+
+def test_mbsync_confirm_body_rejects_unknown_field():
+    with pytest.raises(ValidationError):
+        MbsyncConfirmBody(bogus="nope")
+
+
+def test_mbsync_confirm_response_ok():
+    resp = MbsyncConfirmResponse(status="ok")
+    assert resp.model_dump() == {"status": "ok", "write_failures": None}
+
+
+def test_mbsync_confirm_response_partial():
+    resp = MbsyncConfirmResponse(status="partial", write_failures=[42])
+    assert resp.model_dump() == {"status": "partial", "write_failures": [42]}

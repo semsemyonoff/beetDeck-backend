@@ -219,6 +219,33 @@ class TestNormalizeGenres:
         assert "11" in result.detail[0]
 
 
+class TestNormalizeMbsync:
+    def test_ok_status_is_ok(self):
+        response = ApiResponse(200, {"status": "ok"})
+        assert normalize("mbsync", response).status == "ok"
+
+    def test_partial_status_names_the_failed_items(self):
+        response = ApiResponse(200, {"status": "partial", "write_failures": [3, 7]})
+        result = normalize("mbsync", response)
+        assert result.status == "partial"
+        assert result.detail == ("file write failed for item(s) 3, 7",)
+
+    def test_partial_without_ids_still_reports_partial(self):
+        response = ApiResponse(200, {"status": "partial"})
+        result = normalize("mbsync", response)
+        assert result.status == "partial"
+        assert result.detail
+
+    def test_no_stash_against_the_real_app_is_failed(self, beetdeck_client, db_path):
+        """No preview ever ran for this album: the confirm 400s, not partial."""
+        album_id = insert_album(db_path)
+        result = beetdeck_client.write(
+            "mbsync", "POST", f"/api/album/{album_id}/mbsync/confirm", json={}
+        )
+        assert result.status == "failed"
+        assert "No sync preview found" in result.detail[0]
+
+
 class TestNormalizeLyrics:
     def test_everything_written_is_ok(self):
         response = ApiResponse(

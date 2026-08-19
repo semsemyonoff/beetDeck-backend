@@ -46,6 +46,8 @@ obvious from their name:
   way, and nothing partial reaches the mirror.
 - `beetdeck/artwork_store.py` — the two-root disk layer under the gallery:
   index, image resolution, and the cache sweep. Pure filesystem, no Flask.
+- `beetdeck/mbsync.py` — pure functions behind the MusicBrainz sync: item↔`TrackInfo`
+  mapping, snapshot/diff/restore/drift. No Flask, no beets `Library` writes.
 - `beetdeck/templates/index.html` — SPA shell; injects the hashed JS/CSS by
   reading the Vite manifest at request time.
 - `beetdeck/static/dist/` — SPA build output, gitignored.
@@ -109,10 +111,11 @@ which the deployment provides. Two settings the app depends on:
 
 The file documents its own fields; two things it does not say:
 
-- `identify_tasks` is one dict with four key namespaces: `f"album_{album_id}"`,
+- `identify_tasks` is one dict with five key namespaces: `f"album_{album_id}"`,
   `f"items_{uuid}"` (untagged-group identify), `f"cover_{album_id}"` (fetched
-  cover previews), `f"lyrics_{item_id}"` (fetched lyrics stash). Album tasks are
-  keyed by a **string**, not the raw int.
+  cover previews), `f"lyrics_{item_id}"` (fetched lyrics stash),
+  `f"mbsync_{album_id}"` (mbsync preview stash). Album tasks are keyed by a
+  **string**, not the raw int.
 - `metadata_write_lock` serializes the batch write in `POST /api/items/metadata-batch`
   so only one beets `Library` handle writes at a time — SQLite will not tolerate
   concurrent writers here.
@@ -136,11 +139,60 @@ shared `common.py`). Do not maintain an endpoint table here — read the spec.
 - `POST …/bpm/compute` always recomputes (`force=True`). The plugin swallows
   librosa errors internally and never raises, so failure is detected **by value**
   (pre-clear `item.bpm`, require a non-null value afterwards) → `400`.
-- `POST /api/album/<id>/genre` takes `?mode=replace|merge`. Both run the same
-  lookup; `mode` only decides what the previewed `new_genre` is made of, and
-  `fetched_genre` always reports Last.fm's own answer. A lookup that **could not
-  run** (lastgenre logged an error and produced nothing) is a `502`, never a
-  `200` with an empty genre — see *Absence is not a fact* below.
+- `POST /api/album/<id>/genre` takes `?source=lastfm|musicbrainz&mode=replace|merge`
+  (`source` defaults to `lastfm`, the SPA's pre-existing request stays valid
+  unchanged). Both run the same lookup; `mode` only decides what the previewed
+  `new_genre` is made of, and `fetched_genre` always reports the chosen source's
+  own answer. A lookup that **could not run** (lastgenre logged an error and
+  produced nothing) is a `502`, never a `200` with an empty genre — see
+  *Absence is not a fact* below. The `musicbrainz` branch reads
+  `release["genres"]` + `release["release_group"]["genres"]` off
+  `mb_api.get_release(mbid)` — through the plugin's own `_extract_id` first,
+  because that method interpolates the id straight into the lookup URL's path
+  and `PATCH …/tags` can write `mb_albumid` — and sums/sorts/caps them itself,
+  deliberately
+  duplicating `MusicBrainzPlugin._parse_genres` rather than mutating
+  `lastgenre.config["pretend"]` (process-wide state two background threads can
+  observe) to reach it. `400` when the album has no `mb_albumid` or the release
+  is not found, `500` when the plugin is not loaded, `502` on any other
+  MusicBrainz failure.
+- `POST /api/album/<id>/mbsync` (preview) / `POST /api/album/<id>/mbsync/confirm`
+  (write) re-fetch the album's own MusicBrainz release and diff it against the
+  library, in-process through the beets API — not `beet mbsync`, which gives a
+  text report no diff UI can consume. Both MusicBrainz reads go straight to
+  `metadata_plugins.get_metadata_source("MusicBrainz").album_for_id(mbid)`
+  inside a bare `try/except`, never through `metadata_plugins.album_for_id`:
+  that dispatcher wraps every call in `maybe_handle_plugin_error`, which logs a
+  propagated exception on the **`beets`** logger and returns `None` —
+  indistinguishable from the plugin's own 404 path, which logs on
+  `beets.musicbrainz` and also returns `None`. `None` from the plugin call is
+  `400` ("not in MusicBrainz"); a raised exception is `502` with `str(exc)` in
+  `reasons`. The confirm applies the **stashed** `AlbumInfo` and never looks the
+  release up again — the same `…/genre/confirm` trap the backend avoids
+  elsewhere, since a second lookup can commit a value other than the one on
+  screen. Genre fields are stripped from the `AlbumInfo` before anything else
+  uses it, so a deploy config with `musicbrainz.genres: yes` cannot leak a
+  genre through this path; the album-level copy after `apply_metadata` is
+  narrowed to fields that **changed and were not excluded**, not the full
+  `Album.item_keys` (copying all of them would overwrite album-row values that
+  never appeared in the diff), and it commits with `album.store(inherit=False)`
+  — every field in that copy is in `Album.item_keys` by construction, so the
+  default `inherit=True` would push each one onto **every** item's DB row,
+  including the unmapped tracks this route never rewrites the files of. The
+  per-item snapshot and diff read `item.keys(with_album=False)`: beets' default
+  unions the album's own fields (and `Item.__getitem__` falls back to the album),
+  so `artpath` would be snapshotted onto every track and a cover applied between
+  preview and confirm would read as a change on all of them — rewriting every
+  file in the album. They also drop `mbsync.BOOKKEEPING_FIELDS` (`mtime`):
+  `Item.__setitem__` zeroes `mtime` whenever a field in `MediaFile.fields()`
+  changes, so a release that merely corrects one track title would otherwise
+  report `mtime: <timestamp> → 0` as a field of its own — offered to the user
+  with a checkbox, and eligible for `excluded_fields`, where restoring it would
+  write a stale mtime back over a file the same confirm just rewrote.
+  `excluded_fields` is validated against the stashed diff and
+  `400`s on anything outside it: `restore_fields` writes the preview-time value
+  back into the DB *and* the audio file, and the drift check only covers the
+  fields the preview reported changed.
 - `POST …/cover/fetch` retries with `fetchart`'s `minwidth`/`enforce_ratio`
   lifted when the first pass finds nothing, and marks such a hit `relaxed: true`
   with a `warning`. Both outcomes carry `current_width`/`current_height`, and
@@ -376,6 +428,7 @@ every minted token:
 |---|---|---|
 | `identify`, `items_identify` | enforced by the backend | `match_generation` precondition, compared inside `state.identify_lock` |
 | `cover`, `lyrics` | enforced by the backend | `stash_generation` precondition on the fetch slot, same lock; all-or-nothing across a lyrics selection |
+| `mbsync` | enforced by the backend | `stash_generation` precondition, minted **before** the preview snapshots (a concurrent writer always has a stash to drop); plain `BACKEND_PRECONDITION` — `PreviewStore.mint` rejects a backend-precondition preview that also carries `old_values`, so a third `Freshness` for this one kind was not worth touching four modules for |
 | `tags`, `genres` | best-effort, TOCTOU-racy | old values re-read immediately before the write; refuses on drift |
 
 Only the tag kinds are left without a backend check, and that is a property of the
@@ -455,6 +508,57 @@ value exists only in the preview, and `confirm` — which re-looks-up — cannot
 express it at all. The SPA moved to `…/genre/save` for the same reason, so
 `…/genre/confirm` now has no caller left in this repo and is kept only for
 compatibility.
+
+### mbsync: mint-before-snapshot, drift as defence-in-depth, and the rescan/identify lock order
+
+The mbsync stash (`identify_tasks[f"mbsync_{album_id}"]`) follows the cover/lyrics
+shape — `stash_generation` minted under `state.identify_lock`, checked again
+under the same lock at confirm time, held across check-and-write by
+`state.album_write_lock(album_id)` — with one addition: the preview mints the
+stash slot **before** it snapshots the items and the album row, not after. That
+ordering closes the pre-snapshot race by construction: a competing write that
+lands after the mint always has a stash entry to invalidate via
+`_drop_mbsync_stash`, so by the time the preview snapshots, every earlier writer
+is already accounted for. The second half of that ordering is load-bearing too —
+the preview fills the slot **only if it is still the dict it minted** (identity,
+not equality) and answers `409` otherwise. Re-assigning unconditionally would
+resurrect a slot the competing write just dropped, under the same generation, so
+the confirm's precondition would pass and revert exactly the write the drop
+existed to protect. For the same reason a preview that raises after minting pops
+its own half-filled slot: a stash carrying a generation and no snapshot makes a
+bodyless confirm `500` on the missing key instead of `400`. The confirm's
+**drift check** — every field the
+preview reported changed must still hold its `old` value, on the items and on
+the album row, checked before `apply_metadata` touches anything — is therefore
+declared **defence-in-depth**, not a structural necessity: it exists to catch a
+*future* route that writes one of these fields and forgets to call
+`_drop_mbsync_stash`, not to close a gap the generation leaves open.
+
+`_drop_mbsync_stash(album_id)` sits next to `_drop_cover_stash`/`_drop_lyrics_stash`
+in `beetdeck/utils.py`, but is **album-keyed** where those two are keyed by their
+own target — every route that writes a field mbsync could have diffed calls it:
+both single-item tag/metadata writes, `metadata-batch` (once per album id in the
+request — the batch spans albums), both identify confirms (the untagged-items
+one re-parents items via `lib.add_album`, so it drops the stash for every
+`original_album_ids` entry **and** the new album id), and both genre writes
+(genres feed the album-level `Album.item_keys` copy). A starting rescan clears
+**every** `mbsync_*` entry via `_drop_all_mbsync_stashes()`, called from
+`scan.py` **after** `rescan_lock` is released and before the controller thread
+spawns — nesting `identify_lock` inside `rescan_lock` there would invert the
+order the confirm uses (`album_write_lock` → `identify_lock`, `rescan_lock` read
+standalone beforehand). Both the preview and the confirm read `rescan_phase`
+under `rescan_lock` first and answer `409` while a scan is `importing`/`updating`,
+before either ever takes `identify_lock`.
+
+The residual check→write window — a write can still land between the drift
+check and `apply_item_changes`, because only `cover.py`/`lyrics.py`/`artwork.py`
+take `album_write_lock` — is not special to mbsync and is not closeable by
+widening that lock here either: `metadata-batch` and the genre writes span
+**multiple albums**, and a handler is never allowed to hold two album locks at
+once (the `PATCH …/tags` exception noted above is keyed by item precisely
+because it has no single album to lock) — that is what keeps lock ordering a
+non-hazard everywhere else in this file, and mbsync inherits the same tradeoff
+the cover/lyrics confirms already live with rather than getting a special case.
 
 ### What `BEETDECK_MCP_READONLY` does and does not disable
 

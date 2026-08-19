@@ -105,6 +105,16 @@ def mint_lyrics(store, *, album_id=1, item_ids=(3,), generation=12):
     )
 
 
+def mint_mbsync(store, *, album_id=1, generation=14):
+    return store.mint(
+        "mbsync",
+        target=f"album {album_id}",
+        method="POST",
+        endpoint=f"/api/album/{album_id}/mbsync/confirm",
+        expected_generation=generation,
+    )
+
+
 def mint_items_identify(store, *, task_id="t1", generation=13):
     return store.mint(
         "items_identify",
@@ -136,6 +146,7 @@ MINTERS = {
     "genres": mint_genres,
     "cover": mint_cover,
     "lyrics": mint_lyrics,
+    "mbsync": mint_mbsync,
 }
 
 
@@ -166,12 +177,15 @@ class TestFreshnessTable:
         # backend now stamps every fetch stash with a generation.
         assert freshness_for(kind) == BACKEND_PRECONDITION
 
+    def test_mbsync_is_backend_enforced_too(self):
+        assert freshness_for("mbsync") == BACKEND_PRECONDITION
+
     @pytest.mark.parametrize("kind", list(WRITE_KINDS))
     def test_every_kind_gets_the_same_lifetime(self, store, clock, kind):
         preview = MINTERS[kind](store)
         assert preview.expires_at == clock.now + DEFAULT_TTL
 
-    @pytest.mark.parametrize("kind", ["cover", "lyrics"])
+    @pytest.mark.parametrize("kind", ["cover", "lyrics", "mbsync"])
     def test_a_fetch_kind_must_carry_its_stash_generation(self, store, kind):
         with pytest.raises(ValueError, match="must carry expected_generation"):
             store.mint(kind, target="album 1", method="POST", endpoint="/x")
@@ -181,6 +195,7 @@ class TestFreshnessTable:
             (mint_identify(store), "identification", "identify again"),
             (mint_cover(store), "the fetched cover art", "re-run the preview"),
             (mint_lyrics(store), "the fetched lyrics", "re-run the preview"),
+            (mint_mbsync(store), "the MusicBrainz sync diff", "re-run the preview"),
         ):
             message = str(precondition_failed(preview))
             assert message.startswith(subject)

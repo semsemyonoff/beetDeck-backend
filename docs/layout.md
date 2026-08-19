@@ -19,22 +19,28 @@ beetDeck/
 │   │                       #   normalize_images(), RateGate on the JSON lookup only
 │   ├── artwork_store.py    # Two-root disk layer (storage → cache): index.json read/
 │   │                       #   replace, find_image/store_image, TTL+LRU sweep_cache()
+│   ├── mbsync.py           # Pure MusicBrainz-sync helpers: item↔TrackInfo mapping,
+│   │                       #   snapshot_items/snapshot_album, diff_against,
+│   │                       #   restore_fields, check_drift. No Flask, no writes.
 │   ├── schemas/            # spectree/pydantic request & response models, one module per blueprint
 │   │   ├── __init__.py     # re-exports shared models
 │   │   ├── common.py       # ErrorResponse + reusable nested types (AlbumSummary, ArtistGroup)
 │   │   ├── albums.py  artwork.py  bpm.py  cover.py  genres.py  identify.py
-│   │   └── items.py  library.py  lyrics.py  meta.py  scan.py
+│   │   └── items.py  library.py  lyrics.py  mbsync.py  meta.py  scan.py
 │   ├── routes/             # One Flask blueprint per feature
 │   │   ├── library.py      # GET /, /api/library, /api/search, /api/artist
 │   │   ├── albums.py       # album detail + track tags
 │   │   ├── cover.py        # cover art CRUD (fetch / preview / confirm / upload)
 │   │   ├── artwork.py      # Cover Art Archive gallery: listing, image proxy, apply
-│   │   ├── genres.py       # genre fetch / confirm / save
+│   │   ├── genres.py       # genre fetch / confirm / save (Last.fm + MusicBrainz sources)
 │   │   ├── lyrics.py       # lyrics CRUD, single + bulk
 │   │   ├── bpm.py          # per-track BPM compute (autobpm plugin)
 │   │   ├── identify.py     # album identify / status / apply / confirm
 │   │   ├── items.py        # untagged items: field catalog, per-track tag write,
 │   │   │                   #   metadata batch, group identify
+│   │   ├── mbsync.py       # MusicBrainz re-sync of an album's own release:
+│   │   │                   #   preview (diff, no writes) / confirm (applies the
+│   │   │                   #   stashed diff, never re-looks-up)
 │   │   ├── meta.py         # GET /api/version (beetDeck + beets versions)
 │   │   └── scan.py         # rescan start / status / log tail / dismiss
 │   ├── static/
@@ -53,12 +59,15 @@ beetDeck/
 │   ├── resources.py        # MCP resources: live OpenAPI spec + workflow guide
 │   └── tools/              # one module per tool group; apply.py is the only writer
 │       ├── read.py  identify.py  musicbrainz.py  tags.py
-│       └── media.py  genres.py  library.py  raw.py  apply.py
+│       └── media.py  genres.py  library.py  raw.py  apply.py  mbsync.py
+│                                          # mbsync.py: preview_mbsync tool; apply
+│                                          #   goes through apply.py like every
+│                                          #   other write kind
 ├── tests/                  # pytest suite; conftest.py builds the app on a temp SQLite DB
 │   ├── conftest.py  fixtures/
 │   ├── test_albums.py  test_artwork.py  test_bpm.py  test_cover.py
 │   ├── test_genres.py  test_identify.py  test_items.py  test_library.py
-│   ├── test_lyrics.py  test_meta.py  test_scan.py
+│   ├── test_lyrics.py  test_mbsync.py  test_mbsync_core.py  test_meta.py  test_scan.py
 │   │                                          # route suites, mirroring beetdeck/routes/
 │   ├── test_item_fields.py  test_scan_progress.py  test_utils.py
 │   ├── test_artwork_store.py  test_coverart.py

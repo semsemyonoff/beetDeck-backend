@@ -736,6 +736,37 @@ def _drop_lyrics_stash(item_id):
         state.identify_tasks.pop(f"lyrics_{item_id}", None)
 
 
+def _drop_mbsync_stash(album_id):
+    """Discard a stashed MusicBrainz sync preview because its album was written directly.
+
+    Same contract as ``_drop_cover_stash``/``_drop_lyrics_stash`` — a stash left
+    behind keeps the generation it was minted with, so a confirm holding that
+    generation passes its precondition and reverts the write that overruled it.
+    Album-keyed rather than item-keyed: item-scoped routes resolve
+    ``item.album_id`` first and skip a singleton item with no album.
+
+    Caller must not hold ``state.identify_lock``.
+    """
+    if album_id is None:
+        return
+    with state.identify_lock:
+        state.identify_tasks.pop(f"mbsync_{album_id}", None)
+
+
+def _drop_all_mbsync_stashes():
+    """Discard every stashed MusicBrainz sync preview, e.g. when a rescan starts.
+
+    A starting rescan can rewrite any field an mbsync diff might carry across
+    the whole library, not just one album, so every stash is stale at once.
+
+    Caller must not hold ``state.identify_lock``.
+    """
+    with state.identify_lock:
+        stale_keys = [k for k in state.identify_tasks if k.startswith("mbsync_")]
+        for k in stale_keys:
+            state.identify_tasks.pop(k, None)
+
+
 def _consume_matches(task):
     """Drop a task's candidate list and bump its ``match_generation``.
 
