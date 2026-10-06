@@ -23,7 +23,7 @@ repo is source for the backend only.
 
 - **Flask + gunicorn** (1 worker, 4 threads). A single worker is required because
   in-memory state (identification tasks, cover previews, scan progress) is shared
-  across request threads — see *Architecture constraints* in `CLAUDE.md`. Routes
+  across request threads — see *Architecture constraints* in `AGENTS.md`. Routes
   are organized as Flask Blueprints under `beetdeck/routes/`.
 - **beets integration**: uses the beets Python API directly (not the CLI) for
   identification, genre lookup, cover art, lyrics, and the MusicBrainz re-sync
@@ -38,7 +38,7 @@ repo is source for the backend only.
 
 The app reads `BEETS_LIBRARY_DB`, `BEETS_IMPORT_DIR`, `BEETS_LIBRARY_ROOT`, and
 `BEETS_COVER_CACHE_DIR` from the environment; the `beet` CLI reads `BEETSDIR`.
-Defaults are tabulated in `CLAUDE.md` → *Configuration*.
+Defaults are tabulated in `AGENTS.md` → *Configuration*.
 
 ## Local development
 
@@ -90,7 +90,7 @@ computation, the album ignore flag and a `GET`-only `/api/` escape hatch. It is 
 install and image, and it talks to this backend over HTTP. Every mutating
 capability is two-phase: a `preview_*` tool returns a diff plus a single-use token,
 and `apply_change` is the only tool that writes. Design notes and the per-kind
-freshness guarantees are in `CLAUDE.md` → *MCP server*.
+freshness guarantees are in `AGENTS.md` → *MCP server*.
 
 | env | default | notes |
 |---|---|---|
@@ -123,7 +123,7 @@ There is no reloader — restart the process after editing `beetdeck_mcp/`.
 
 ## Further documentation
 
-- `CLAUDE.md` — notes for AI agents: invariants, contracts the spec cannot express,
+- `AGENTS.md` — notes for AI agents: invariants, contracts the spec cannot express,
   the reasoning behind the threading and app-factory design, and the MCP server's
   guarantees.
 - `docs/layout.md` — annotated repository tree.

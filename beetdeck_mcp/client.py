@@ -166,7 +166,7 @@ def _normalize_lyrics(response: ApiResponse, ctx: _Context) -> ApplyResult:
 
     Ids with no stashed fetch (or belonging to another album) are skipped without
     any marker, so `written_item_ids` shorter than the request is itself a
-    partial result — see `CLAUDE.md`.
+    partial result — see `AGENTS.md`.
     """
     data = response.data
     written = _as_strings(data.get("written_item_ids"))
