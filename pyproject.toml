@@ -22,7 +22,7 @@ dependencies = [
     # though beets is published on PyPI: the shared Renovate preset
     # (beetDeck/renovate-config) tracks beets via a customManager regex on this
     # exact tarball URL, so changing the pin's shape would silence it.
-    "beets @ https://github.com/beetbox/beets/archive/refs/tags/v2.13.1.tar.gz",
+    "beets @ https://github.com/beetbox/beets/archive/refs/tags/v2.14.1.tar.gz",
     "librosa",
     "resampy",
     # MCP server (beetdeck_mcp): runs as a separate process from this same

@@ -121,7 +121,7 @@ def mock_beets(mocker, match, *, item_found=True, add_album=None):
     proposal.candidates = [match] if match else []
     tag_album = mocker.patch(
         "beets.autotag.tag_album",
-        return_value=("Real Artist", "Real Album", proposal),
+        return_value=proposal,
     )
     return album, tag_album
 
@@ -141,7 +141,7 @@ def blocking_beets(mocker, gate):
 
     def wait(*_args, **_kwargs):
         gate.wait(5.0)
-        return ("Real Artist", "Real Album", proposal)
+        return proposal
 
     mocker.patch("beets.autotag.tag_album", side_effect=wait)
 

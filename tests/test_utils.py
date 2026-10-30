@@ -198,6 +198,39 @@ def test_resolve_path_bytes_relative_with_library_root(tmp_path):
     assert result == "/data/music/artist/album/track.mp3"
 
 
+@pytest.mark.parametrize("field", ["path", "artpath"])
+def test_beets_native_blob_paths_resolve_against_library_root(tmp_path, field):
+    """2.14 writes native bytes, not memoryview wrappers; SQLite still returns BLOBs."""
+    from beets import context
+    from beets.library import Album, Item
+
+    root = str(tmp_path / "Музыка")
+    relative = "Группа/Альбом/01.wav" if field == "path" else "Группа/Альбом/cover.jpg"
+    absolute = f"{root}/{relative}"
+    model = Item if field == "path" else Album
+    path_type = model._fields[field]
+    with context.music_dir(root.encode()):
+        sql_value = path_type.to_sql(absolute.encode())
+        assert isinstance(sql_value, bytes)
+        assert sql_value == relative.encode()
+        with sqlite3.connect(":memory:") as conn:
+            value, storage_type = conn.execute(
+                "SELECT ?, typeof(?)", (sql_value, sql_value)
+            ).fetchone()
+        assert storage_type == "blob"
+        assert path_type.from_sql(value) == absolute.encode()
+
+    app = create_app(
+        test_config={
+            "LIBRARY_DB": str(tmp_path / "library.db"),
+            "LIBRARY_ROOT": root,
+            "TESTING": True,
+        }
+    )
+    with app.app_context():
+        assert _resolve_path(value) == absolute
+
+
 # ---------------------------------------------------------------------------
 # _find_cover
 # ---------------------------------------------------------------------------

@@ -109,7 +109,7 @@ def mock_beets(mocker, match, *, album_found=True):
     proposal.candidates = [match] if match else []
     tag_album = mocker.patch(
         "beets.autotag.tag_album",
-        return_value=("Real Artist", "Real Album", proposal),
+        return_value=proposal,
     )
     return mock_album, tag_album
 

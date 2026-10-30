@@ -4,6 +4,130 @@ Per-release findings from bumping the beets pin in `pyproject.toml`. Newest firs
 Add an entry when you bump the version; the current pin itself lives in
 `pyproject.toml`, not here.
 
+## 2.14.1
+
+Compatibility-first upgrade from 2.13.1. The exact GitHub release-tarball URL
+shape is retained for Renovate. No new UI, plugin/config changes, or adoption of
+the new duplicate `upgrade` action: `import.duplicate_action: remove` remains the
+deployment contract.
+
+### Source comparison and required adaptation
+
+Compared the extracted **v2.13.1 and v2.14.1 release sources**, not only release
+notes: [tag-to-tag comparison](https://github.com/beetbox/beets/compare/v2.13.1...v2.14.1).
+Paths below refer to those tagged trees.
+
+- **Identification needs an API cutover.** In `beets/autotag/match.py`,
+  `tag_album(items, ...) -> (artist, album, Proposal)` becomes
+  `tag_album(Source, ...) -> Proposal`. Both album identify and untagged-item
+  identify now build `autotag.Source.from_items(items)` and consume the returned
+  proposal directly. `Source` retains the original `Item` objects, so candidate
+  mappings still refer to the items subsequently confirmed. Mock fixtures were
+  migrated and real autotag contract regressions added; response/stash/confirm
+  contracts are unchanged.
+- **Lyrics needs coverage, not a route rewrite.** `beets/util/lyrics.py` now accepts
+  two- and three-digit fractional LRC timestamps and pads fractions when deriving
+  SYLT milliseconds. `Lyrics.from_item` coalesces null text to `""` and preserves
+  the instrumental flag. In `beetsplug/lyrics.py`, LRCLib discards empty,
+  non-instrumental results and can fall back from null plain text to synced text.
+  The `find_lyrics` entrypoint and consumed result fields are unchanged. Added
+  real-`Lyrics` regressions for track/album fetch and confirm with millisecond LRC,
+  null text, and instrumentals; existing found/instrumental semantics are retained.
+- **MusicBrainz sync keeps its existing API contract.** `beetsplug/musicbrainz.py`
+  and `beets/library/fields.py` are byte-identical. Metadata-source lookup and
+  direct `album_for_id` error/not-found semantics are preserved, as are
+  `Distance()`, numeric distance conversion, `AlbumMatch.mapping`, and
+  `AlbumMatch.apply_metadata`. The changed standalone `distance(...)` signature is
+  not used by this app; upstream mbsync changes are typing/CLI-default changes.
+- **Other consumed plugins remain compatible.** `fetchart.art_for_album` and
+  `Candidate` keep their contracts (there is an internal legacy CAA thumbnail-name
+  fallback); `lastgenre._process` keeps its contract despite a genre-stage
+  refactor; `autobpm.calculate_bpm` has only an iterable annotation change.
+
+### Import/update output: source reviewed; runtime proof is separate
+
+`beets/logging.py` changes annotations, not `LegacyFormatter` prefixes.
+`plugins.send` still logs `Sending event: {}`. `ImportTask.handle_created` still
+emits `import_task_created`, and `importer/stages.py::import_asis` still logs the
+bare `displayable_path(task.paths)` under the production `-A` command. The
+existing progress marker and best-effort current album path therefore have
+unchanged source sites.
+
+The parser's duplicate/replacement/summary/warning literals are retained in
+`importer/{tasks,stages,session}.py`: `Replacing item`, `removing … old duplicate
+albums`, `deleting duplicate`, `Skipped … paths.`, `No files imported from`, and
+`Resuming interrupted import`. The new `DuplicateAction.UPGRADE` and interactive
+directory-rescan branches do not change the configured `REMOVE`/asis path.
+`ui/commands/update.py` refactors its Python entrypoint but retains the CLI
+`update -M`, mtime-skip/read-error lines, and indented `  deleted` output.
+No parser rules or scan-controller command flags needed changing.
+
+`BEETS_VERSION` and the installed-version tripwire now target 2.14.1. Fixed sample
+tests, including the historical 2.13.1 session, are **not** evidence that a 2.14.1
+subprocess actually emitted those lines.
+
+### Database/path comparison and first-open window
+
+There are **no new migrations**: `library/migrations.py`, `dbcore/pathutils.py`,
+and the `Library._migrations` inventory are unchanged (nine migration classes,
+eleven model-specific records). A fully migrated 2.13.1 DB has no new data
+migration to run on this upgrade.
+
+`dbcore/types.py::BasePathType.to_sql` now returns normalized `bytes` directly
+instead of wrapping them in `memoryview`; SQLite still receives a BLOB.
+`from_sql` still accepts legacy memoryviews and expands relative paths, while
+`Item.path` remains bytes. `PathQuery` likewise binds bytes directly. No
+`items.path`/`albums.artpath` schema or root-resolution change is required in
+`utils.py` or the scan preflight. Added regressions check both native model path
+types and Unicode BLOB normalization/snapshots, including the sibling-root guard.
+The new optional query `limit` and `Results` sequence behavior do not require
+changes to existing callers.
+
+The existing first-open race is **not fixed upstream**: `Database.__init__` still
+runs `_migrate`; `Migration.migrate_model` checks cached completion state before
+data changes and a plain `INSERT` into the migration table's composite primary
+key. `_init_beets` still constructs each `Library` outside its plugin-init lock,
+which would not serialize a CLI subprocess anyway. No speculative locking fix
+is included. For a fresh or incompletely migrated DB, retain the single-process,
+pre-traffic migration step documented under 2.13.0. Existing fully migrated
+2.13.1 databases do not gain another first-migration window or new backup files
+from this release's inventory.
+
+### Verification evidence
+
+The independent stable-tree checker completed verification with **Python 3.14.6,
+pytest 9.1.1, and beets 2.14.1** in a temporary isolated environment:
+
+- Full backend suite: **1723 passed in 140.92s**, exit 0.
+- Final `ruff check --no-cache`: **all checks passed**.
+- Independent review: **approved**, with no residual findings.
+
+Actual CLI smoke used throwaway `HOME`, `BEETSDIR`, config, statefile, database,
+library, and synthetic WAV audio. It verified:
+
+1. `beet -v import -A -C -I` emitted one album progress increment and the Unicode
+   current-item path. Same-path re-import produced replacement output without
+   extra DB rows; repeated incremental `-i` produced a skipped-path summary
+   without false increments. Captured subprocess bytes passed through
+   `parse_beets_line` and the real timestamp pump/tail consumer.
+2. After deleting one temporary audio file, actual `beet -v update -M` removed
+   the row and produced the parser's `removed` classification without another
+   album increment. Duplicate re-import retained the configured `remove` policy
+   and replaced the old temporary file in one pass.
+3. SQLite paths remained relative BLOBs; native paths, exact-file/directory
+   `PathQuery`, Unicode snapshots, and preflight idempotence passed. A DB created
+   with actual 2.13.1 source was opened twice by 2.14.1: all eleven migration
+   records and item/flex data stayed unchanged, with no new migration backups.
+4. Real lyrics smoke verified null text becoming empty unsynced lyrics,
+   centisecond/millisecond LRC `full_text` DB round-trips with exact SYLT
+   timestamps, and instrumental boolean round-trips with the real `LyricsPlugin`
+   registered. LRCLib synced-only fallback, null-result rejection, and
+   instrumental acceptance passed alongside the route regressions.
+
+No network-dependent lookup, live-library smoke, deployment, or formatting run
+was performed. The shared installed environment was not modified; these results
+do not claim a production deployment has occurred.
+
 ## 2.13.1
 
 Packaging only upstream — the sdist was missing its bundled man pages. Nothing

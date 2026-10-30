@@ -98,8 +98,8 @@ def _run_identify(
         )
 
         try:
-            artist, album_name, proposal = autotag.tag_album(
-                items,
+            proposal = autotag.tag_album(
+                autotag.Source.from_items(items),
                 search_artist=search_artist or None,
                 search_name=search_album or None,
                 search_ids=search_ids or [],

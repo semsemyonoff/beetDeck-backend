@@ -31,7 +31,7 @@ class TestStartIdentify:
         mocker.patch("beetdeck.routes.identify._init_beets", return_value=mock_lib)
         mocker.patch(
             "beets.autotag.tag_album",
-            return_value=("Artist", "Album", mock_proposal),
+            return_value=mock_proposal,
         )
 
         resp = client.post("/api/album/1/identify", json={})
@@ -496,7 +496,7 @@ class TestIdentifyBehaviorUnchanged:
         mocker.patch("beetdeck.routes.identify._init_beets", return_value=mock_lib)
         mocker.patch(
             "beets.autotag.tag_album",
-            return_value=("Artist", "Album", mock_proposal),
+            return_value=mock_proposal,
         )
         resp = client.post("/api/album/1/identify", json={})
         assert resp.status_code == 200
@@ -575,7 +575,7 @@ def _run_identify(client, mocker, match, album_id=1):
     mock_proposal.candidates = [match]
     mocker.patch(
         "beets.autotag.tag_album",
-        return_value=("Artist", "Album", mock_proposal),
+        return_value=mock_proposal,
     )
 
     assert client.post(f"/api/album/{album_id}/identify", json={}).status_code == 200
@@ -745,3 +745,29 @@ class TestConfirmPrecondition:
         model = spec["components"]["schemas"][ref.rsplit("/", 1)[-1]]
         assert "match_generation" in model["properties"]
         assert "matches_available" in model["properties"]
+
+
+def test_identify_worker_consumes_real_autotag_proposal(mocker):
+    """Keep the Source input and Proposal output exercised, not mocked away."""
+    from beets.library import Item
+
+    from beetdeck.routes.identify import _run_identify
+
+    item = Item(id=1, artist="Artist", album="Album", title="Track")
+    album = mocker.MagicMock()
+    album.albumartist = "Artist"
+    album.album = "Album"
+    album.items.return_value = [item]
+    lib = mocker.MagicMock()
+    lib.get_album.return_value = album
+    mocker.patch("beetdeck.routes.identify._init_beets", return_value=lib)
+    candidates = mocker.patch("beets.metadata_plugins.candidates", return_value=[])
+    state.identify_tasks["album_1"] = {"status": "running"}
+
+    _run_identify("album_1", 1, "Search Artist", "Search Album", None, "unused.db", None)
+
+    task = state.identify_tasks["album_1"]
+    assert task["status"] == "done", task.get("error")
+    assert task["candidates"] == []
+    assert task["_lib"] is lib
+    candidates.assert_called_once_with([item], "Search Artist", "Search Album", False)

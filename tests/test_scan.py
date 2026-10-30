@@ -293,6 +293,33 @@ class TestNormalizeAbsolutePaths:
         finally:
             conn.close()
 
+    def test_unicode_blob_paths_round_trip_without_matching_sibling_root(self, db_path):
+        root = "/music/Музыка"
+        album_id = insert_album(db_path, artpath=f"{root}/Группа/Альбом/cover.jpg".encode())
+        iid = insert_item(db_path, album_id, path=f"{root}/Группа/Альбом/01.wav".encode())
+        sibling_path = f"{root}-other/01.wav".encode()
+        sibling_id = insert_item(db_path, album_id, path=sibling_path)
+
+        assert _normalize_absolute_paths(db_path, root) == 2
+        assert _normalize_absolute_paths(db_path, root) == 0
+        with sqlite3.connect(db_path) as conn:
+            path, storage_type = conn.execute(
+                "SELECT path, typeof(path) FROM items WHERE id = ?", (iid,)
+            ).fetchone()
+            artpath, art_type = conn.execute(
+                "SELECT artpath, typeof(artpath) FROM albums WHERE id = ?", (album_id,)
+            ).fetchone()
+            assert (path, storage_type) == ("Группа/Альбом/01.wav".encode(), "blob")
+            assert (artpath, art_type) == ("Группа/Альбом/cover.jpg".encode(), "blob")
+            assert (
+                conn.execute("SELECT path FROM items WHERE id = ?", (sibling_id,)).fetchone()[0]
+                == sibling_path
+            )
+
+        snapshot = _take_snapshot_db(db_path, root)
+        assert snapshot[iid][3] == f"{root}/Группа/Альбом/01.wav"
+        assert snapshot[sibling_id][3] == sibling_path.decode()
+
     def test_leaves_already_relative_paths_alone(self, db_path):
         album_id = insert_album(db_path)
         iid = insert_item(db_path, album_id, path=b"already/relative.mp3")

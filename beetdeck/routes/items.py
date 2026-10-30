@@ -11,10 +11,9 @@ Design decisions:
 - Item reassignment: items may already belong to another album (e.g. a
   catch-all "Unknown" album). After confirm, the old album may become empty;
   we do NOT auto-delete it — that is the user's responsibility.
-- Autotag input: autotag.tag_album() receives Item objects loaded via
-  lib.get_item(id). The resulting AlbumMatch.mapping keys are those same items.
-  No temporary album is created for the autotag step; it operates on items
-  directly.
+- Autotag input: autotag.tag_album() receives a Source built from Item objects
+  loaded via lib.get_item(id). The resulting AlbumMatch.mapping keys are those
+  same items. No temporary album is created for the autotag step.
 
 Endpoints:
     GET    /api/items/untagged                          — list items with NULL/empty albumartist
@@ -232,8 +231,8 @@ def _run_items_identify(task_key, item_ids, search_artist, search_album, library
             return
 
         try:
-            _artist, _album_name, proposal = autotag.tag_album(
-                items,
+            proposal = autotag.tag_album(
+                autotag.Source.from_items(items),
                 search_artist=search_artist or None,
                 search_name=search_album or None,
                 search_ids=[],
