@@ -113,6 +113,22 @@ class TestUniformErrorBody:
         assert all(entry["type"] for entry in detail)
 
 
+class TestHookCallingConvention:
+    """The hook is called by spectree, so only the installed spectree version
+    exercises it through a request. These pin both conventions directly, so a
+    suite that resolved one major cannot hide a break under the other."""
+
+    def test_accepts_the_spectree_2_call(self):
+        from beetdeck.api import _render_validation_error
+
+        _render_validation_error(None, None, None, None)
+
+    def test_accepts_the_spectree_3_call_with_a_model_adapter(self):
+        from beetdeck.api import _render_validation_error
+
+        _render_validation_error(None, None, None, None, object())
+
+
 class TestErrorContractInSpec:
     def test_validation_error_model_documents_422(self, client):
         """The 422 response of validated endpoints references the shared

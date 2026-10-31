@@ -52,8 +52,13 @@ def _render_validation_error(
     resp: Any,
     req_validation_error: ValidationError | None,
     instance: Any,
+    model_adapter: Any = None,
 ) -> None:
     """spectree ``before`` hook: rewrite the 422 body into the uniform shape.
+
+    spectree 3 passes ``model_adapter`` as a fifth positional argument, 2.x does
+    not; the default keeps the hook callable by both. A required fifth parameter
+    breaks 2.x, a missing one makes every validated route a 500 under 3.x.
 
     spectree builds the validation-error response as ``jsonify(errors)`` — a bare
     JSON *list* of pydantic error dicts — before invoking this hook. When a
