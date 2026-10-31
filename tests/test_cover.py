@@ -659,10 +659,15 @@ class TestConfirmCoverPrecondition:
         mocker.patch("beetdeck.routes.cover.os.path.isfile", return_value=True)
         order = []
         order_guard = threading.Lock()
+        # The upload must start while the confirm is inside its write. Started
+        # unsynchronized, a busy runner can let the upload finish first — it
+        # drops the stash, and the confirm answers 400 with nothing to confirm.
+        confirm_writing = threading.Event()
 
         def slow_save(album, src_path):
             with order_guard:
                 order.append("enter")
+            confirm_writing.set()
             # Long enough that an unserialized second write would start here.
             time.sleep(0.2)
             with order_guard:
@@ -673,6 +678,8 @@ class TestConfirmCoverPrecondition:
         upload_status = {}
 
         def upload():
+            if not confirm_writing.wait(timeout=5):
+                return
             with app.test_client() as other:
                 resp = other.post(
                     "/api/album/5/cover/upload",
