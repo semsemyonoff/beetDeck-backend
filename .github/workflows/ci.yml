@@ -19,7 +19,7 @@ jobs:
       # complete*, so every later job reuses it and fails in 20 seconds on
       # `import email` from the stdlib. Hence retry-after-clearing rather than a
       # plain retry — the second attempt must not find the wreckage of the first.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         id: python
         continue-on-error: true
         with:
@@ -27,7 +27,7 @@ jobs:
       - name: Clear the half-installed interpreter
         if: steps.python.outcome == 'failure'
         run: rm -rf "${RUNNER_TOOL_CACHE:-/opt/hostedtoolcache}/Python/3.14."*
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: steps.python.outcome == 'failure'
         with:
           python-version: "3.14"
@@ -53,7 +53,7 @@ jobs:
       # Normally a cache hit — `lint` ran first and installed it. The retry is
       # here anyway for the run where the cache was swept in between; see the
       # comment on the same step above.
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         id: python
         continue-on-error: true
         with:
@@ -61,7 +61,7 @@ jobs:
       - name: Clear the half-installed interpreter
         if: steps.python.outcome == 'failure'
         run: rm -rf "${RUNNER_TOOL_CACHE:-/opt/hostedtoolcache}/Python/3.14."*
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: steps.python.outcome == 'failure'
         with:
           python-version: "3.14"
