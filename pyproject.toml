@@ -16,7 +16,10 @@ dependencies = [
     "pylast",
     "beautifulsoup4",
     "Pillow",
-    "spectree",
+    # The before-hook in beetdeck/api.py follows spectree's calling convention,
+    # which changed in 3.0 (a fifth argument); both 2.x and 3.x are verified.
+    # The upper bound makes the next such change a deliberate bump, not a 500.
+    "spectree>=2,<4",
     # beets is pinned to an exact release tarball; bump the tag here to change
     # the version — single source of truth. The URL form is deliberate even
     # though beets is published on PyPI: the shared Renovate preset
