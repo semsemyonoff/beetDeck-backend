@@ -12,7 +12,7 @@ plugin's own 404 path, which logs on ``beets.musicbrainz`` and also returns
 ``None``. Resolving the plugin with ``get_metadata_source`` and calling it in
 a bare ``try/except`` is what lets this route tell "not in MusicBrainz" (a
 ``None`` result) apart from "MusicBrainz could not be reached" (a raised
-exception) — see the backend's ``CLAUDE.md`` and the plan's *Review
+exception) — see the backend's ``AGENTS.md`` and the plan's *Review
 corrections* #20.
 """
 

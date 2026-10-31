@@ -1,8 +1,10 @@
-"""Tests for beetdeck/scan_progress.py — pure beets 2.13.1 log parser.
+"""Tests for beetdeck/scan_progress.py — pure beets 2.14.1 log parser.
 
-Tests use fixed sample strings that reproduce the exact format produced by
-``beet -v import -A -C [-i|-I] /music`` (and ``beet -v update -M``).  They
-are intentionally independent of any I/O or threading.
+Tests use fixed sample strings that reproduce the format produced by
+``beet -v import -A -C [-i|-I] /music`` (and ``beet -v update -M``), with
+marker source sites compared through 2.14.1. They are intentionally independent
+of I/O or threading and do not replace the real CLI smoke described in
+``docs/beets-upgrades.md``.
 """
 
 import pytest
@@ -26,7 +28,7 @@ from beetdeck.scan_progress import (
 
 
 def test_beets_version_pinned():
-    """Tripwire tying the parser to the beets release its samples came from.
+    """Tripwire tying the parser to the beets release reviewed for compatibility.
 
     Compared against the *installed* beets rather than a second literal: the old
     form asserted "2.12.0" == "2.12.0" and so could never fire, which is how two

@@ -734,7 +734,7 @@ class TestItemsIdentify:
         mocker.patch("beetdeck.routes.items._init_beets", return_value=mock_lib)
         mocker.patch(
             "beets.autotag.tag_album",
-            return_value=("Artist", "Album", mock_proposal),
+            return_value=mock_proposal,
         )
 
         resp = client.post("/api/items/identify", json={"item_ids": [1, 2]})
@@ -1671,7 +1671,7 @@ def _run_items_identify(client, mocker, match, item_ids=(1,)):
     mock_proposal.candidates = [match]
     mocker.patch(
         "beets.autotag.tag_album",
-        return_value=("Artist", "Album", mock_proposal),
+        return_value=mock_proposal,
     )
 
     resp = client.post("/api/items/identify", json={"item_ids": list(item_ids)})
@@ -1844,3 +1844,26 @@ class TestItemsMatchGeneration:
         model = spec["components"]["schemas"][ref.rsplit("/", 1)[-1]]
         assert "match_generation" in model["properties"]
         assert "matches_available" in model["properties"]
+
+
+def test_items_identify_worker_consumes_real_autotag_proposal(mocker):
+    """Loose items use the same Source/Proposal contract without a temporary album."""
+    from beets.library import Item
+
+    from beetdeck.routes.items import _run_items_identify
+
+    item = Item(id=1, artist="Artist", album="Album", title="Track")
+    lib = mocker.MagicMock()
+    lib.get_item.return_value = item
+    mocker.patch("beetdeck.routes.items._init_beets", return_value=lib)
+    candidates = mocker.patch("beets.metadata_plugins.candidates", return_value=[])
+    state.identify_tasks["items_contract"] = {"status": "running"}
+
+    _run_items_identify("items_contract", [1], "Search Artist", "Search Album", "unused.db", None)
+
+    task = state.identify_tasks["items_contract"]
+    assert task["status"] == "done", task.get("error")
+    assert task["candidates"] == []
+    assert task["_lib"] is lib
+    candidates.assert_called_once_with([item], "Search Artist", "Search Album", False)
+    lib.add_album.assert_not_called()

@@ -2,6 +2,11 @@
 
 import sqlite3
 
+import pytest
+from beets.library import Item
+from beets.util.lyrics import Lyrics
+from beetsplug.lyrics import LyricsPlugin
+
 from beetdeck import state
 from tests.conftest import insert_album, insert_item  # noqa: F401
 
@@ -1423,3 +1428,60 @@ class TestLyricsBehaviorUnchanged:
         resp = client.post("/api/album/1/lyrics/confirm", json={})
         assert resp.status_code == 400
         assert resp.get_json()["error"] == "No tracks selected"
+
+
+@pytest.mark.parametrize("album_flow", [False, True], ids=["track", "album"])
+@pytest.mark.parametrize(
+    "text, synced, instrumental",
+    [
+        ("[00:01.23]Verse\n[00:02.34]Chorus", True, False),
+        ("[00:01.234]Verse\n[00:02.345]Chorus", True, False),
+        ("[Instrumental]", False, True),
+    ],
+    ids=["centiseconds", "milliseconds", "instrumental"],
+)
+def test_real_lyrics_result_survives_fetch_and_confirm(
+    client, mocker, tmp_path, album_flow, text, synced, instrumental
+):
+    """Exercise real result properties rather than inventing a mock result shape."""
+    plugin = LyricsPlugin()
+    mocker.patch("beets.plugins.find_plugins", return_value=[plugin])
+    item = Item(
+        id=1,
+        album_id=1,
+        artist="Artist",
+        title="Track",
+        path=str(tmp_path / "track.mp3"),
+        lyrics=None,
+    )
+    result = Lyrics(text=text, backend="lrclib", language="EN")
+    mocker.patch.object(plugin, "find_lyrics", return_value=result)
+    lib = mocker.MagicMock()
+    lib.get_item.return_value = item
+    lib.get_album.return_value.items.return_value = [item]
+    mocker.patch("beetdeck.routes.lyrics._init_beets", return_value=lib)
+    store = mocker.patch.object(Item, "store")
+    write = mocker.patch("beetdeck.routes.lyrics._try_write_item", return_value=True)
+
+    base = "/api/album/1/lyrics" if album_flow else "/api/album/1/track/1/lyrics"
+    response = client.post(f"{base}/fetch")
+    assert response.status_code == 200
+    payload = response.get_json()
+    preview = payload["tracks"][0] if album_flow else payload
+    assert preview["found"] is not instrumental
+    assert preview["new_instrumental"] is instrumental
+    assert preview["new_synced"] is synced
+    assert preview["new_lyrics"] == ("" if instrumental else text)
+
+    body = {"expected_generation": payload["stash_generation"]}
+    if album_flow:
+        body["item_ids"] = [item.id]
+    response = client.post(f"{base}/confirm", json=body)
+    assert response.status_code == 200
+    assert item.lyrics == ("" if instrumental else text)
+    assert bool(item.get("lyrics_instrumental")) is instrumental
+    assert Lyrics.from_item(item).synced is synced
+    assert bool(Lyrics.from_item(item).instrumental) is instrumental
+    store.assert_called_once()
+    write.assert_called_once_with(item)
+    assert "lyrics_1" not in state.identify_tasks

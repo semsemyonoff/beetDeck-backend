@@ -1,6 +1,6 @@
 # Repository layout
 
-Reference for `CLAUDE.md` → *Layout*. Regenerate by reading the tree; this file
+Reference for `AGENTS.md` → *Layout*. Regenerate by reading the tree; this file
 is orientation, not a contract.
 
 ```
@@ -48,7 +48,7 @@ beetDeck/
 │   │   └── dist/           # SPA build output (generated, gitignored)
 │   └── templates/
 │       └── index.html      # SPA shell; injects hashed JS/CSS via the Vite manifest
-├── beetdeck_mcp/           # MCP server — a separate process, same install (see CLAUDE.md)
+├── beetdeck_mcp/           # MCP server — a separate process, same install (see AGENTS.md)
 │   ├── __main__.py         # `python -m beetdeck_mcp`; refuses to start on bad config
 │   ├── config.py           # env → validated Config; ConfigError is startup-fatal
 │   ├── server.py           # MCPServer wiring: auth, transport security, /health

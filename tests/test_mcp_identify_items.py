@@ -9,7 +9,7 @@ over:
   an earlier one is dead — and must be refused as *stale*, not as "not found";
 * its confirm has a partial-success contract the album confirm does not have: a
   DB failure rolls back with `500`, a partial *file* write returns `200` with
-  `warnings` (see the app repo's `CLAUDE.md`).
+  `warnings` (see the app repo's `AGENTS.md`).
 
 Only beets is mocked (autotag would hit MusicBrainz); the background thread, the
 generation counter and the confirm precondition are the real ones.
@@ -121,7 +121,7 @@ def mock_beets(mocker, match, *, item_found=True, add_album=None):
     proposal.candidates = [match] if match else []
     tag_album = mocker.patch(
         "beets.autotag.tag_album",
-        return_value=("Real Artist", "Real Album", proposal),
+        return_value=proposal,
     )
     return album, tag_album
 
@@ -141,7 +141,7 @@ def blocking_beets(mocker, gate):
 
     def wait(*_args, **_kwargs):
         gate.wait(5.0)
-        return ("Real Artist", "Real Album", proposal)
+        return proposal
 
     mocker.patch("beets.autotag.tag_album", side_effect=wait)
 
